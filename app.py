@@ -190,6 +190,16 @@ def get_available_modules() -> Dict[str, dict]:
         pass
     
     try:
+        from fundamental_comparison import render_fundamental_comparison
+        modules["🔬 Fundamental Comparison"] = {
+            "func": render_fundamental_comparison,
+            "desc": "Compare fundamental metrics across multiple stocks",
+            "uses_context": False
+        }
+    except ImportError:
+        pass
+    
+    try:
         from screener import render_screener
         modules["🔍 Stock Screener"] = {
             "func": render_screener,
