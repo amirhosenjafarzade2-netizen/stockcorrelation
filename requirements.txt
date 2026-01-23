@@ -8,3 +8,5 @@ pandas_ta
 xlsxwriter
 matplotlib
 seaborn
+requests
+beautifulsoup4>=4.12.0
