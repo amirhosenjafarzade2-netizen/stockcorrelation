@@ -52,80 +52,160 @@ def get_finviz_tickers(sector: str) -> List[str]:
         return []
     
     tickers = []
-    page = 1
-    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
-    max_pages = 50  # Safety limit
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.5',
+        'Connection': 'keep-alive',
+    }
     
-    while page < (max_pages * 20):
-        url = f"https://finviz.com/screener.ashx?v=111&f={sector_map[sector]}&r={page}"
+    for page_num in range(1, 51):  # Max 50 pages
+        start = (page_num - 1) * 20 + 1
+        url = f"https://finviz.com/screener.ashx?v=111&f={sector_map[sector]}&r={start}"
+        
         try:
-            response = requests.get(url, headers=headers, timeout=10)
+            response = requests.get(url, headers=headers, timeout=15)
             response.raise_for_status()
             soup = BeautifulSoup(response.text, 'html.parser')
             
-            # Find ticker table
-            table = soup.find("table", {"class": "table-light"})
-            if not table:
-                # Try alternative table class
-                table = soup.find("table", {"bgcolor": "#d3d3d3"})
+            # Find all ticker links in the screener table
+            found_tickers = False
+            for link in soup.find_all('a', {'class': 'tab-link'}):
+                ticker = link.text.strip()
+                if ticker and len(ticker) <= 5:  # Valid ticker length
+                    tickers.append(ticker)
+                    found_tickers = True
             
-            if not table:
+            # If no tickers found, we've reached the end
+            if not found_tickers:
                 break
             
-            rows = table.find_all("tr")[1:]  # Skip header
-            if not rows:
-                break
-            
-            page_tickers = []
-            for row in rows:
-                cols = row.find_all("td")
-                if len(cols) > 1:
-                    ticker_link = cols[1].find("a")
-                    if ticker_link:
-                        ticker = ticker_link.text.strip()
-                        if ticker:
-                            page_tickers.append(ticker)
-            
-            if not page_tickers:
-                break
-            
-            tickers.extend(page_tickers)
-            page += 20
-            time.sleep(0.5)  # Rate limiting
+            time.sleep(0.3)  # Be nice to the server
             
         except Exception as e:
-            st.warning(f"Error fetching page {page//20 + 1}: {str(e)}")
+            # Silent fail for pagination end
             break
     
-    return list(set(tickers))
+    return list(set(tickers))  # Remove duplicates
 
 @st.cache_data(ttl=3600)
 def get_sp500_tickers() -> List[str]:
-    """Fetch S&P 500 tickers with caching"""
+    """Fetch S&P 500 tickers with multiple fallback methods"""
+    
+    # Method 1: Try Wikipedia with pandas
     try:
         url = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
-        headers = {'User-Agent': 'Mozilla/5.0'}
-        response = requests.get(url, headers=headers, timeout=10)
-        tables = pd.read_html(response.text)
+        tables = pd.read_html(url)
         df = tables[0]
-        return df["Symbol"].str.replace(".", "-", regex=False).tolist()
-    except Exception as e:
-        st.error(f"Failed to load S&P 500: {str(e)}")
-        return []
+        tickers = df["Symbol"].str.replace(".", "-", regex=False).tolist()
+        if len(tickers) > 400:  # Should have ~500
+            return tickers
+    except:
+        pass
+    
+    # Method 2: Try direct Wikipedia scraping
+    try:
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        }
+        response = requests.get(
+            "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies",
+            headers=headers,
+            timeout=15
+        )
+        soup = BeautifulSoup(response.text, 'html.parser')
+        table = soup.find('table', {'id': 'constituents'})
+        if not table:
+            table = soup.find('table', {'class': 'wikitable'})
+        
+        tickers = []
+        for row in table.find_all('tr')[1:]:
+            cells = row.find_all('td')
+            if cells:
+                ticker = cells[0].text.strip().replace('.', '-')
+                if ticker:
+                    tickers.append(ticker)
+        
+        if len(tickers) > 400:
+            return tickers
+    except:
+        pass
+    
+    # Method 3: Use yfinance Ticker for ^GSPC components
+    try:
+        sp500 = yf.Ticker("^GSPC")
+        # This doesn't work reliably, but worth a try
+    except:
+        pass
+    
+    # Fallback: Return major S&P 500 stocks with a warning
+    st.warning("⚠️ Could not fetch full S&P 500 list. Using top 50 stocks as fallback.")
+    return [
+        "AAPL", "MSFT", "GOOGL", "AMZN", "NVDA", "META", "TSLA", "BRK.B", 
+        "UNH", "XOM", "JNJ", "JPM", "V", "PG", "MA", "HD", "CVX", "MRK", 
+        "ABBV", "PEP", "COST", "AVGO", "KO", "WMT", "MCD", "DIS", "ADBE",
+        "CRM", "NFLX", "AMD", "CSCO", "ACN", "TMO", "ORCL", "ABT", "DHR",
+        "CMCSA", "VZ", "TXN", "INTC", "NEE", "PM", "HON", "UPS", "IBM",
+        "QCOM", "INTU", "LOW", "AMGN", "RTX"
+    ]
 
 @st.cache_data(ttl=3600)
 def get_nasdaq100_tickers() -> List[str]:
-    """Fetch NASDAQ 100 tickers with caching"""
+    """Fetch NASDAQ 100 tickers with multiple fallback methods"""
+    
+    # Method 1: Try Wikipedia with pandas
     try:
         url = "https://en.wikipedia.org/wiki/Nasdaq-100"
-        headers = {'User-Agent': 'Mozilla/5.0'}
-        response = requests.get(url, headers=headers, timeout=10)
-        tables = pd.read_html(response.text)
-        df = tables[4]
-        return df["Ticker"].tolist()
-    except Exception as e:
-        st.error(f"Failed to load NASDAQ 100: {str(e)}")
-        return []
+        tables = pd.read_html(url)
+        for table in tables:
+            if 'Ticker' in table.columns:
+                tickers = table['Ticker'].tolist()
+                tickers = [str(t).strip() for t in tickers if isinstance(t, str) and len(str(t)) <= 5]
+                if len(tickers) > 50:
+                    return tickers
+            elif 'Symbol' in table.columns:
+                tickers = table['Symbol'].tolist()
+                tickers = [str(t).strip() for t in tickers if isinstance(t, str) and len(str(t)) <= 5]
+                if len(tickers) > 50:
+                    return tickers
+    except:
+        pass
+    
+    # Method 2: Try direct scraping
+    try:
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        }
+        response = requests.get(url, headers=headers, timeout=15)
+        soup = BeautifulSoup(response.text, 'html.parser')
+        
+        tickers = []
+        for table in soup.find_all('table', {'class': 'wikitable'}):
+            for row in table.find_all('tr')[1:]:
+                cells = row.find_all('td')
+                if len(cells) >= 2:
+                    for cell in cells[:2]:
+                        ticker = cell.text.strip()
+                        if ticker and 1 <= len(ticker) <= 5 and ticker.replace('.', '').isalpha():
+                            tickers.append(ticker)
+                            break
+        
+        if len(tickers) > 50:
+            return list(set(tickers))
+    except:
+        pass
+    
+    # Fallback: Return major NASDAQ 100 stocks
+    st.warning("⚠️ Could not fetch full NASDAQ 100 list. Using top 50 stocks as fallback.")
+    return [
+        "AAPL", "MSFT", "GOOGL", "GOOG", "AMZN", "NVDA", "META", "TSLA", 
+        "AVGO", "COST", "NFLX", "AMD", "PEP", "ADBE", "CSCO", "TMUS", 
+        "CMCSA", "INTC", "TXN", "QCOM", "INTU", "AMGN", "HON", "AMAT", 
+        "SBUX", "ISRG", "BKNG", "GILD", "ADP", "VRTX", "ADI", "REGN",
+        "PANW", "MU", "LRCX", "MDLZ", "MELI", "PYPL", "KLAC", "SNPS",
+        "CDNS", "CRWD", "MAR", "MRVL", "ORLY", "CSX", "ADSK", "NXPI",
+        "ABNB", "WDAY"
+    ]
 
 def fetch_stock_data(symbol: str, include_rsi: bool = True) -> Optional[Dict]:
     """Fetch all data for a single stock with error handling"""
