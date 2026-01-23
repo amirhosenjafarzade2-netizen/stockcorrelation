@@ -25,7 +25,7 @@ def render_grapher() -> None:
             min_value=1,
             max_value=30,
             value=10,
-            help="Price history years (fundamentals show all available)"
+            help="Years of history to display for all charts"
         )
 
     if not ticker:
@@ -41,8 +41,8 @@ def render_grapher() -> None:
                 ticker_obj = yf.Ticker(ticker)
                 is_annual = (frequency == "Annual")
 
-                # ── Get financials - DON'T filter, show all available ──────────
-                st.info("📊 Fetching fundamental data (showing ALL available periods)...")
+                # ── Get financials - fetch all, then filter ──────────
+                st.info("📊 Fetching fundamental data...")
                 
                 # Use the newer API methods
                 if is_annual:
@@ -53,6 +53,19 @@ def render_grapher() -> None:
                     income = ticker_obj.get_income_stmt(freq="quarterly")
                     balance = ticker_obj.get_balance_sheet(freq="quarterly")
                     cashflow = ticker_obj.get_cashflow(freq="quarterly")
+
+                # ── FILTER fundamental data by date range ──────────────────
+                def filter_by_date(df, start_date):
+                    """Filter DataFrame columns by date range"""
+                    if df.empty:
+                        return df
+                    # Keep only columns (dates) that are >= start_date
+                    valid_cols = [col for col in df.columns if col.date() >= start_date]
+                    return df[valid_cols]
+                
+                income = filter_by_date(income, start_date)
+                balance = filter_by_date(balance, start_date)
+                cashflow = filter_by_date(cashflow, start_date)
 
                 # Price history - respects slider
                 prices = yf.download(
@@ -83,7 +96,7 @@ def render_grapher() -> None:
                     years_available = (dates[-1] - dates[0]).days / 365.25
                     st.success(f"✓ Fundamentals: {dates[0].date()} → {dates[-1].date()} ({len(dates)} periods, ~{years_available:.1f} years)")
                 else:
-                    st.warning("⚠️ No fundamental data available for this ticker")
+                    st.warning("⚠️ No fundamental data available for this ticker in the selected time range")
 
                 # Align dates across statements
                 if not income.empty and not balance.empty and not cashflow.empty:
@@ -279,7 +292,6 @@ def render_grapher() -> None:
                                  yaxis="ROIC %", color="#7f7f7f")
 
                 st.success("✓ Analysis complete")
-                st.caption("Note: Fundamental data shows ALL available periods from Yahoo Finance (often limited to 4-5 years)")
 
             except Exception as e:
                 st.error(f"Error loading {ticker}: {str(e)}")
