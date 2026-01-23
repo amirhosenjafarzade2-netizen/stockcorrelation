@@ -22,7 +22,12 @@ def render_grapher() -> None:
         frequency = st.selectbox("Frequency", ["Quarterly", "Annual"], index=0)
 
     with col3:
-        years_back = st.slider("Price history lookback (years)", 1, 30, 10)
+        years_back = st.slider(
+            "Price history lookback (years) – fundamentals show all available data",
+            min_value=1,
+            max_value=30,
+            value=10
+        )
 
     if not ticker:
         st.info("Enter a ticker symbol to begin.")
@@ -32,7 +37,7 @@ def render_grapher() -> None:
     start_date = end_date - timedelta(days=365 * (years_back + 1))
 
     if st.button("Load & Plot", type="primary", use_container_width=True):
-        with st.spinner(f"Fetching data for {ticker} ({frequency.lower()})..."):
+        with st.spinner(f"Fetching {ticker} ({frequency.lower()})..."):
             try:
                 ticker_obj = yf.Ticker(ticker)
 
@@ -43,12 +48,12 @@ def render_grapher() -> None:
                 balance  = ticker_obj.balance_sheet  if is_annual else ticker_obj.quarterly_balance_sheet
                 cashflow = ticker_obj.cashflow       if is_annual else ticker_obj.quarterly_cashflow
 
-                # Fallback (in case properties fail)
+                # Fallback
                 if income.empty:   income   = ticker_obj.get_income_stmt(freq="yearly" if is_annual else "quarterly")
                 if balance.empty:  balance  = ticker_obj.get_balance_sheet(freq="yearly" if is_annual else "quarterly")
                 if cashflow.empty: cashflow = ticker_obj.get_cashflow(freq="yearly" if is_annual else "quarterly")
 
-                # Price history (respects slider)
+                # Price history — respects the slider
                 prices = yf.download(
                     ticker,
                     start=start_date,
@@ -58,21 +63,33 @@ def render_grapher() -> None:
                 )["Close"]
 
                 if prices.empty and income.empty and balance.empty and cashflow.empty:
-                    st.error(f"No data available for {ticker} in the selected period/frequency.")
+                    st.error(f"No data returned for {ticker}.")
                     return
 
-                # Show actual available ranges
+                # ── Show actual available ranges (this explains a lot) ──────────
                 if not prices.empty:
-                    st.caption(f"**Price data range:** {prices.index.min().date()} → {prices.index.max().date()}  ({len(prices)} points)")
+                    st.caption(f"**Price history:** {prices.index.min().date()} → {prices.index.max().date()}  ({len(prices)} points)")
+
                 if not income.empty:
-                    st.caption(f"**Financials range:** {income.columns.min().date()} → {income.columns.max().date()}  ({len(income.columns)} periods)")
+                    fin_start = income.columns.min().date()
+                    fin_end   = income.columns.max().date()
+                    fin_years = (income.columns.max() - income.columns.min()).days / 365.25
+                    st.caption(f"**Fundamentals available:** {fin_start} → {fin_end}  (~{fin_years:.1f} years, {len(income.columns)} periods)")
+
+                    requested_years = years_back
+                    if fin_years < requested_years * 0.7:
+                        st.warning(
+                            f"Only ~{fin_years:.1f} years of fundamental data available "
+                            f"(you requested {requested_years} years for price history). "
+                            "This is a limitation of Yahoo Finance — many companies provide only recent statements."
+                        )
 
                 common_dates = income.columns.intersection(balance.columns).intersection(cashflow.columns)
                 income   = income[common_dates]
                 balance  = balance[common_dates]
                 cashflow = cashflow[common_dates]
 
-                # ── Plotting helpers ─────────────────────────────────────────────
+                # ── Plot helpers (robust against shape issues) ──────────────────
                 def to_1d(data):
                     if isinstance(data, pd.DataFrame):
                         if data.shape[1] == 1:
@@ -97,13 +114,8 @@ def render_grapher() -> None:
                     )
                     if show_growth and len(data) > 4:
                         growth = data.pct_change().rolling(4).mean() * 100
-                        fig.add_scatter(
-                            x=growth.index,
-                            y=growth,
-                            name="4-per. Avg Growth %",
-                            yaxis="y2",
-                            line=dict(dash='dot', color='gray')
-                        )
+                        fig.add_scatter(x=growth.index, y=growth, name="4-per Avg Growth %",
+                                        yaxis="y2", line=dict(dash='dot', color='gray'))
                         fig.update_layout(yaxis2=dict(title="Growth %", overlaying="y", side="right"))
                     fig.update_layout(yaxis_title=yaxis, hovermode="x unified")
                     st.plotly_chart(fig, use_container_width=True)
@@ -207,11 +219,11 @@ def render_grapher() -> None:
                     roic = (nopat / inv_cap.shift(1)) * 100
                     plot_line(roic.dropna(), "ROIC (%)", yaxis="ROIC %", color="#7f7f7f")
 
-                st.caption("Some graphs appear only when the required data fields are available.")
+                st.caption("Note: Fundamental charts use **all available historical periods** from Yahoo Finance — often much shorter than the price history range.")
 
             except Exception as e:
                 st.error(f"Error: {str(e)}")
-                st.info("Common fixes:\n• Use a major US stock (AAPL, META, TSLA, NVDA)\n• Try Annual instead of Quarterly\n• Check internet connection")
+                st.info("Try:\n• Major US stocks (AAPL, META, TSLA, NVDA)\n• Switch Annual ↔ Quarterly\n• Check connection")
 
 
 if __name__ == "__main__":
