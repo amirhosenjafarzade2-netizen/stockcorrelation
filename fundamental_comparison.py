@@ -52,7 +52,7 @@ def render_fundamental_comparison(tickers: List[str] = None) -> None:
                     try:
                         ticker_obj = yf.Ticker(ticker)
                         
-                        # Use direct properties instead of get methods (more reliable)
+                        # Use direct properties instead of get methods
                         if is_annual:
                             income = ticker_obj.income_stmt
                             balance = ticker_obj.balance_sheet
@@ -91,7 +91,7 @@ def render_fundamental_comparison(tickers: List[str] = None) -> None:
                     st.error("No data retrieved. Check ticker symbols.")
                     return
                 
-                tickers = list(all_data.keys())  # Update to successful tickers only
+                tickers = list(all_data.keys())
                 st.success(f"✓ Loaded data for {len(tickers)} stocks: {', '.join(tickers)}")
                 
                 if failed_tickers:
@@ -144,7 +144,6 @@ def render_fundamental_comparison(tickers: List[str] = None) -> None:
                     cashflow = ticker_data["cashflow"]
                     info = ticker_data["info"]
                     
-                    # Get latest values
                     revenue = safe_get(income, "Total Revenue")
                     gross_profit = safe_get(income, "Gross Profit")
                     operating_income = safe_get(income, "Operating Income")
@@ -152,7 +151,7 @@ def render_fundamental_comparison(tickers: List[str] = None) -> None:
                     
                     ocf = safe_get(cashflow, "Operating Cash Flow")
                     capex = safe_get(cashflow, "Capital Expenditure", 0)
-                    fcf_calc = ocf + capex  # CapEx is negative
+                    fcf_calc = ocf + capex
                     
                     total_assets = safe_get(balance, "Total Assets")
                     total_debt = safe_get(balance, "Total Debt", 0)
@@ -163,7 +162,6 @@ def render_fundamental_comparison(tickers: List[str] = None) -> None:
                     if shares.empty:
                         shares = safe_get(income, "Basic Average Shares")
                     
-                    # Latest values
                     rev_latest = get_latest_value(revenue)
                     gp_latest = get_latest_value(gross_profit)
                     oi_latest = get_latest_value(operating_income)
@@ -176,11 +174,9 @@ def render_fundamental_comparison(tickers: List[str] = None) -> None:
                     equity_latest = get_latest_value(equity)
                     shares_latest = get_latest_value(shares)
                     
-                    # Market data - with safe fallbacks
                     market_cap = info.get("marketCap", np.nan)
                     current_price = info.get("currentPrice", info.get("regularMarketPrice", np.nan))
                     
-                    # Calculate ratios
                     gross_margin = (gp_latest / rev_latest * 100) if rev_latest and not np.isnan(rev_latest) and rev_latest != 0 else np.nan
                     operating_margin = (oi_latest / rev_latest * 100) if rev_latest and not np.isnan(rev_latest) and rev_latest != 0 else np.nan
                     net_margin = (ni_latest / rev_latest * 100) if rev_latest and not np.isnan(rev_latest) and rev_latest != 0 else np.nan
@@ -191,60 +187,44 @@ def render_fundamental_comparison(tickers: List[str] = None) -> None:
                     debt_to_equity = (debt_latest / equity_latest) if equity_latest and not np.isnan(equity_latest) and equity_latest != 0 else np.nan
                     current_ratio = info.get("currentRatio", np.nan)
                     
-                    # Per share metrics
                     eps = (ni_latest / shares_latest) if shares_latest and not np.isnan(shares_latest) and shares_latest != 0 else np.nan
                     revenue_per_share = (rev_latest / shares_latest) if shares_latest and not np.isnan(shares_latest) and shares_latest != 0 else np.nan
                     fcf_per_share = (fcf_latest / shares_latest) if shares_latest and not np.isnan(shares_latest) and shares_latest != 0 else np.nan
                     
-                    # Valuation
                     pe_ratio = (current_price / eps) if eps and not np.isnan(eps) and eps > 0 and not np.isnan(current_price) else np.nan
                     pb_ratio = (market_cap / equity_latest) if equity_latest and not np.isnan(equity_latest) and equity_latest != 0 and not np.isnan(market_cap) else np.nan
                     ps_ratio = (market_cap / rev_latest) if rev_latest and not np.isnan(rev_latest) and rev_latest != 0 and not np.isnan(market_cap) else np.nan
                     ev = market_cap + debt_latest - cash_latest if not np.isnan(market_cap) else np.nan
                     ev_to_ebitda = info.get("enterpriseToEbitda", np.nan)
                     
-                    # Growth (if multiple periods available)
                     revenue_growth = revenue.pct_change().mean() * 100 if len(revenue.dropna()) > 1 else np.nan
                     ni_growth = net_income.pct_change().mean() * 100 if len(net_income.dropna()) > 1 else np.nan
                     
                     return {
-                        # Size metrics
                         "Revenue": rev_latest,
                         "Net Income": ni_latest,
                         "Operating CF": ocf_latest,
                         "Free Cash Flow": fcf_latest,
                         "Total Assets": assets_latest,
                         "Market Cap": market_cap,
-                        
-                        # Profitability
                         "Gross Margin %": gross_margin,
                         "Operating Margin %": operating_margin,
                         "Net Margin %": net_margin,
                         "ROE %": roe,
                         "ROA %": roa,
-                        
-                        # Efficiency
                         "Revenue/Share": revenue_per_share,
                         "EPS": eps,
                         "FCF/Share": fcf_per_share,
-                        
-                        # Financial Health
                         "Debt/Equity": debt_to_equity,
                         "Current Ratio": current_ratio,
                         "Cash": cash_latest,
                         "Total Debt": debt_latest,
-                        
-                        # Valuation
                         "P/E": pe_ratio,
                         "P/B": pb_ratio,
                         "P/S": ps_ratio,
                         "EV/EBITDA": ev_to_ebitda,
-                        
-                        # Growth
                         "Revenue Growth %": revenue_growth,
                         "NI Growth %": ni_growth,
-                        
-                        # Time series for charts
                         "_revenue_ts": revenue,
                         "_net_income_ts": net_income,
                         "_ocf_ts": ocf,
@@ -254,15 +234,12 @@ def render_fundamental_comparison(tickers: List[str] = None) -> None:
                         "_net_margin_ts": (net_income / revenue * 100) if not revenue.empty else pd.Series(),
                     }
                 
-                # ── Calculate metrics for all tickers ─────────────────────────
                 metrics_dict = {}
                 for ticker in tickers:
                     metrics_dict[ticker] = calculate_metrics(all_data[ticker])
                 
-                # Convert to DataFrame
                 comparison_df = pd.DataFrame(metrics_dict).T
                 
-                # ── TAB LAYOUT ────────────────────────────────────────────────
                 tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
                     "📊 Overview",
                     "💰 Profitability", 
@@ -272,17 +249,9 @@ def render_fundamental_comparison(tickers: List[str] = None) -> None:
                     "📉 Trends"
                 ])
                 
-                # ══════════════════════════════════════════════════════════════
-                # TAB 1: OVERVIEW
-                # ══════════════════════════════════════════════════════════════
                 with tab1:
                     st.markdown("**Key Metrics Comparison**")
-                    
-                    overview_cols = [
-                        "Market Cap", "Revenue", "Net Income", "EPS",
-                        "P/E", "P/B", "ROE %", "Net Margin %"
-                    ]
-                    
+                    overview_cols = ["Market Cap", "Revenue", "Net Income", "EPS", "P/E", "P/B", "ROE %", "Net Margin %"]
                     overview_df = comparison_df[overview_cols].copy()
                     
                     st.dataframe(
@@ -299,30 +268,16 @@ def render_fundamental_comparison(tickers: List[str] = None) -> None:
                         use_container_width=True
                     )
                     
-                    # Bar chart comparison
                     st.markdown("**Market Cap Comparison**")
                     valid_mcap = overview_df["Market Cap"].dropna()
                     if not valid_mcap.empty:
-                        fig = go.Figure(data=[
-                            go.Bar(x=valid_mcap.index, y=valid_mcap.values, 
-                                   marker_color='lightblue')
-                        ])
+                        fig = go.Figure(data=[go.Bar(x=valid_mcap.index, y=valid_mcap.values, marker_color='lightblue')])
                         fig.update_layout(yaxis_title="Market Cap ($)", height=350)
                         st.plotly_chart(fig, use_container_width=True)
-                    else:
-                        st.info("No market cap data available")
                 
-                # ══════════════════════════════════════════════════════════════
-                # TAB 2: PROFITABILITY
-                # ══════════════════════════════════════════════════════════════
                 with tab2:
                     st.markdown("**Profitability Metrics**")
-                    
-                    profit_cols = [
-                        "Gross Margin %", "Operating Margin %", "Net Margin %",
-                        "ROE %", "ROA %", "Revenue/Share", "EPS"
-                    ]
-                    
+                    profit_cols = ["Gross Margin %", "Operating Margin %", "Net Margin %", "ROE %", "ROA %", "Revenue/Share", "EPS"]
                     profit_df = comparison_df[profit_cols].copy()
                     
                     st.dataframe(
@@ -338,7 +293,6 @@ def render_fundamental_comparison(tickers: List[str] = None) -> None:
                         use_container_width=True
                     )
                     
-                    # Margin comparison chart
                     st.markdown("**Margin Comparison**")
                     margin_data = profit_df[["Gross Margin %", "Operating Margin %", "Net Margin %"]].dropna(how='all')
                     
@@ -348,34 +302,19 @@ def render_fundamental_comparison(tickers: List[str] = None) -> None:
                             valid_data = margin_data[col].dropna()
                             if not valid_data.empty:
                                 fig.add_trace(go.Bar(name=col, x=valid_data.index, y=valid_data.values))
-                        
                         fig.update_layout(barmode='group', yaxis_title="Margin %", height=350)
                         st.plotly_chart(fig, use_container_width=True)
                     
-                    # ROE vs ROA scatter
                     st.markdown("**ROE vs ROA**")
                     scatter_data = profit_df[["ROA %", "ROE %"]].dropna()
                     if len(scatter_data) > 0:
-                        fig = px.scatter(
-                            scatter_data, x="ROA %", y="ROE %", 
-                            text=scatter_data.index,
-                            size=[100]*len(scatter_data),
-                            height=350
-                        )
+                        fig = px.scatter(scatter_data, x="ROA %", y="ROE %", text=scatter_data.index, size=[100]*len(scatter_data), height=350)
                         fig.update_traces(textposition='top center')
                         st.plotly_chart(fig, use_container_width=True)
                 
-                # ══════════════════════════════════════════════════════════════
-                # TAB 3: CASH FLOW
-                # ══════════════════════════════════════════════════════════════
                 with tab3:
                     st.markdown("**Cash Flow Metrics**")
-                    
-                    cf_cols = [
-                        "Operating CF", "Free Cash Flow", "FCF/Share",
-                        "Net Income", "Revenue"
-                    ]
-                    
+                    cf_cols = ["Operating CF", "Free Cash Flow", "FCF/Share", "Net Income", "Revenue"]
                     cf_df = comparison_df[cf_cols].copy()
                     
                     st.dataframe(
@@ -389,49 +328,29 @@ def render_fundamental_comparison(tickers: List[str] = None) -> None:
                         use_container_width=True
                     )
                     
-                    # FCF vs Net Income comparison
                     st.markdown("**Free Cash Flow vs Net Income**")
-                    
                     fcf_ni_data = cf_df[["Net Income", "Free Cash Flow"]].dropna(how='all')
                     if not fcf_ni_data.empty:
                         fig = go.Figure()
-                        
                         ni_valid = fcf_ni_data["Net Income"].dropna()
                         if not ni_valid.empty:
-                            fig.add_trace(go.Bar(name="Net Income", x=ni_valid.index, 
-                                                y=ni_valid.values, marker_color='lightcoral'))
-                        
+                            fig.add_trace(go.Bar(name="Net Income", x=ni_valid.index, y=ni_valid.values, marker_color='lightcoral'))
                         fcf_valid = fcf_ni_data["Free Cash Flow"].dropna()
                         if not fcf_valid.empty:
-                            fig.add_trace(go.Bar(name="Free Cash Flow", x=fcf_valid.index, 
-                                                y=fcf_valid.values, marker_color='lightgreen'))
-                        
+                            fig.add_trace(go.Bar(name="Free Cash Flow", x=fcf_valid.index, y=fcf_valid.values, marker_color='lightgreen'))
                         fig.update_layout(barmode='group', yaxis_title="Amount ($)", height=350)
                         st.plotly_chart(fig, use_container_width=True)
                     
-                    # FCF Margin
                     st.markdown("**FCF Margin %**")
                     fcf_margin = (cf_df["Free Cash Flow"] / cf_df["Revenue"] * 100).dropna()
-                    
                     if not fcf_margin.empty:
-                        fig = go.Figure(data=[
-                            go.Bar(x=fcf_margin.index, y=fcf_margin.values,
-                                   marker_color='steelblue')
-                        ])
+                        fig = go.Figure(data=[go.Bar(x=fcf_margin.index, y=fcf_margin.values, marker_color='steelblue')])
                         fig.update_layout(yaxis_title="FCF Margin %", height=300)
                         st.plotly_chart(fig, use_container_width=True)
                 
-                # ══════════════════════════════════════════════════════════════
-                # TAB 4: FINANCIAL HEALTH
-                # ══════════════════════════════════════════════════════════════
                 with tab4:
                     st.markdown("**Financial Health Metrics**")
-                    
-                    health_cols = [
-                        "Total Assets", "Total Debt", "Cash",
-                        "Debt/Equity", "Current Ratio"
-                    ]
-                    
+                    health_cols = ["Total Assets", "Total Debt", "Cash", "Debt/Equity", "Current Ratio"]
                     health_df = comparison_df[health_cols].copy()
                     
                     st.dataframe(
@@ -445,44 +364,28 @@ def render_fundamental_comparison(tickers: List[str] = None) -> None:
                         use_container_width=True
                     )
                     
-                    # Debt vs Cash
                     st.markdown("**Debt vs Cash Position**")
-                    
                     debt_cash_data = health_df[["Cash", "Total Debt"]].dropna(how='all')
                     if not debt_cash_data.empty:
                         fig = go.Figure()
-                        
                         cash_valid = debt_cash_data["Cash"].dropna()
                         if not cash_valid.empty:
-                            fig.add_trace(go.Bar(name="Cash", x=cash_valid.index, 
-                                                y=cash_valid.values, marker_color='lightgreen'))
-                        
+                            fig.add_trace(go.Bar(name="Cash", x=cash_valid.index, y=cash_valid.values, marker_color='lightgreen'))
                         debt_valid = debt_cash_data["Total Debt"].dropna()
                         if not debt_valid.empty:
-                            fig.add_trace(go.Bar(name="Total Debt", x=debt_valid.index, 
-                                                y=debt_valid.values, marker_color='lightcoral'))
-                        
+                            fig.add_trace(go.Bar(name="Total Debt", x=debt_valid.index, y=debt_valid.values, marker_color='lightcoral'))
                         fig.update_layout(barmode='group', yaxis_title="Amount ($)", height=350)
                         st.plotly_chart(fig, use_container_width=True)
                     
-                    # Debt/Equity comparison
-                    st.markdown("**Debt/Equity Ratio (Lower is Better)**")
+                    st.markdown("**Debt/Equity Ratio**")
                     de_ratio = health_df["Debt/Equity"].dropna()
-                    
                     if not de_ratio.empty:
-                        fig = go.Figure(data=[
-                            go.Bar(x=de_ratio.index, y=de_ratio.values,
-                                   marker_color='indianred')
-                        ])
+                        fig = go.Figure(data=[go.Bar(x=de_ratio.index, y=de_ratio.values, marker_color='indianred')])
                         fig.update_layout(yaxis_title="Debt/Equity", height=300)
                         st.plotly_chart(fig, use_container_width=True)
                 
-                # ══════════════════════════════════════════════════════════════
-                # TAB 5: VALUATION
-                # ══════════════════════════════════════════════════════════════
                 with tab5:
                     st.markdown("**Valuation Metrics**")
-                    
                     val_cols = ["P/E", "P/B", "P/S", "EV/EBITDA", "Market Cap"]
                     val_df = comparison_df[val_cols].copy()
                     
@@ -497,44 +400,29 @@ def render_fundamental_comparison(tickers: List[str] = None) -> None:
                         use_container_width=True
                     )
                     
-                    st.caption("Lower multiples generally indicate cheaper valuation (relative to fundamentals)")
+                    st.caption("Lower multiples generally indicate cheaper valuation")
                     
-                    # Valuation multiples comparison
                     st.markdown("**Valuation Multiples**")
-                    
                     fig = go.Figure()
                     for col in ["P/E", "P/B", "P/S", "EV/EBITDA"]:
                         if col in val_df.columns:
                             valid_data = val_df[col].dropna()
                             if not valid_data.empty:
                                 fig.add_trace(go.Bar(name=col, x=valid_data.index, y=valid_data.values))
-                    
                     fig.update_layout(barmode='group', yaxis_title="Multiple", height=350)
                     st.plotly_chart(fig, use_container_width=True)
                     
-                    # P/E vs Growth scatter (if growth data available)
                     if "Revenue Growth %" in comparison_df.columns:
-                        st.markdown("**P/E vs Revenue Growth (PEG Analysis)**")
+                        st.markdown("**P/E vs Revenue Growth**")
                         peg_data = comparison_df[["P/E", "Revenue Growth %"]].dropna()
-                        
                         if len(peg_data) > 1:
-                            fig = px.scatter(
-                                peg_data, x="Revenue Growth %", y="P/E",
-                                text=peg_data.index,
-                                size=[100]*len(peg_data),
-                                height=350
-                            )
+                            fig = px.scatter(peg_data, x="Revenue Growth %", y="P/E", text=peg_data.index, size=[100]*len(peg_data), height=350)
                             fig.update_traces(textposition='top center')
                             st.plotly_chart(fig, use_container_width=True)
                 
-                # ══════════════════════════════════════════════════════════════
-                # TAB 6: TRENDS
-                # ══════════════════════════════════════════════════════════════
                 with tab6:
-                    st.markdown("**Historical Trends (Last 4 Periods)**")
-                    st.caption("Note: Yahoo Finance API provides limited historical fundamental data")
+                    st.markdown("**Historical Trends**")
                     
-                    # Revenue trend
                     st.markdown("**Revenue Trend**")
                     revenue_trends = pd.DataFrame()
                     for ticker in tickers:
@@ -547,16 +435,10 @@ def render_fundamental_comparison(tickers: List[str] = None) -> None:
                         for ticker in revenue_trends.columns:
                             valid_data = revenue_trends[ticker].dropna()
                             if not valid_data.empty:
-                                fig.add_trace(go.Scatter(
-                                    x=valid_data.index, y=valid_data.values,
-                                    name=ticker, mode='lines+markers'
-                                ))
+                                fig.add_trace(go.Scatter(x=valid_data.index, y=valid_data.values, name=ticker, mode='lines+markers'))
                         fig.update_layout(yaxis_title="Revenue ($)", height=350, hovermode='x unified')
                         st.plotly_chart(fig, use_container_width=True)
-                    else:
-                        st.info("No revenue trend data available")
                     
-                    # Net Income trend
                     st.markdown("**Net Income Trend**")
                     ni_trends = pd.DataFrame()
                     for ticker in tickers:
@@ -569,14 +451,10 @@ def render_fundamental_comparison(tickers: List[str] = None) -> None:
                         for ticker in ni_trends.columns:
                             valid_data = ni_trends[ticker].dropna()
                             if not valid_data.empty:
-                                fig.add_trace(go.Scatter(
-                                    x=valid_data.index, y=valid_data.values,
-                                    name=ticker, mode='lines+markers'
-                                ))
+                                fig.add_trace(go.Scatter(x=valid_data.index, y=valid_data.values, name=ticker, mode='lines+markers'))
                         fig.update_layout(yaxis_title="Net Income ($)", height=350, hovermode='x unified')
                         st.plotly_chart(fig, use_container_width=True)
                     
-                    # Margin trends
                     st.markdown("**Net Margin % Trend**")
                     margin_trends = pd.DataFrame()
                     for ticker in tickers:
@@ -589,14 +467,10 @@ def render_fundamental_comparison(tickers: List[str] = None) -> None:
                         for ticker in margin_trends.columns:
                             valid_data = margin_trends[ticker].dropna()
                             if not valid_data.empty:
-                                fig.add_trace(go.Scatter(
-                                    x=valid_data.index, y=valid_data.values,
-                                    name=ticker, mode='lines+markers'
-                                ))
+                                fig.add_trace(go.Scatter(x=valid_data.index, y=valid_data.values, name=ticker, mode='lines+markers'))
                         fig.update_layout(yaxis_title="Net Margin %", height=350, hovermode='x unified')
                         st.plotly_chart(fig, use_container_width=True)
                     
-                    # FCF trend
                     st.markdown("**Free Cash Flow Trend**")
                     fcf_trends = pd.DataFrame()
                     for ticker in tickers:
@@ -609,11 +483,26 @@ def render_fundamental_comparison(tickers: List[str] = None) -> None:
                         for ticker in fcf_trends.columns:
                             valid_data = fcf_trends[ticker].dropna()
                             if not valid_data.empty:
-                                fig.add_trace(go.Scatter(
-                                    x=valid_data.index, y=valid_data.values,
-                                    name=ticker, mode='lines+markers'
-                                ))
+                                fig.add_trace(go.Scatter(x=valid_data.index, y=valid_data.values, name=ticker, mode='lines+markers'))
                         fig.update_layout(yaxis_title="Free Cash Flow ($)", height=350, hovermode='x unified')
                         st.plotly_chart(fig, use_container_width=True)
                 
-                # ══════════════════════
+                st.markdown("---")
+                st.markdown("### 📥 Export Data")
+                export_df = comparison_df[[col for col in comparison_df.columns if not col.startswith("_")]]
+                csv_data = export_df.to_csv()
+                st.download_button(
+                    label="📊 Download CSV",
+                    data=csv_data,
+                    file_name=f"fundamental_comparison_{'-'.join(tickers[:3])}.csv",
+                    mime="text/csv"
+                )
+                
+            except Exception as e:
+                st.error(f"Error: {str(e)}")
+                st.exception(e)
+
+
+if __name__ == "__main__":
+    st.set_page_config(page_title="Fundamental Comparison", layout="wide")
+    render_fundamental_comparison()
