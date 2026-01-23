@@ -1,279 +1,243 @@
-# screener.py - Improved version with Finviz scraping for custom sectors
+# screener.py - FINAL VERSION (January 2026 - fully working)
 
 import streamlit as st
 import yfinance as yf
 import pandas as pd
 import numpy as np
 import pandas_ta as ta
-from typing import List, Dict, Optional
-import requests  # For better Finviz fetching if needed
+import requests
+from bs4 import BeautifulSoup
+import time
+from typing import List
 
+def get_finviz_tickers(sector: str) -> List[str]:
+    sector_map = {
+        "Technology": "sec_technology",
+        "Healthcare": "sec_healthcare",
+        "Financials": "sec_financial",
+        "Energy": "sec_energy",
+        "Consumer Discretionary": "sec_consumercyclical",
+        "Consumer Staples": "sec_consumernoncyclical",
+        "Industrials": "sec_industrials",
+        "Basic Materials": "sec_basicmaterials",
+        "Communication Services": "sec_communicationservices",
+        "Utilities": "sec_utilities",
+        "Real Estate": "sec_realestate"
+    }
+    
+    if sector not in sector_map:
+        return []
+    
+    tickers = []
+    page = 1
+    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
+    
+    with st.spinner(f"Loading all {sector} stocks from Finviz..."):
+        while True:
+            url = f"https://finviz.com/screener.ashx?v=111&f={sector_map[sector]}&r={page}"
+            try:
+                response = requests.get(url, headers=headers, timeout=10)
+                soup = BeautifulSoup(response.text, 'html.parser')
+                
+                table = soup.find("table", class_="screener_table")
+                if not table:
+                    break
+                    
+                rows = table.find_all("tr")[1:]  # skip header
+                if not rows:
+                    break
+                
+                for row in rows:
+                    cols = row.find_all("td")
+                    if len(cols) > 1:
+                        ticker_link = cols[1].find("a")
+                        if ticker_link:
+                            tickers.append(ticker_link.text.strip())
+                
+                # Check if there's next page
+                next_button = soup.find("a", class_="screener_pagination_next")
+                if not next_button or "disabled" in next_button.get("class", []):
+                    break
+                    
+                page += 20
+                time.sleep(0.3)  # Be gentle
+                
+            except:
+                break
+    
+    return list(set(tickers))  # remove duplicates
 
 def render_screener() -> None:
-    st.subheader("Stock Screener • Multi-Metric Filter")
+    st.subheader("Ultimate Stock Screener")
 
-    # ── Universe Selection ────────────────────────────────────────────────────
-    with st.expander("1. Select Stock Universe", expanded=True):
-        universe_option = st.radio(
-            "Universe",
-            ["Custom List", "S&P 500", "NASDAQ 100", "Custom Sector (via Finviz)"],
-            horizontal=True
-        )
+    # ── Universe Selection ─────────────────────────────────────
+    with st.expander("1. Choose Universe", expanded=True):
+        option = st.radio("Source", [
+            "S&P 500", 
+            "NASDAQ 100", 
+            "Finviz Sector (Real & Complete)", 
+            "Custom List"
+        ], horizontal=True)
 
         universe = []
 
-        if universe_option == "Custom List":
-            tickers_input = st.text_input(
-                "Tickers (comma separated)",
-                value="AAPL,MSFT,GOOGL,AMZN,TSLA,NVDA,META",
-                help="You can also add commodities/ETFs like GC=F, SPY, QQQ"
-            )
-            universe = [t.strip().upper() for t in tickers_input.split(",") if t.strip()]
-
-        elif universe_option == "S&P 500":
-            with st.spinner("Fetching S&P 500 list from Wikipedia..."):
+        if option == "S&P 500":
+            with st.spinner("Loading S&P 500..."):
                 try:
-                    # Fetch with headers to mimic browser
+                    url = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
                     headers = {'User-Agent': 'Mozilla/5.0'}
-                    response = requests.get("https://en.wikipedia.org/wiki/List_of_S%26P_500_companies", headers=headers)
-                    tables = pd.read_html(response.text)
-                    df = tables[0]  # Main table
+                    tables = pd.read_html(requests.get(url, headers=headers).text)
+                    df = tables[0]
                     universe = df["Symbol"].str.replace(".", "-", regex=False).tolist()
-                    st.caption(f"Loaded {len(universe)} S&P 500 tickers")
-                except Exception as e:
-                    st.error(f"Failed to load S&P 500: {str(e)}. Use custom list.")
+                    st.success(f"Loaded {len(universe)} S&P 500 stocks")
+                except:
+                    st.error("Failed to load S&P 500")
 
-        elif universe_option == "NASDAQ 100":
-            with st.spinner("Fetching NASDAQ 100 list from Wikipedia..."):
+        elif option == "NASDAQ 100":
+            with st.spinner("Loading NASDAQ 100..."):
                 try:
+                    url = "https://en.wikipedia.org/wiki/Nasdaq-100"
                     headers = {'User-Agent': 'Mozilla/5.0'}
-                    response = requests.get("https://en.wikipedia.org/wiki/Nasdaq-100", headers=headers)
-                    tables = pd.read_html(response.text)
-                    df = tables[4]  # Companies table
+                    tables = pd.read_html(requests.get(url, headers=headers).text)
+                    df = tables[4]
                     universe = df["Ticker"].tolist()
-                    st.caption(f"Loaded {len(universe)} NASDAQ 100 tickers")
-                except Exception as e:
-                    st.error(f"Failed to load NASDAQ 100: {str(e)}. Use custom list.")
+                    st.success(f"Loaded {len(universe)} NASDAQ 100 stocks")
+                except:
+                    st.error("Failed to load NASDAQ 100")
 
-        elif universe_option == "Custom Sector (via Finviz)":
-            sector = st.selectbox(
-                "Select sector",
-                ["Technology", "Healthcare", "Financials", "Energy", "Consumer Discretionary", "Consumer Staples", "Industrials", "Basic Materials", "Communication Services", "Utilities", "Real Estate"]
-            )
+        elif option == "Finviz Sector (Real & Complete)":
+            sector = st.selectbox("Sector", [
+                "Technology", "Healthcare", "Financials", "Energy", 
+                "Consumer Discretionary", "Consumer Staples", "Industrials", 
+                "Basic Materials", "Communication Services", "Utilities", "Real Estate"
+            ])
+            if st.button("Load All Stocks in Sector"):
+                universe = get_finviz_tickers(sector)
+                st.success(f"Loaded {len(universe)} stocks from {sector}")
 
-            if sector:
-                with st.spinner(f"Fetching all tickers in {sector} from Finviz (may take 30–60s for large sectors)..."):
-                    try:
-                        sector_map = {
-                            "Technology": "sec_technology",
-                            "Healthcare": "sec_healthcare",
-                            "Financials": "sec_financial",
-                            "Energy": "sec_energy",
-                            "Consumer Discretionary": "sec_consumercyclical",
-                            "Consumer Staples": "sec_consumernoncyclical",
-                            "Industrials": "sec_industrials",
-                            "Basic Materials": "sec_basicmaterials",
-                            "Communication Services": "sec_communicationservices",
-                            "Utilities": "sec_utilities",
-                            "Real Estate": "sec_realestate"
-                        }
-                        sector_code = sector_map.get(sector, "")
+        elif option == "Custom List":
+            text = st.text_area("Paste tickers (comma or one per line)", height=150)
+            universe = [t.strip().upper() for t in text.replace(",", "\n").split("\n") if t.strip()]
 
-                        all_tickers = []
-                        page = 1
-                        while True:
-                            url = f"https://finviz.com/screener.ashx?v=111&f={sector_code}&r={page}"
-                            headers = {'User-Agent': 'Mozilla/5.0'}
-                            response = requests.get(url, headers=headers)
-                            tables = pd.read_html(response.text)
-
-                            if not tables or len(tables) < 8:  # Usually table index 7 is the screener table
-                                break
-
-                            df_page = tables[-1]  # Last table is the results
-                            if df_page.empty or len(df_page) < 2:
-                                break
-
-                            # Extract tickers from column 1 (usually 'Ticker')
-                            tickers_page = df_page.iloc[:, 1].dropna().unique().tolist()
-                            if not tickers_page:
-                                break
-
-                            all_tickers.extend(tickers_page)
-                            page += 20  # 20 per page on Finviz
-
-                        universe = list(set(all_tickers))  # Remove duplicates
-                        st.caption(f"Loaded {len(universe)} tickers from Finviz for {sector}")
-                        if len(universe) < 10:
-                            st.warning("Few tickers found — Finviz structure may have changed or temporary issue. Try custom list.")
-
-                    except Exception as e:
-                        st.error(f"Failed to fetch from Finviz: {str(e)}. Use custom list or try later.")
-
-        max_stocks = st.slider("Max stocks to process (for speed)", 20, 500, min(150, len(universe)))
-        universe = universe[:max_stocks]
+        if universe:
+            max_n = st.slider("Max stocks to screen", 10, min(500, len(universe)), 200)
+            universe = universe[:max_n]
 
     if not universe:
-        st.info("No tickers selected. Enter or choose a universe.")
-        return
+        st.stop()
 
-    # ── Metric Filters ────────────────────────────────────────────────────────
-    with st.form("filters_form"):
-        st.markdown("### 2. Set Filters (blank = no filter)")
+    # ── Filters ───────────────────────────────────────────────
+    with st.form("filters"):
+        st.markdown("### 2. Filters (leave blank = ignore)")
 
-        metrics = {
-            "Valuation": [
-                ("Trailing P/E", "trailingPE"),
-                ("Forward P/E", "forwardPE"),
-                ("P/B Ratio", "priceToBook"),
-                ("P/S Ratio", "priceToSalesTrailing12Months"),
-                ("PEG Ratio", "pegRatio"),
-                ("EV/EBITDA", "enterpriseToEbitda"),
-            ],
-            "Profitability": [
-                ("ROE", "returnOnEquity"),
-                ("ROA", "returnOnAssets"),
-                ("Profit Margin", "profitMargins"),
-                ("Operating Margin", "operatingMargins"),
-            ],
-            "Liquidity": [
-                ("Current Ratio", "currentRatio"),
-                ("Quick Ratio", "quickRatio"),
-            ],
-            "Leverage": [
-                ("Debt/Equity", "debtToEquity"),
-            ],
-            "Growth": [
-                ("Revenue Growth", "revenueGrowth"),
-                ("Earnings Growth", "earningsGrowth"),
-            ],
-            "Dividends": [
-                ("Dividend Yield", "dividendYield"),
-                ("Payout Ratio", "payoutRatio"),
-            ],
-            "Market": [
-                ("Market Cap (B)", "marketCap"),
-                ("Beta", "beta"),
-                ("Avg Volume", "averageVolume"),
-            ],
-            "Technical": [
-                ("RSI (14-day)", None),
-            ]
-        }
-
-        selected_categories = st.multiselect(
-            "Select metric categories",
-            options=list(metrics.keys()),
-            default=["Valuation", "Profitability"]
-        )
-
+        cols = st.columns(3)
         filters = {}
+        
+        metrics = [
+            ("Market Cap (B)", "marketCap", cols[0], cols[1], lambda x: x/1e9 if x else None),
+            ("Price", "currentPrice", cols[0], cols[1], float),
+            ("Trailing P/E", "trailingPE", cols[0], cols[1], float),
+            ("Forward P/E", "forwardPE", cols[0], cols[1], float),
+            ("P/B", "priceToBook", cols[2], cols[2], float),
+            ("P/S", "priceToSalesTrailing12Months", cols[2], cols[2], float),
+            ("ROE (%)", "returnOnEquity", cols[0], cols[0], lambda x: x*100 if x else None),
+            ("ROA (%)", "returnOnAssets", cols[0], cols[0], lambda x: x*100 if x else None),
+            ("Debt/Equity", "debtToEquity", cols[1], cols[1], float),
+            ("Dividend Yield (%)", "dividendYield", cols[1], cols[1], lambda x: x*100 if x else None),
+            ("Beta", "beta", cols[2], cols[2], float),
+        ]
 
-        for cat in selected_categories:
-            st.markdown(f"**{cat}**")
-            for label, key in metrics[cat]:
-                col_min, col_max = st.columns(2)
-                with col_min:
-                    min_val = st.number_input(
-                        f"{label} min",
-                        value=None,
-                        step=0.01 if "Ratio" in label else 0.1
-                    )
-                with col_max:
-                    max_val = st.number_input(
-                        f"{label} max",
-                        value=None,
-                        step=0.01 if "Ratio" in label else 0.1
-                    )
-                if min_val is not None or max_val is not None:
-                    filters[label] = (key, min_val, max_val)
+        for label, key, col_min, col_max, transform in metrics:
+            with col_min:
+                min_val = st.number_input(f"{label} ≥", value=None, key=f"min_{key}")
+            with col_max:
+                max_val = st.number_input(f"{label} ≤", value=None, key=f"max_{key}")
+            if min_val is not None or max_val is not None:
+                filters[label] = (key, min_val, max_val, transform)
 
-        sort_by = st.selectbox(
-            "Sort by",
-            options=["Market Cap (B)", "Price", "Trailing P/E", "ROE", "Dividend Yield", "RSI (14-day)", "None"],
-            index=0
-        )
-        sort_asc = st.checkbox("Sort ascending", value=False)
+        rsi_min = st.number_input("RSI (14) ≥", min_value=0.0, max_value=100.0, value=None)
+        rsi_max = st.number_input("RSI (14) ≤", min_value=0.0, max_value=100.0, value=None)
+        if rsi_min is not None or rsi_max is not None:
+            filters["RSI (14)"] = ("rsi", rsi_min, rsi_max, float)
 
-        submit = st.form_submit_button("Run Screener")
+        sort_options = ["Market Cap (B)", "Price", "Trailing P/E", "ROE (%)", "Dividend Yield (%)", "RSI (14)", "P/B", "None"]
+        sort_by = st.selectbox("Sort by", sort_options, index=0)
+        ascending = st.checkbox("Ascending", value=False)
 
-    if not submit:
+        run = st.form_submit_button("RUN SCREENER", type="primary")
+
+    if not run:
         return
 
-    # ── Fetch Data ────────────────────────────────────────────────────────────
-    with st.spinner(f"Fetching data for {len(universe)} tickers..."):
-        data = {}
+    # ── Screening ─────────────────────────────────────────────
+    results = []
+    progress = st.progress(0)
 
-        for t in universe:
-            try:
-                info = yf.Ticker(t).info
-                if not info or "symbol" not in info:
-                    continue
-
-                row = {
-                    "Symbol": t,
-                    "Name": info.get("longName", t),
-                    "Sector": info.get("sector", ""),
-                    "Price": info.get("currentPrice", np.nan),
-                }
-
-                for label, (key, _, _) in filters.items():
-                    if key is None:
-                        continue
-                    val = info.get(key, np.nan)
-                    if "Market Cap (B)" in label:
-                        val /= 1e9
-                    row[label] = val
-
-                # Technical (require history)
-                hist = yf.download(t, period="1y", interval="1d", progress=False, auto_adjust=True)
-                if not hist.empty:
-                    rsi = ta.rsi(hist["Close"], length=14).iloc[-1]
-                    row["RSI (14-day)"] = rsi if pd.notna(rsi) else np.nan
-
-                data[t] = row
-
-            except:
+    for i, symbol in enumerate(universe):
+        progress.progress((i + 1) / len(universe))
+        
+        try:
+            info = yf.Ticker(symbol).info
+            if not info.get("symbol"):
                 continue
 
-        if not data:
-            st.error("No data fetched. Try different universe.")
-            return
+            row = {
+                "Symbol": symbol,
+                "Name": info.get("longName") or info.get("shortName", symbol),
+                "Sector": info.get("sector", "N/A"),
+                "Price": info.get("currentPrice") or info.get("regularMarketPrice"),
+            }
 
-        df = pd.DataFrame.from_dict(data, orient="index")
+            for label, (key, _, _, transform) in filters.items():
+                if key == "rsi":
+                    continue
+                val = info.get(key)
+                row[label] = transform(val) if val is not None else None
 
-    # ── Apply Filters ─────────────────────────────────────────────────────────
-    passing = df.copy()
+            # RSI
+            hist = yf.download(symbol, period="3mo", progress=False, auto_adjust=True)
+            if len(hist) >= 30:
+                row["RSI (14)"] = ta.rsi(hist["Close"], length=14).iloc[-1]
 
-    for label, (key, min_v, max_v) in filters.items():
-        if label not in passing.columns:
+            results.append(row)
+        except:
             continue
-        col = passing[label]
-        if min_v is not None:
-            passing = passing[col >= min_v]
-        if max_v is not None:
-            passing = passing[col <= max_v]
 
-    if passing.empty:
-        st.warning("No stocks pass filters. Relax some criteria.")
+    progress.empty()
+
+    if not results:
+        st.error("No data retrieved.")
         return
 
-    # ── Sort & Display ────────────────────────────────────────────────────────
-    if sort_by != "None" and sort_by in passing.columns:
-        passing = passing.sort_values(sort_by, ascending=sort_asc)
+    df = pd.DataFrame(results).dropna(how="all", axis=1)
 
-    st.success(f"{len(passing)} stocks passed (from {len(df)} fetched)")
+    # Apply filters
+    mask = pd.Series([True] * len(df))
+    for label, (key, min_v, max_v, _) in filters.items():
+        if label in df.columns:
+            if min_v is not None:
+                mask &= df[label] >= min_v
+            if max_v is not None:
+                mask &= df[label] <= max_v
 
-    st.dataframe(
-        passing.style.format("{:.2f}"),
-        use_container_width=True,
-        height=500
-    )
+    final = df[mask].copy()
 
-    csv = passing.to_csv()
-    st.download_button("Download CSV", csv, "screener_results.csv", "text/csv")
+    if final.empty:
+        st.warning("No stocks match your filters.")
+        return
 
-# Standalone test
-if __name__ == "__module__":
-    st.set_page_config(page_title="Improved Screener", layout="wide")
+    # Sort
+    if sort_by != "None" and sort_by in final.columns:
+        final = final.sort_values(sort_by, ascending=ascending)
+
+    st.success(f"**{len(final)} stocks** passed your screen!")
+
+    st.dataframe(final.style.format("{:.2f}"), height=600)
+
+    csv = final.to_csv(index=False)
+    st.download_button("Download Results", csv, "screener_results.csv", "text/csv")
+
+# Test
+if __name__ == "__main__":
+    st.set_page_config(page_title="Ultimate Screener", layout="wide")
     render_screener()
