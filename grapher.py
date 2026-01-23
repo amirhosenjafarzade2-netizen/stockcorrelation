@@ -6,201 +6,171 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 from datetime import date, timedelta
-from typing import Optional
+import numpy as np
 
 
 def render_grapher() -> None:
-    """
-    Grapher module inspired by Qualtrim: Fundamental analysis graphs.
-    Fetches and plots interactive charts for Price, Revenue, EBITDA, FCF (vs SBC),
-    EPS, key ratios, and a simple DCF projection graph.
-    """
-    st.subheader("Grapher • Fundamental Analysis (Inspired by Qualtrim)")
+    st.subheader("Grapher • Enhanced Fundamental Analysis")
 
     # ── Inputs ────────────────────────────────────────────────────────────────
-    col1, col2 = st.columns([3, 2])
+    col1, col2, col3 = st.columns([3, 2, 2])
 
     with col1:
-        ticker = st.text_input(
-            "Ticker symbol",
-            value="AAPL",
-            help="Examples: AAPL, MSFT, AMZN, GC=F (limited fundamentals for non-stocks)"
-        ).strip().upper()
+        ticker = st.text_input("Ticker", value="AAPL").strip().upper()
 
     with col2:
-        frequency = st.selectbox(
-            "Data frequency",
-            options=["Quarterly", "Annual"],
-            index=0,
-            help="Quarterly for more detail, Annual for longer history"
-        )
+        frequency = st.selectbox("Frequency", ["Quarterly", "Annual"], index=0)
 
-    years_back = st.slider(
-        "Years of history",
-        min_value=1,
-        max_value=30,
-        value=10,
-        help="Max available depends on ticker (e.g., 30+ for established stocks)"
-    )
+    with col3:
+        years_back = st.slider("Years back", 1, 30, 12)
 
     if not ticker:
-        st.info("Enter a ticker to begin.")
+        st.info("Enter a ticker symbol.")
         return
 
-    # Calculate date range (approximate, since financials are periodic)
     end_date = date.today()
-    start_date = end_date - timedelta(days=365 * years_back)
+    start_date = end_date - timedelta(days=365 * (years_back + 2))
 
-    # ── Fetch Data ────────────────────────────────────────────────────────────
-    if st.button("Generate Graphs", type="primary", use_container_width=True):
-        with st.spinner(f"Fetching fundamentals for {ticker} ({frequency.lower()}) ..."):
+    if st.button("Load Fundamentals", type="primary"):
+        with st.spinner(f"Loading {ticker} data…"):
             try:
-                yf_ticker = yf.Ticker(ticker)
+                ticker_obj = yf.Ticker(ticker)
 
-                # Financial statements
-                yearly = (frequency == "Annual")
-                income = yf_ticker.get_income_stmt(yearly=yearly)
-                balance = yf_ticker.get_balance_sheet(yearly=yearly)
-                cashflow = yf_ticker.get_cashflow(yearly=yearly)
+                is_annual = (frequency == "Annual")
 
-                # Historical prices (for price chart and some ratios)
-                prices = yf.download(ticker, start=start_date, end=end_date, progress=False)["Adj Close"]
+                # Modern yfinance access (2025–2026 style)
+                income   = ticker_obj.income_stmt    if is_annual else ticker_obj.quarterly_income_stmt
+                balance  = ticker_obj.balance_sheet  if is_annual else ticker_obj.quarterly_balance_sheet
+                cashflow = ticker_obj.cashflow       if is_annual else ticker_obj.quarterly_cashflow
 
-                if income.empty or balance.empty or cashflow.empty:
-                    st.error(f"Limited or no fundamental data for {ticker}. Try a stock ticker.")
+                # Fallback
+                if income.empty:   income   = ticker_obj.get_income_stmt(freq="yearly" if is_annual else "quarterly")
+                if balance.empty:  balance  = ticker_obj.get_balance_sheet(freq="yearly" if is_annual else "quarterly")
+                if cashflow.empty: cashflow = ticker_obj.get_cashflow(freq="yearly" if is_annual else "quarterly")
+
+                prices = yf.download(ticker, start=start_date, end=end_date, progress=False, auto_adjust=True)["Close"]
+
+                if income.empty and balance.empty and cashflow.empty and prices.empty:
+                    st.error("No meaningful data returned for this ticker.")
                     return
 
-                # Align dates (financials are as-of dates)
                 common_dates = income.columns.intersection(balance.columns).intersection(cashflow.columns)
-                income = income[common_dates]
-                balance = balance[common_dates]
+                income   = income[common_dates]
+                balance  = balance[common_dates]
                 cashflow = cashflow[common_dates]
 
-                if len(common_dates) < 2:
-                    st.warning("Too few periods for meaningful graphs.")
-                    return
+                st.success(f"Loaded {len(common_dates)} periods • {len(prices)} price points")
 
-                st.success(f"Data loaded: {len(common_dates)} {frequency.lower()} periods")
-
-                # ── Helper to create interactive Plotly line/bar ─────────────────
-                def plot_metric(df: pd.DataFrame, metric: str, title: str, yaxis: str = "Value",
-                                kind: str = "line", color: Optional[str] = None) -> None:
-                    plot_df = df.T.reset_index()
-                    plot_df.columns = ["Date"] + list(df.index)
-                    fig = px.line(plot_df, x="Date", y=metric, title=title, markers=True) if kind == "line" else px.bar(plot_df, x="Date", y=metric, title=title, color=color)
-                    fig.update_layout(yaxis_title=yaxis, xaxis_title="Period", hovermode="x unified")
+                # ── Plot helper functions ────────────────────────────────────────
+                def plot_line(s: pd.Series, title: str, yaxis: str = "$", color=None, show_growth=False):
+                    fig = px.line(x=s.index, y=s, title=title, markers=True, color_discrete_sequence=[color] if color else None)
+                    if show_growth:
+                        growth = s.pct_change().rolling(4).mean() * 100 if len(s) > 4 else pd.Series()
+                        fig.add_scatter(x=growth.index, y=growth, name="4-per. Avg Growth %", yaxis="y2",
+                                        line=dict(dash='dot', color='gray'))
+                        fig.update_layout(yaxis2=dict(title="Growth %", overlaying="y", side="right"))
+                    fig.update_layout(yaxis_title=yaxis, hovermode="x unified")
                     st.plotly_chart(fig, use_container_width=True)
 
-                def plot_multi(df: pd.DataFrame, metrics: list[str], title: str, yaxis: str = "Value",
-                               colors: Optional[list[str]] = None) -> None:
+                def plot_bar(s: pd.Series, title: str, yaxis: str = "$", color=None):
+                    fig = px.bar(x=s.index, y=s, title=title, color_discrete_sequence=[color] if color else None)
+                    fig.update_layout(yaxis_title=yaxis)
+                    st.plotly_chart(fig, use_container_width=True)
+
+                def plot_multi(df: pd.DataFrame, title: str, yaxis: str = "$", colors=None):
                     fig = go.Figure()
-                    for i, m in enumerate(metrics):
-                        fig.add_trace(go.Scatter(x=df.columns, y=df.loc[m], mode="lines+markers",
-                                                 name=m, line=dict(color=colors[i] if colors else None)))
-                    fig.update_layout(title=title, yaxis_title=yaxis, xaxis_title="Period", hovermode="x unified")
+                    for i, col in enumerate(df.columns):
+                        fig.add_trace(go.Scatter(x=df.index, y=df[col], mode="lines+markers",
+                                                 name=col, line=dict(color=colors[i] if colors and i < len(colors) else None)))
+                    fig.update_layout(title=title, yaxis_title=yaxis, hovermode="x unified")
                     st.plotly_chart(fig, use_container_width=True)
 
-                # ── 1. Price Chart ───────────────────────────────────────────────
-                st.markdown("**Price History** (Interactive Line Chart)")
-                price_df = prices.reset_index()
-                fig_price = px.line(price_df, x="Date", y="Adj Close", title=f"{ticker} Adjusted Close Price")
-                fig_price.update_layout(yaxis_title="Price ($)", hovermode="x")
-                st.plotly_chart(fig_price, use_container_width=True)
+                # ── 1. Price History ─────────────────────────────────────────────
+                st.markdown("### Price History")
+                plot_line(prices, f"{ticker} Adjusted Close", color="#1f77b4")
 
-                # ── 2. Revenue Chart ─────────────────────────────────────────────
-                revenue = income.loc["Total Revenue"] if "Total Revenue" in income.index else pd.Series()
-                if not revenue.empty:
-                    st.markdown("**Revenue Over Time** (Bar Chart)")
-                    plot_metric(pd.DataFrame(revenue), "Total Revenue", f"{ticker} Revenue", "$", kind="bar")
+                # ── 2. Revenue ───────────────────────────────────────────────────
+                if "Total Revenue" in income.index:
+                    st.markdown("### Revenue")
+                    plot_bar(income.loc["Total Revenue"], "Total Revenue", color="#2ca02c")
 
-                # ── 3. EBITDA Chart ──────────────────────────────────────────────
-                ebitda = income.loc["EBITDA"] if "EBITDA" in income.index else pd.Series()
-                if not ebitda.empty:
-                    st.markdown("**EBITDA Over Time** (Line Chart)")
-                    plot_metric(pd.DataFrame(ebitda), "EBITDA", f"{ticker} EBITDA", "$")
+                # ── 3. Margins ───────────────────────────────────────────────────
+                if all(k in income.index for k in ["Gross Profit", "Operating Income", "Net Income", "Total Revenue"]):
+                    st.markdown("### Margin Trends")
+                    margins = pd.DataFrame({
+                        "Gross Margin":   income.loc["Gross Profit"]     / income.loc["Total Revenue"],
+                        "Operating Margin": income.loc["Operating Income"] / income.loc["Total Revenue"],
+                        "Net Margin":     income.loc["Net Income"]       / income.loc["Total Revenue"]
+                    }) * 100
+                    plot_multi(margins, "Gross / Operating / Net Margin (%)", yaxis="Margin %",
+                               colors=["#ff7f0e", "#d62728", "#9467bd"])
 
-                # ── 4. Free Cash Flow vs SBC ─────────────────────────────────────
-                ocf = cashflow.loc["Operating Cash Flow"] if "Operating Cash Flow" in cashflow.index else pd.Series()
-                capex = cashflow.loc["Capital Expenditure"] if "Capital Expenditure" in cashflow.index else pd.Series(0, index=ocf.index)
-                fcf = ocf + capex  # CapEx is negative
-                sbc = cashflow.loc["Share Based Compensation"] if "Share Based Compensation" in cashflow.index else pd.Series(0, index=fcf.index)
+                # ── 4. Net Income & Operating Income ─────────────────────────────
+                st.markdown("### Profitability")
+                profit_df = pd.DataFrame({
+                    "Operating Income": income.get("Operating Income", pd.Series()),
+                    "Net Income":       income.get("Net Income", pd.Series())
+                })
+                if not profit_df.empty:
+                    plot_multi(profit_df, "Operating & Net Income", colors=["#17becf", "#bcbd22"])
 
-                if not fcf.empty:
-                    st.markdown("**Free Cash Flow vs Stock-Based Compensation** (Multi-Line Chart)")
-                    fcf_df = pd.DataFrame({"Free Cash Flow": fcf, "Stock-Based Comp": sbc})
-                    plot_multi(fcf_df, ["Free Cash Flow", "Stock-Based Comp"], f"{ticker} FCF vs SBC", "$",
-                               colors=["blue", "red"])
+                # ── 5. Operating Cash Flow vs Net Income ─────────────────────────
+                if "Operating Cash Flow" in cashflow.index and "Net Income" in income.index:
+                    st.markdown("### Earnings Quality: Op. Cash Flow vs Net Income")
+                    eq_df = pd.DataFrame({
+                        "Operating Cash Flow": cashflow.loc["Operating Cash Flow"],
+                        "Net Income": income.loc["Net Income"]
+                    })
+                    plot_multi(eq_df, "Op. Cash Flow vs Net Income", colors=["#1f77b4", "#ff7f0e"])
 
-                # ── 5. EPS Chart ─────────────────────────────────────────────────
-                eps = income.loc["Basic EPS"] if "Basic EPS" in income.index else pd.Series()
-                if not eps.empty:
-                    st.markdown("**Earnings Per Share (EPS)** (Line Chart)")
-                    plot_metric(pd.DataFrame(eps), "Basic EPS", f"{ticker} EPS", "$/Share")
+                # ── 6. Free Cash Flow ────────────────────────────────────────────
+                ocf   = cashflow.get("Operating Cash Flow", pd.Series())
+                capex = cashflow.get("Capital Expenditure", pd.Series(0, index=ocf.index))
+                fcf   = ocf + capex
 
-                # ── 6. Key Financial Ratios ──────────────────────────────────────
-                st.markdown("**Key Ratios** (Multi-Line Chart)")
-                ratios = {}
+                if not fcf.empty and fcf.abs().sum() > 0:
+                    st.markdown("### Free Cash Flow")
+                    plot_line(fcf, f"{ticker} Free Cash Flow", show_growth=True)
 
-                # ROE = Net Income / Shareholders Equity
-                net_income = income.loc["Net Income"] if "Net Income" in income.index else pd.Series(0)
-                equity = balance.loc["Stockholders Equity"] if "Stockholders Equity" in balance.index else pd.Series(1)
-                ratios["ROE"] = net_income / equity
+                # ── 7. Stock-Based Compensation ──────────────────────────────────
+                sbc = cashflow.get("Stock Based Compensation", pd.Series())
+                if not sbc.empty and sbc.abs().sum() > 0:
+                    st.markdown("### Stock-Based Compensation")
+                    plot_bar(sbc, "Stock-Based Compensation (negative = expense)", color="#9467bd")
 
-                # Debt/Equity = Total Debt / Shareholders Equity
-                debt = balance.loc["Total Debt"] if "Total Debt" in balance.index else pd.Series(0)
-                ratios["Debt/Equity"] = debt / equity
+                # ── 8. Shares Outstanding & Dilution ─────────────────────────────
+                shares_basic   = income.get("Basic Average Shares", pd.Series())
+                shares_diluted = income.get("Diluted Average Shares", pd.Series())
 
-                # For P/E: Approximate historical P/E using period-end price (need to align dates)
-                # Find closest price to financial date
-                pe = {}
-                for dt in common_dates:
-                    closest_date = prices.index[prices.index.get_loc(dt, method="nearest")]
-                    close_price = prices.loc[closest_date]
-                    eps_val = eps.get(dt, 0)
-                    pe[dt] = close_price / eps_val if eps_val != 0 else np.nan
-                ratios["P/E"] = pd.Series(pe)
+                if not shares_basic.empty or not shares_diluted.empty:
+                    st.markdown("### Share Count & Dilution Trend")
+                    shares_df = pd.DataFrame({
+                        "Basic Avg Shares": shares_basic,
+                        "Diluted Avg Shares": shares_diluted
+                    })
+                    plot_multi(shares_df, "Basic vs Diluted Average Shares", yaxis="Shares (millions)")
 
-                ratios_df = pd.DataFrame(ratios).dropna(how="all")
-                if not ratios_df.empty:
-                    plot_multi(ratios_df.T, list(ratios_df.columns), f"{ticker} Key Ratios", "Ratio Value")
+                    # Buyback / Dilution intensity
+                    if not shares_diluted.empty:
+                        share_change_pct = shares_diluted.pct_change() * 100
+                        st.markdown("### YoY Share Count Change (positive = buyback, negative = dilution)")
+                        plot_line(share_change_pct.dropna(), "Share Count Change % (YoY)", yaxis="% Change", color="#e377c2")
 
-                # ── 7. Simple DCF Projection Graph ──────────────────────────────
-                st.markdown("**Simple DCF Projection** (Customize Assumptions)")
-                growth_rate = st.slider("Expected Annual Growth Rate (%)", -10, 50, 10) / 100
-                discount_rate = st.slider("Discount Rate (%)", 5, 20, 10) / 100
-                terminal_multiple = st.slider("Terminal P/E Multiple", 5, 50, 15)
-                projection_years = st.slider("Projection Years", 1, 20, 5)
+                # ── 9. ROIC (simplified) ─────────────────────────────────────────
+                if all(k in item for k in ["Net Income", "Total Assets", "Total Debt", "Cash And Cash Equivalents"] for item in [income, balance]):
+                    st.markdown("### Return on Invested Capital (ROIC) – simplified")
+                    nopat = income.loc["Net Income"] + income.get("Tax Provision", 0)  # rough
+                    invested_capital = balance.loc["Total Assets"] - balance.get("Cash And Cash Equivalents", 0) - balance.get("Total Debt", 0)
+                    roic = (nopat / invested_capital.shift(1)) * 100  # lagged capital
+                    plot_line(roic.dropna(), "ROIC (%)", yaxis="ROIC %", color="#7f7f7f")
 
-                if not fcf.empty:
-                    last_fcf = fcf.iloc[-1]
-                    last_eps = eps.iloc[-1] if not eps.empty else 0
-
-                    # Project FCF
-                    proj_dates = [common_dates[-1] + timedelta(days=365 * (i+1)) for i in range(projection_years)]
-                    proj_fcf = [last_fcf * (1 + growth_rate)**(i+1) for i in range(projection_years)]
-
-                    proj_df = pd.DataFrame({"Projected FCF": proj_fcf}, index=proj_dates)
-
-                    # Terminal Value (using EPS * multiple for simplicity)
-                    proj_eps = last_eps * (1 + growth_rate)**projection_years
-                    terminal_value = proj_eps * terminal_multiple
-                    pv_terminal = terminal_value / (1 + discount_rate)**projection_years
-
-                    # Discounted FCF
-                    disc_fcf = sum([fcf / (1 + discount_rate)**(i+1) for i, fcf in enumerate(proj_fcf)]) + pv_terminal
-
-                    st.write(f"Estimated Fair Value (DCF): ${disc_fcf:.2f}")
-
-                    fig_dcf = px.bar(proj_df, y="Projected FCF", title=f"{ticker} Projected Free Cash Flow")
-                    fig_dcf.update_layout(yaxis_title="$")
-                    st.plotly_chart(fig_dcf, use_container_width=True)
+                st.markdown("---")
+                st.caption("Note: Some metrics may be missing or approximate depending on data availability.")
 
             except Exception as e:
                 st.error(f"Error: {str(e)}")
-                st.info("Note: Fundamentals best for US stocks. Commodities/forex may lack data.")
+                st.info("• Try a major US stock (AAPL, MSFT, NVDA…)\n• Some tickers have incomplete fundamentals\n• Check your internet connection")
 
-
-# For quick local testing
 if __name__ == "__main__":
-    st.set_page_config(page_title="Grapher Test", layout="wide")
+    st.set_page_config(page_title="Enhanced Grapher", layout="wide")
     render_grapher()
