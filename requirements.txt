@@ -1,7 +1,8 @@
 streamlit
 yfinance
 pandas
-python-dateutil
 numpy
-pytz
-tzdata
+scipy
+plotly
+pandas_ta
+xlsxwriter
