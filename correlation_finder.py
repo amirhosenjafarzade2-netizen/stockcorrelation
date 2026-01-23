@@ -8,6 +8,7 @@ import plotly.express as px
 from scipy.cluster import hierarchy
 from scipy.spatial.distance import squareform
 from typing import List, Optional
+import networkx as nx  # Added this import
 
 
 def render_correlation_finder(
@@ -355,8 +356,6 @@ def render_correlation_finder(
             )
             
             # Build network
-            import networkx as nx
-            
             G = nx.Graph()
             
             # Add nodes
