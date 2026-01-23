@@ -53,22 +53,30 @@ def render_grapher() -> None:
                 if cashflow.empty: cashflow = ticker_obj.get_cashflow(freq="yearly" if is_annual else "quarterly")
 
                 # ── FILTER fundamentals by years_back ───────────────────────────
+                # Note: Yahoo Finance DataFrames have dates as columns
                 cutoff_date = pd.Timestamp(start_date)
                 
-                # Show available date range BEFORE filtering
+                # Debug before filtering
                 if not income.empty:
-                    orig_start = income.columns.min()
-                    orig_end = income.columns.max()
-                    st.caption(f"📊 Raw data range: {orig_start.date()} to {orig_end.date()} ({len(income.columns)} periods)")
-                    st.caption(f"🔍 Filtering to keep only data from {start_date} onwards...")
-                    
-                    income = income.loc[:, income.columns >= cutoff_date].copy()
-                    st.caption(f"✓ After filter: {len(income.columns)} periods remaining")
+                    before_dates = sorted(income.columns)
+                    st.info(f"🔍 Raw dates available: {before_dates[0].date()} to {before_dates[-1].date()} ({len(before_dates)} periods)")
+                    st.info(f"📅 Cutoff date (filtering to keep >= this): {cutoff_date.date()}")
+                
+                if not income.empty:
+                    mask = income.columns >= cutoff_date
+                    st.info(f"🎯 Mask result: {mask.sum()} columns pass filter (out of {len(mask)})")
+                    income = income.loc[:, mask].copy()
+                    if not income.empty:
+                        after_dates = sorted(income.columns)
+                        st.success(f"✓ After filter: {after_dates[0].date()} to {after_dates[-1].date()} ({len(after_dates)} periods)")
                     
                 if not balance.empty:
-                    balance = balance.loc[:, balance.columns >= cutoff_date].copy()
+                    mask = balance.columns >= cutoff_date
+                    balance = balance.loc[:, mask].copy()
+                    
                 if not cashflow.empty:
-                    cashflow = cashflow.loc[:, cashflow.columns >= cutoff_date].copy()
+                    mask = cashflow.columns >= cutoff_date
+                    cashflow = cashflow.loc[:, mask].copy()
 
                 # Price history
                 prices = yf.download(
