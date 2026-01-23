@@ -222,16 +222,46 @@ def fetch_stock_data(symbol: str, include_rsi: bool = True) -> Optional[Dict]:
             "Name": info.get("longName") or info.get("shortName", symbol),
             "Sector": info.get("sector", "N/A"),
             "Price": info.get("currentPrice") or info.get("regularMarketPrice"),
+            
+            # Size & Valuation
             "Market Cap (B)": info.get("marketCap", 0) / 1e9 if info.get("marketCap") else None,
+            "Enterprise Value (B)": info.get("enterpriseValue", 0) / 1e9 if info.get("enterpriseValue") else None,
             "Trailing P/E": info.get("trailingPE"),
             "Forward P/E": info.get("forwardPE"),
+            "PEG Ratio": info.get("pegRatio"),
             "P/B": info.get("priceToBook"),
             "P/S": info.get("priceToSalesTrailing12Months"),
+            "EV/EBITDA": info.get("enterpriseToEbitda"),
+            
+            # Profitability
             "ROE (%)": info.get("returnOnEquity") * 100 if info.get("returnOnEquity") else None,
             "ROA (%)": info.get("returnOnAssets") * 100 if info.get("returnOnAssets") else None,
+            "Profit Margin (%)": info.get("profitMargins") * 100 if info.get("profitMargins") else None,
+            "Operating Margin (%)": info.get("operatingMargins") * 100 if info.get("operatingMargins") else None,
+            "Gross Margin (%)": info.get("grossMargins") * 100 if info.get("grossMargins") else None,
+            
+            # Growth
+            "Revenue Growth (%)": info.get("revenueGrowth") * 100 if info.get("revenueGrowth") else None,
+            "Earnings Growth (%)": info.get("earningsGrowth") * 100 if info.get("earningsGrowth") else None,
+            "EPS (TTM)": info.get("trailingEps"),
+            
+            # Financial Health
             "Debt/Equity": info.get("debtToEquity"),
+            "Current Ratio": info.get("currentRatio"),
+            "Quick Ratio": info.get("quickRatio"),
+            
+            # Cash Flow
+            "Free Cash Flow (B)": info.get("freeCashflow", 0) / 1e9 if info.get("freeCashflow") else None,
+            "Operating Cash Flow (B)": info.get("operatingCashflow", 0) / 1e9 if info.get("operatingCashflow") else None,
+            
+            # Dividends
             "Dividend Yield (%)": info.get("dividendYield") * 100 if info.get("dividendYield") else None,
+            "Payout Ratio (%)": info.get("payoutRatio") * 100 if info.get("payoutRatio") else None,
+            
+            # Risk
             "Beta": info.get("beta"),
+            "52W High": info.get("fiftyTwoWeekHigh"),
+            "52W Low": info.get("fiftyTwoWeekLow"),
         }
         
         # Fetch RSI if requested
@@ -318,35 +348,99 @@ def render_screener() -> None:
     with st.form("filters"):
         st.markdown("### ⚙️ 2. Set Filters (leave blank to ignore)")
 
-        col1, col2, col3 = st.columns(3)
+        tab1, tab2, tab3, tab4, tab5 = st.tabs(["📊 Valuation", "💰 Profitability", "📈 Growth", "🏦 Financial Health", "📉 Technical"])
         
-        with col1:
-            st.markdown("**Valuation**")
-            mc_min = st.number_input("Market Cap (B) ≥", value=None, format="%.2f")
-            mc_max = st.number_input("Market Cap (B) ≤", value=None, format="%.2f")
-            pe_min = st.number_input("P/E ≥", value=None, format="%.2f")
-            pe_max = st.number_input("P/E ≤", value=None, format="%.2f")
+        with tab1:
+            st.markdown("**Valuation Metrics**")
+            col1, col2 = st.columns(2)
+            with col1:
+                mc_min = st.number_input("Market Cap (B) ≥", value=None, format="%.2f")
+                pe_min = st.number_input("P/E ≥", value=None, format="%.2f")
+                peg_min = st.number_input("PEG Ratio ≥", value=None, format="%.2f")
+                pb_min = st.number_input("P/B ≥", value=None, format="%.2f")
+            with col2:
+                mc_max = st.number_input("Market Cap (B) ≤", value=None, format="%.2f")
+                pe_max = st.number_input("P/E ≤", value=None, format="%.2f")
+                peg_max = st.number_input("PEG Ratio ≤", value=None, format="%.2f")
+                pb_max = st.number_input("P/B ≤", value=None, format="%.2f")
             
-        with col2:
-            st.markdown("**Profitability**")
-            roe_min = st.number_input("ROE (%) ≥", value=None, format="%.2f")
-            roe_max = st.number_input("ROE (%) ≤", value=None, format="%.2f")
-            dy_min = st.number_input("Div Yield (%) ≥", value=None, format="%.2f")
-            dy_max = st.number_input("Div Yield (%) ≤", value=None, format="%.2f")
+            col3, col4 = st.columns(2)
+            with col3:
+                ps_min = st.number_input("P/S ≥", value=None, format="%.2f")
+                ev_ebitda_min = st.number_input("EV/EBITDA ≥", value=None, format="%.2f")
+            with col4:
+                ps_max = st.number_input("P/S ≤", value=None, format="%.2f")
+                ev_ebitda_max = st.number_input("EV/EBITDA ≤", value=None, format="%.2f")
+        
+        with tab2:
+            st.markdown("**Profitability Metrics**")
+            col1, col2 = st.columns(2)
+            with col1:
+                roe_min = st.number_input("ROE (%) ≥", value=None, format="%.2f")
+                roa_min = st.number_input("ROA (%) ≥", value=None, format="%.2f")
+                profit_margin_min = st.number_input("Profit Margin (%) ≥", value=None, format="%.2f")
+                operating_margin_min = st.number_input("Operating Margin (%) ≥", value=None, format="%.2f")
+            with col2:
+                roe_max = st.number_input("ROE (%) ≤", value=None, format="%.2f")
+                roa_max = st.number_input("ROA (%) ≤", value=None, format="%.2f")
+                profit_margin_max = st.number_input("Profit Margin (%) ≤", value=None, format="%.2f")
+                operating_margin_max = st.number_input("Operating Margin (%) ≤", value=None, format="%.2f")
             
-        with col3:
-            st.markdown("**Technical**")
-            rsi_min = st.number_input("RSI (14) ≥", value=None, min_value=0.0, max_value=100.0, format="%.1f")
-            rsi_max = st.number_input("RSI (14) ≤", value=None, min_value=0.0, max_value=100.0, format="%.1f")
-            beta_min = st.number_input("Beta ≥", value=None, format="%.2f")
-            beta_max = st.number_input("Beta ≤", value=None, format="%.2f")
+            col3, col4 = st.columns(2)
+            with col3:
+                eps_min = st.number_input("EPS (TTM) ≥", value=None, format="%.2f")
+            with col4:
+                eps_max = st.number_input("EPS (TTM) ≤", value=None, format="%.2f")
+        
+        with tab3:
+            st.markdown("**Growth Metrics**")
+            col1, col2 = st.columns(2)
+            with col1:
+                rev_growth_min = st.number_input("Revenue Growth (%) ≥", value=None, format="%.2f")
+                earn_growth_min = st.number_input("Earnings Growth (%) ≥", value=None, format="%.2f")
+            with col2:
+                rev_growth_max = st.number_input("Revenue Growth (%) ≤", value=None, format="%.2f")
+                earn_growth_max = st.number_input("Earnings Growth (%) ≤", value=None, format="%.2f")
+        
+        with tab4:
+            st.markdown("**Financial Health Metrics**")
+            col1, col2 = st.columns(2)
+            with col1:
+                de_min = st.number_input("Debt/Equity ≥", value=None, format="%.2f")
+                current_ratio_min = st.number_input("Current Ratio ≥", value=None, format="%.2f")
+                quick_ratio_min = st.number_input("Quick Ratio ≥", value=None, format="%.2f")
+                fcf_min = st.number_input("Free Cash Flow (B) ≥", value=None, format="%.2f")
+            with col2:
+                de_max = st.number_input("Debt/Equity ≤", value=None, format="%.2f")
+                current_ratio_max = st.number_input("Current Ratio ≤", value=None, format="%.2f")
+                quick_ratio_max = st.number_input("Quick Ratio ≤", value=None, format="%.2f")
+                fcf_max = st.number_input("Free Cash Flow (B) ≤", value=None, format="%.2f")
+            
+            col3, col4 = st.columns(2)
+            with col3:
+                dy_min = st.number_input("Div Yield (%) ≥", value=None, format="%.2f")
+                payout_min = st.number_input("Payout Ratio (%) ≥", value=None, format="%.2f")
+            with col4:
+                dy_max = st.number_input("Div Yield (%) ≤", value=None, format="%.2f")
+                payout_max = st.number_input("Payout Ratio (%) ≤", value=None, format="%.2f")
+        
+        with tab5:
+            st.markdown("**Technical Indicators & Risk**")
+            col1, col2 = st.columns(2)
+            with col1:
+                rsi_min = st.number_input("RSI (14) ≥", value=None, min_value=0.0, max_value=100.0, format="%.1f")
+                beta_min = st.number_input("Beta ≥", value=None, format="%.2f")
+            with col2:
+                rsi_max = st.number_input("RSI (14) ≤", value=None, min_value=0.0, max_value=100.0, format="%.1f")
+                beta_max = st.number_input("Beta ≤", value=None, format="%.2f")
 
         st.markdown("---")
         col_sort1, col_sort2 = st.columns(2)
         with col_sort1:
             sort_by = st.selectbox("Sort by", [
-                "None", "Market Cap (B)", "Price", "Trailing P/E", "ROE (%)", 
-                "Dividend Yield (%)", "RSI (14)", "P/B"
+                "None", "Market Cap (B)", "Price", "Trailing P/E", "PEG Ratio", "ROE (%)", 
+                "Profit Margin (%)", "Revenue Growth (%)", "Dividend Yield (%)", 
+                "RSI (14)", "P/B", "EV/EBITDA", "Free Cash Flow (B)"
             ])
         with col_sort2:
             ascending = st.checkbox("Ascending", value=False)
@@ -388,6 +482,7 @@ def render_screener() -> None:
     # Apply filters
     mask = pd.Series([True] * len(df))
     
+    # Valuation filters
     if mc_min is not None:
         mask &= df["Market Cap (B)"] >= mc_min
     if mc_max is not None:
@@ -396,14 +491,82 @@ def render_screener() -> None:
         mask &= df["Trailing P/E"] >= pe_min
     if pe_max is not None:
         mask &= df["Trailing P/E"] <= pe_max
+    if peg_min is not None:
+        mask &= df["PEG Ratio"] >= peg_min
+    if peg_max is not None:
+        mask &= df["PEG Ratio"] <= peg_max
+    if pb_min is not None:
+        mask &= df["P/B"] >= pb_min
+    if pb_max is not None:
+        mask &= df["P/B"] <= pb_max
+    if ps_min is not None:
+        mask &= df["P/S"] >= ps_min
+    if ps_max is not None:
+        mask &= df["P/S"] <= ps_max
+    if ev_ebitda_min is not None:
+        mask &= df["EV/EBITDA"] >= ev_ebitda_min
+    if ev_ebitda_max is not None:
+        mask &= df["EV/EBITDA"] <= ev_ebitda_max
+    
+    # Profitability filters
     if roe_min is not None:
         mask &= df["ROE (%)"] >= roe_min
     if roe_max is not None:
         mask &= df["ROE (%)"] <= roe_max
+    if roa_min is not None:
+        mask &= df["ROA (%)"] >= roa_min
+    if roa_max is not None:
+        mask &= df["ROA (%)"] <= roa_max
+    if profit_margin_min is not None:
+        mask &= df["Profit Margin (%)"] >= profit_margin_min
+    if profit_margin_max is not None:
+        mask &= df["Profit Margin (%)"] <= profit_margin_max
+    if operating_margin_min is not None:
+        mask &= df["Operating Margin (%)"] >= operating_margin_min
+    if operating_margin_max is not None:
+        mask &= df["Operating Margin (%)"] <= operating_margin_max
+    if eps_min is not None:
+        mask &= df["EPS (TTM)"] >= eps_min
+    if eps_max is not None:
+        mask &= df["EPS (TTM)"] <= eps_max
+    
+    # Growth filters
+    if rev_growth_min is not None:
+        mask &= df["Revenue Growth (%)"] >= rev_growth_min
+    if rev_growth_max is not None:
+        mask &= df["Revenue Growth (%)"] <= rev_growth_max
+    if earn_growth_min is not None:
+        mask &= df["Earnings Growth (%)"] >= earn_growth_min
+    if earn_growth_max is not None:
+        mask &= df["Earnings Growth (%)"] <= earn_growth_max
+    
+    # Financial Health filters
+    if de_min is not None:
+        mask &= df["Debt/Equity"] >= de_min
+    if de_max is not None:
+        mask &= df["Debt/Equity"] <= de_max
+    if current_ratio_min is not None:
+        mask &= df["Current Ratio"] >= current_ratio_min
+    if current_ratio_max is not None:
+        mask &= df["Current Ratio"] <= current_ratio_max
+    if quick_ratio_min is not None:
+        mask &= df["Quick Ratio"] >= quick_ratio_min
+    if quick_ratio_max is not None:
+        mask &= df["Quick Ratio"] <= quick_ratio_max
+    if fcf_min is not None:
+        mask &= df["Free Cash Flow (B)"] >= fcf_min
+    if fcf_max is not None:
+        mask &= df["Free Cash Flow (B)"] <= fcf_max
     if dy_min is not None:
         mask &= df["Dividend Yield (%)"] >= dy_min
     if dy_max is not None:
         mask &= df["Dividend Yield (%)"] <= dy_max
+    if payout_min is not None:
+        mask &= df["Payout Ratio (%)"] >= payout_min
+    if payout_max is not None:
+        mask &= df["Payout Ratio (%)"] <= payout_max
+    
+    # Technical filters
     if rsi_min is not None and "RSI (14)" in df.columns:
         mask &= df["RSI (14)"] >= rsi_min
     if rsi_max is not None and "RSI (14)" in df.columns:
