@@ -25,7 +25,7 @@ def render_grapher() -> None:
             min_value=1,
             max_value=30,
             value=10,
-            help="Applies to both price and fundamental data (where available)"
+            help="Price history years (fundamentals show all available)"
         )
 
     if not ticker:
@@ -39,46 +39,22 @@ def render_grapher() -> None:
         with st.spinner(f"Fetching {ticker} ({frequency.lower()})..."):
             try:
                 ticker_obj = yf.Ticker(ticker)
-
                 is_annual = (frequency == "Annual")
 
-                # ── Financial statements ────────────────────────────────────────
-                income   = ticker_obj.income_stmt    if is_annual else ticker_obj.quarterly_income_stmt
-                balance  = ticker_obj.balance_sheet  if is_annual else ticker_obj.quarterly_balance_sheet
-                cashflow = ticker_obj.cashflow       if is_annual else ticker_obj.quarterly_cashflow
-
-                # Fallback
-                if income.empty:   income   = ticker_obj.get_income_stmt(freq="yearly" if is_annual else "quarterly")
-                if balance.empty:  balance  = ticker_obj.get_balance_sheet(freq="yearly" if is_annual else "quarterly")
-                if cashflow.empty: cashflow = ticker_obj.get_cashflow(freq="yearly" if is_annual else "quarterly")
-
-                # ── FILTER fundamentals by years_back ───────────────────────────
-                # Note: Yahoo Finance DataFrames have dates as columns
-                cutoff_date = pd.Timestamp(start_date)
+                # ── Get financials - DON'T filter, show all available ──────────
+                st.info("📊 Fetching fundamental data (showing ALL available periods)...")
                 
-                # Debug before filtering
-                if not income.empty:
-                    before_dates = sorted(income.columns)
-                    st.info(f"🔍 Raw dates available: {before_dates[0].date()} to {before_dates[-1].date()} ({len(before_dates)} periods)")
-                    st.info(f"📅 Cutoff date (filtering to keep >= this): {cutoff_date.date()}")
-                
-                if not income.empty:
-                    mask = income.columns >= cutoff_date
-                    st.info(f"🎯 Mask result: {mask.sum()} columns pass filter (out of {len(mask)})")
-                    income = income.loc[:, mask].copy()
-                    if not income.empty:
-                        after_dates = sorted(income.columns)
-                        st.success(f"✓ After filter: {after_dates[0].date()} to {after_dates[-1].date()} ({len(after_dates)} periods)")
-                    
-                if not balance.empty:
-                    mask = balance.columns >= cutoff_date
-                    balance = balance.loc[:, mask].copy()
-                    
-                if not cashflow.empty:
-                    mask = cashflow.columns >= cutoff_date
-                    cashflow = cashflow.loc[:, mask].copy()
+                # Use the newer API methods
+                if is_annual:
+                    income = ticker_obj.get_income_stmt(freq="yearly")
+                    balance = ticker_obj.get_balance_sheet(freq="yearly") 
+                    cashflow = ticker_obj.get_cashflow(freq="yearly")
+                else:
+                    income = ticker_obj.get_income_stmt(freq="quarterly")
+                    balance = ticker_obj.get_balance_sheet(freq="quarterly")
+                    cashflow = ticker_obj.get_cashflow(freq="quarterly")
 
-                # Price history
+                # Price history - respects slider
                 prices = yf.download(
                     ticker,
                     start=start_date,
@@ -89,55 +65,58 @@ def render_grapher() -> None:
                 
                 if isinstance(prices, pd.DataFrame) and "Close" in prices.columns:
                     prices = prices["Close"]
-                elif isinstance(prices, pd.DataFrame):
-                    prices = prices.iloc[:, 0] if not prices.empty else pd.Series()
+                elif isinstance(prices, pd.DataFrame) and not prices.empty:
+                    prices = prices.iloc[:, 0]
+                else:
+                    prices = pd.Series(dtype=float)
 
                 if prices.empty and income.empty and balance.empty and cashflow.empty:
-                    st.error(f"No data returned for {ticker}.")
+                    st.error(f"No data returned for {ticker}. Check ticker symbol.")
                     return
 
-                # ── Show actual available ranges ────────────────────────────────
+                # ── Show what we actually got ───────────────────────────────────
                 if not prices.empty:
-                    st.caption(f"**Price history:** {prices.index.min().date()} → {prices.index.max().date()}  ({len(prices)} points)")
+                    st.success(f"✓ Price: {prices.index.min().date()} → {prices.index.max().date()} ({len(prices)} days)")
 
                 if not income.empty:
-                    fin_start = income.columns.min().date()
-                    fin_end   = income.columns.max().date()
-                    fin_years = (income.columns.max() - income.columns.min()).days / 365.25
-                    st.caption(f"**Fundamentals available:** {fin_start} → {fin_end}  (~{fin_years:.1f} years, {len(income.columns)} periods)")
+                    dates = sorted(income.columns)
+                    years_available = (dates[-1] - dates[0]).days / 365.25
+                    st.success(f"✓ Fundamentals: {dates[0].date()} → {dates[-1].date()} ({len(dates)} periods, ~{years_available:.1f} years)")
+                else:
+                    st.warning("⚠️ No fundamental data available for this ticker")
 
-                    if fin_years < years_back * 0.5:
-                        st.warning(
-                            f"Only ~{fin_years:.1f} years of fundamental data available. "
-                            "Yahoo Finance often provides limited historical fundamental data."
-                        )
+                # Align dates across statements
+                if not income.empty and not balance.empty and not cashflow.empty:
+                    common_dates = income.columns.intersection(balance.columns).intersection(cashflow.columns)
+                    income = income[common_dates]
+                    balance = balance[common_dates]
+                    cashflow = cashflow[common_dates]
+                    st.caption(f"Using {len(common_dates)} periods where all statements available")
 
-                # Align dates
-                common_dates = income.columns.intersection(balance.columns).intersection(cashflow.columns)
-                income   = income[common_dates]
-                balance  = balance[common_dates]
-                cashflow = cashflow[common_dates]
-
-                # ── Helper: safely get row data ─────────────────────────────────
+                # ── Helper functions ────────────────────────────────────────────
                 def safe_get(df, key, default=None):
-                    """Safely get a row from DataFrame, handling missing keys"""
+                    """Get row from DataFrame with fallback"""
+                    if df.empty:
+                        return pd.Series(dtype=float)
+                    
                     if key in df.index:
                         return df.loc[key]
-                    # Try common alternatives
+                    
+                    # Try alternatives
                     alternatives = {
-                        "Total Revenue": ["TotalRevenue"],
-                        "Gross Profit": ["GrossProfit"],
-                        "Operating Income": ["OperatingIncome", "EBIT"],
-                        "Net Income": ["NetIncome"],
-                        "Operating Cash Flow": ["OperatingCashFlow", "Cash Flow From Operating Activities"],
+                        "Total Revenue": ["TotalRevenue", "Total Revenues"],
+                        "Gross Profit": ["GrossProfit", "Gross Income"],
+                        "Operating Income": ["OperatingIncome", "EBIT", "Operating Revenue"],
+                        "Net Income": ["NetIncome", "Net Income Common Stockholders"],
+                        "Operating Cash Flow": ["OperatingCashFlow", "Total Cash From Operating Activities"],
                         "Capital Expenditure": ["CapitalExpenditure", "Capital Expenditures"],
-                        "Stock Based Compensation": ["StockBasedCompensation", "Share Based Compensation"],
-                        "Basic Average Shares": ["BasicAverageShares", "Ordinary Shares Number"],
-                        "Diluted Average Shares": ["DilutedAverageShares", "Diluted NI Available to Com Stockholders"],
-                        "Total Assets": ["TotalAssets"],
-                        "Total Debt": ["TotalDebt", "Long Term Debt"],
-                        "Cash And Cash Equivalents": ["CashAndCashEquivalents", "Cash"],
-                        "Tax Provision": ["TaxProvision", "Tax Effect Of Unusual Items"]
+                        "Stock Based Compensation": ["StockBasedCompensation", "Stock Based Compensation"],
+                        "Basic Average Shares": ["BasicAverageShares", "Ordinary Shares Number", "Share Issued"],
+                        "Diluted Average Shares": ["DilutedAverageShares", "Diluted NI Available To Com Stockholders"],
+                        "Total Assets": ["TotalAssets", "Total Assets"],
+                        "Total Debt": ["TotalDebt", "Long Term Debt", "Total Debt"],
+                        "Cash And Cash Equivalents": ["CashAndCashEquivalents", "Cash", "Cash Cash Equivalents And Short Term Investments"],
+                        "Tax Provision": ["TaxProvision", "Tax Effect Of Unusual Items", "Income Tax Expense"]
                     }
                     
                     for alt in alternatives.get(key, []):
@@ -145,91 +124,73 @@ def render_grapher() -> None:
                             return df.loc[alt]
                     
                     if default is not None:
-                        return pd.Series(default, index=df.columns)
+                        return pd.Series(default, index=df.columns if not df.empty else [])
                     return pd.Series(dtype=float)
 
-                # ── Plot helpers ────────────────────────────────────────────────
-                def to_1d(data):
-                    if isinstance(data, pd.DataFrame):
-                        if data.shape[1] == 1:
-                            return data.squeeze()
-                        return data.iloc[:, 0]
-                    if isinstance(data, pd.Series):
-                        return data
-                    if hasattr(data, 'to_numpy'):
-                        return pd.Series(data.to_numpy().flatten(), index=getattr(data, 'index', None))
-                    return pd.Series(data)
-
                 def plot_line(data, title: str, yaxis: str = "Value", color=None, show_growth=False):
-                    data = to_1d(data)
+                    if isinstance(data, pd.DataFrame):
+                        data = data.squeeze()
                     if data.empty or data.isna().all():
-                        st.info(f"No data available for: {title}")
+                        st.info(f"📊 {title}: No data available")
                         return
-                    fig = px.line(
-                        x=data.index if hasattr(data, 'index') else range(len(data)),
-                        y=data,
-                        title=title,
-                        markers=True,
-                        color_discrete_sequence=[color] if color else None
-                    )
+                    
+                    fig = px.line(x=data.index, y=data, title=title, markers=True,
+                                  color_discrete_sequence=[color] if color else None)
+                    
                     if show_growth and len(data.dropna()) > 2:
                         growth = data.pct_change() * 100
-                        if len(growth.dropna()) > 0:
-                            fig.add_scatter(
-                                x=growth.index, 
-                                y=growth, 
-                                name="Period-over-Period Growth %",
-                                yaxis="y2", 
-                                line=dict(dash='dot', color='gray')
-                            )
+                        if not growth.dropna().empty:
+                            fig.add_scatter(x=growth.index, y=growth, 
+                                          name="Growth %", yaxis="y2",
+                                          line=dict(dash='dot', color='gray'))
                             fig.update_layout(yaxis2=dict(title="Growth %", overlaying="y", side="right"))
+                    
                     fig.update_layout(yaxis_title=yaxis, hovermode="x unified")
                     st.plotly_chart(fig, use_container_width=True)
 
                 def plot_bar(data, title: str, yaxis: str = "Value", color=None):
-                    data = to_1d(data)
+                    if isinstance(data, pd.DataFrame):
+                        data = data.squeeze()
                     if data.empty or data.isna().all():
-                        st.info(f"No data available for: {title}")
+                        st.info(f"📊 {title}: No data available")
                         return
-                    fig = px.bar(
-                        x=data.index if hasattr(data, 'index') else range(len(data)),
-                        y=data,
-                        title=title,
-                        color_discrete_sequence=[color] if color else None
-                    )
+                    
+                    fig = px.bar(x=data.index, y=data, title=title,
+                                color_discrete_sequence=[color] if color else None)
                     fig.update_layout(yaxis_title=yaxis)
                     st.plotly_chart(fig, use_container_width=True)
 
                 def plot_multi(df: pd.DataFrame, title: str, yaxis: str = "Value", colors=None):
                     if df.empty or df.isna().all().all():
-                        st.info(f"No data available for: {title}")
+                        st.info(f"📊 {title}: No data available")
                         return
+                    
                     fig = go.Figure()
                     has_data = False
                     for i, col in enumerate(df.columns):
-                        s = to_1d(df[col])
-                        if s.empty or s.isna().all():
+                        series = df[col]
+                        if series.empty or series.isna().all():
                             continue
                         has_data = True
                         fig.add_trace(go.Scatter(
-                            x=s.index,
-                            y=s,
-                            mode="lines+markers",
-                            name=col,
+                            x=series.index, y=series, mode="lines+markers", name=col,
                             line=dict(color=colors[i] if colors and i < len(colors) else None)
                         ))
-                    if has_data:
-                        fig.update_layout(title=title, yaxis_title=yaxis, hovermode="x unified")
-                        st.plotly_chart(fig, use_container_width=True)
-                    else:
-                        st.info(f"No data available for: {title}")
+                    
+                    if not has_data:
+                        st.info(f"📊 {title}: No data available")
+                        return
+                    
+                    fig.update_layout(title=title, yaxis_title=yaxis, hovermode="x unified")
+                    st.plotly_chart(fig, use_container_width=True)
 
-                # ── Graphs ──────────────────────────────────────────────────────
+                # ── CHARTS ──────────────────────────────────────────────────────
+                st.markdown("---")
                 st.markdown("### 1. Price History")
-                plot_line(prices, f"{ticker} Adjusted Close Price", color="#1f77b4")
+                plot_line(prices, f"{ticker} Adjusted Close", color="#1f77b4")
 
                 revenue = safe_get(income, "Total Revenue")
-                if not revenue.empty and not revenue.isna().all():
+                if not revenue.empty:
                     st.markdown("### 2. Revenue")
                     plot_bar(revenue, "Total Revenue", color="#2ca02c")
 
@@ -237,39 +198,42 @@ def render_grapher() -> None:
                 operating_income = safe_get(income, "Operating Income")
                 net_income = safe_get(income, "Net Income")
                 
-                if not revenue.empty and not any(x.empty for x in [gross_profit, operating_income, net_income]):
+                if not revenue.empty and all(not x.empty for x in [gross_profit, operating_income, net_income]):
                     st.markdown("### 3. Margin Trends (%)")
                     margins = pd.DataFrame({
-                        "Gross":     (gross_profit / revenue) * 100,
+                        "Gross": (gross_profit / revenue) * 100,
                         "Operating": (operating_income / revenue) * 100,
-                        "Net":       (net_income / revenue) * 100
+                        "Net": (net_income / revenue) * 100
                     })
-                    plot_multi(margins, "Gross / Operating / Net Margin", yaxis="%", colors=["#ff7f0e","#d62728","#9467bd"])
+                    plot_multi(margins, "Margins Over Time", yaxis="%", 
+                              colors=["#ff7f0e", "#d62728", "#9467bd"])
 
                 if not operating_income.empty or not net_income.empty:
                     st.markdown("### 4. Profitability")
                     profit_df = pd.DataFrame({
                         "Operating Income": operating_income,
-                        "Net Income":       net_income
+                        "Net Income": net_income
                     })
-                    plot_multi(profit_df, "Operating & Net Income", colors=["#17becf", "#bcbd22"])
+                    plot_multi(profit_df, "Operating vs Net Income", 
+                              colors=["#17becf", "#bcbd22"])
 
                 ocf = safe_get(cashflow, "Operating Cash Flow")
                 if not ocf.empty and not net_income.empty:
                     st.markdown("### 5. Earnings Quality")
                     eq_df = pd.DataFrame({
-                        "Op. Cash Flow": ocf,
-                        "Net Income":    net_income
+                        "Operating Cash Flow": ocf,
+                        "Net Income": net_income
                     })
-                    plot_multi(eq_df, "Operating Cash Flow vs Net Income", colors=["#1f77b4", "#ff7f0e"])
+                    plot_multi(eq_df, "Cash Flow vs Earnings", 
+                              colors=["#1f77b4", "#ff7f0e"])
 
                 capex = safe_get(cashflow, "Capital Expenditure", 0)
                 if not ocf.empty:
-                    # CapEx is usually negative in Yahoo Finance
-                    fcf = ocf + capex  # Adding negative capex subtracts it
+                    fcf = ocf + capex  # CapEx usually negative
                     if fcf.abs().sum() > 0:
                         st.markdown("### 6. Free Cash Flow")
-                        plot_line(fcf, "Free Cash Flow (OCF + CapEx)", show_growth=True)
+                        plot_line(fcf, "Free Cash Flow (OCF + CapEx)", 
+                                 show_growth=True, color="#2ca02c")
 
                 sbc = safe_get(cashflow, "Stock Based Compensation")
                 if not sbc.empty and sbc.abs().sum() > 0:
@@ -280,46 +244,46 @@ def render_grapher() -> None:
                 shares_diluted = safe_get(income, "Diluted Average Shares")
                 
                 if not shares_basic.empty or not shares_diluted.empty:
-                    st.markdown("### 8. Share Count & Dilution")
+                    st.markdown("### 8. Share Count")
                     shares_df = pd.DataFrame({
-                        "Basic Avg":   shares_basic,
-                        "Diluted Avg": shares_diluted
+                        "Basic": shares_basic,
+                        "Diluted": shares_diluted
                     })
-                    plot_multi(shares_df, "Basic vs Diluted Shares", yaxis="Shares")
+                    plot_multi(shares_df, "Outstanding Shares", yaxis="Shares")
 
                     if not shares_diluted.empty and len(shares_diluted.dropna()) > 1:
-                        # Negative change = dilution, Positive = buyback
                         chg_pct = -shares_diluted.pct_change() * 100
-                        st.markdown("### 9. Share Count Change % (positive = buyback, negative = dilution)")
-                        plot_line(chg_pct.dropna(), "Share Count Change %", yaxis="% Change", color="#e377c2")
+                        if not chg_pct.dropna().empty:
+                            st.markdown("### 9. Share Count Change %")
+                            plot_line(chg_pct.dropna(), 
+                                     "Share Change (+ = buyback, - = dilution)", 
+                                     yaxis="% Change", color="#e377c2")
 
-                # ── ROIC (fixed) ────────────────────────────────────────────────
+                # ── ROIC ────────────────────────────────────────────────────────
                 total_assets = safe_get(balance, "Total Assets")
                 total_debt = safe_get(balance, "Total Debt", 0)
                 cash = safe_get(balance, "Cash And Cash Equivalents", 0)
-                tax_provision = safe_get(income, "Tax Provision", 0)
+                tax = safe_get(income, "Tax Provision", 0)
                 
                 if not net_income.empty and not total_assets.empty:
-                    st.markdown("### 10. Return on Invested Capital (ROIC) – approx")
-                    # NOPAT ≈ Net Income + Tax back (simplified)
-                    nopat = net_income + tax_provision.abs()
-                    # Invested Capital ≈ Total Assets - Cash - Debt
+                    st.markdown("### 10. Return on Invested Capital (ROIC)")
+                    nopat = net_income + tax.abs()
                     inv_cap = total_assets - cash - total_debt
-                    inv_cap_lagged = inv_cap.shift(1)
+                    inv_cap_lag = inv_cap.shift(1)
                     
-                    roic = (nopat / inv_cap_lagged) * 100
+                    roic = (nopat / inv_cap_lag) * 100
                     roic = roic.replace([np.inf, -np.inf], np.nan)
                     
                     if not roic.dropna().empty:
-                        plot_line(roic.dropna(), "ROIC (%) - Net Income / Invested Capital", yaxis="ROIC %", color="#7f7f7f")
+                        plot_line(roic.dropna(), "ROIC (approx)", 
+                                 yaxis="ROIC %", color="#7f7f7f")
 
                 st.success("✓ Analysis complete")
-                st.caption(f"Showing data from {start_date} onwards (where available)")
+                st.caption("Note: Fundamental data shows ALL available periods from Yahoo Finance (often limited to 4-5 years)")
 
             except Exception as e:
-                st.error(f"Error: {str(e)}")
+                st.error(f"Error loading {ticker}: {str(e)}")
                 st.exception(e)
-                st.info("Try:\n• Major US stocks (AAPL, META, TSLA, NVDA)\n• Switch Annual ↔ Quarterly\n• Reduce years if data is sparse")
 
 
 if __name__ == "__main__":
