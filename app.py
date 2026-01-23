@@ -190,20 +190,10 @@ def get_available_modules() -> Dict[str, dict]:
         pass
     
     try:
-        from fundamental_comparison import render_fundamental_comparison
-        modules["🔬 Fundamental Comparison"] = {
-            "func": render_fundamental_comparison,
-            "desc": "Compare fundamental metrics across multiple stocks",
-            "uses_context": False
-        }
-    except ImportError:
-        pass
-    
-    try:
         from screener import render_screener
         modules["🔍 Stock Screener"] = {
             "func": render_screener,
-            "desc": "Screen stocks based on fundamental criteria",
+            "desc": "Advanced stock screening with technical & fundamental filters",
             "uses_context": False
         }
     except ImportError:
@@ -211,9 +201,20 @@ def get_available_modules() -> Dict[str, dict]:
     
     try:
         from excel_export import render_excel_export
-        modules["📥 Excel Export"] = {
+        modules["📤 Excel Export"] = {
             "func": render_excel_export,
-            "desc": "Export multi-sheet analysis reports to Excel",
+            "desc": "Download price data and analytics in formatted Excel",
+            "uses_context": False
+        }
+    except ImportError:
+        pass
+    
+    # ── NEW MODULE ────────────────────────────────────────────────────────
+    try:
+        from intrinsic_value import render_intrinsic_value
+        modules["💎 Intrinsic Value"] = {
+            "func": render_intrinsic_value,
+            "desc": "Calculate intrinsic value using multiple methods and screen for overvalued stocks",
             "uses_context": False
         }
     except ImportError:
@@ -222,116 +223,25 @@ def get_available_modules() -> Dict[str, dict]:
     return modules
 
 # ────────────────────────────────────────────────
-#   Session State Initialization
-# ────────────────────────────────────────────────
-def init_session_state():
-    """Initialize session state variables"""
-    if 'preferences' not in st.session_state:
-        st.session_state.preferences = {
-            'last_tickers': Config.DEFAULT_TICKERS,
-            'favorite_modules': [],
-            'last_preset': 'Custom',
-            'last_date_preset': 'Custom'
-        }
-    
-    if 'data_cache' not in st.session_state:
-        st.session_state.data_cache = {
-            'df_prices': None,
-            'tickers': None,
-            'date_range': None
-        }
-
-# ────────────────────────────────────────────────
-#   Page Configuration
-# ────────────────────────────────────────────────
-st.set_page_config(
-    page_title=Config.APP_TITLE,
-    page_icon="📈",
-    layout="wide",
-    initial_sidebar_state="expanded",
-    menu_items={
-        'Get Help': 'https://github.com/yourusername/asset-analyzer',
-        'Report a bug': "https://github.com/yourusername/asset-analyzer/issues",
-        'About': f"{Config.APP_TITLE} v{Config.APP_VERSION} • Multi-asset analysis tool"
-    }
-)
-
-# Initialize session state
-init_session_state()
-
-# ────────────────────────────────────────────────
-#   Custom Styling
-# ────────────────────────────────────────────────
-st.markdown("""
-    <style>
-    .main .block-container {
-        padding-top: 1.5rem;
-        padding-bottom: 2rem;
-        padding-left: 1.5rem;
-        padding-right: 1.5rem;
-    }
-    
-    section[data-testid="stSidebar"] {
-        width: 340px !important;
-        background-color: rgba(240, 242, 246, 0.05);
-    }
-    
-    h1, h2, h3 {
-        margin-bottom: 1rem !important;
-    }
-    
-    .stExpander, .stTabs [data-baseweb="tab-panel"] {
-        background: rgba(255, 255, 255, 0.03);
-        border: 1px solid rgba(255, 255, 255, 0.08);
-        border-radius: 12px;
-        padding: 1.2rem;
-    }
-    
-    .stButton > button {
-        border-radius: 8px;
-        padding: 0.6rem 1.2rem;
-        font-weight: 500;
-    }
-    
-    .metric-card {
-        background: rgba(28, 131, 225, 0.1);
-        padding: 1rem;
-        border-radius: 8px;
-        border-left: 3px solid #1c83e1;
-    }
-    </style>
-""", unsafe_allow_html=True)
-
-# ────────────────────────────────────────────────
-#   SIDEBAR - Input Controls
+#   SIDEBAR - Controls & Inputs
 # ────────────────────────────────────────────────
 with st.sidebar:
-    st.title(f"📈 {Config.APP_TITLE}")
-    st.caption(f"v{Config.APP_VERSION} • Istanbul, 2026")
+    st.title(f"{Config.APP_TITLE}")
+    st.caption(f"v{Config.APP_VERSION}")
     
-    st.markdown("---")
+    st.markdown("### 🎯 Select Assets")
     
-    # ── Ticker Input ──
-    st.subheader("🎯 Asset Selection")
+    preset = st.selectbox("Quick Presets", options=list(Config.TICKER_PRESETS.keys()))
     
-    # Preset selector
-    preset_choice = st.selectbox(
-        "Quick Presets",
-        options=list(Config.TICKER_PRESETS.keys()),
-        index=0,
-        help="Select a preset or choose Custom to enter your own tickers"
-    )
-    
-    # Ticker input (auto-fill from preset)
-    default_value = Config.TICKER_PRESETS.get(preset_choice, ",".join(Config.DEFAULT_TICKERS))
-    if not default_value:
-        default_value = ",".join(st.session_state.preferences['last_tickers'])
+    if preset != "Custom":
+        default_value = Config.TICKER_PRESETS[preset]
+    else:
+        default_value = ", ".join(st.session_state.get('preferences', {}).get('last_tickers', Config.DEFAULT_TICKERS))
     
     tickers_input = st.text_input(
         "Tickers (comma-separated)",
         value=default_value,
-        placeholder="AAPL,MSFT,GC=F,BTC-USD,EURUSD=X",
-        help="Supports stocks, ETFs, commodities, forex, crypto, indices (^GSPC)"
+        help="e.g. AAPL, MSFT, TSLA or BTC-USD, ETH-USD"
     )
     
     # Parse and validate tickers
@@ -340,6 +250,7 @@ with st.sidebar:
     
     if tickers:
         st.caption(f"✅ {len(tickers)} valid ticker(s)")
+        st.session_state.preferences = st.session_state.get('preferences', {})
         st.session_state.preferences['last_tickers'] = tickers
     
     st.markdown("---")
@@ -384,7 +295,7 @@ with st.sidebar:
     failed_tickers = []
     
     cache_key = f"{','.join(tickers)}_{start_date}_{end_date}"
-    cache_valid = st.session_state.data_cache.get('date_range') == cache_key
+    cache_valid = st.session_state.get('data_cache', {}).get('date_range') == cache_key
     
     if fetch_button or not cache_valid:
         if tickers:
@@ -392,6 +303,8 @@ with st.sidebar:
                 df_prices, failed_tickers = DataProvider.fetch_prices(tickers, start_date, end_date)
                 
                 # Update cache
+                if 'data_cache' not in st.session_state:
+                    st.session_state.data_cache = {}
                 st.session_state.data_cache['df_prices'] = df_prices
                 st.session_state.data_cache['tickers'] = tickers
                 st.session_state.data_cache['date_range'] = cache_key
@@ -481,23 +394,27 @@ if available_modules and selected_mode in available_modules:
     
     try:
         if df_prices is None or df_prices.empty:
-            st.info("👈 **Please fetch data from the sidebar to begin analysis**")
-            st.markdown("""
-            ### Getting Started
-            1. Enter ticker symbols (or select a preset)
-            2. Choose your date range
-            3. Click **Fetch Data**
-            4. Results will appear here automatically
-            """)
-        else:
-            # Call module with appropriate parameters
             if module_info["uses_context"]:
-                # Create context object
-                context = AnalysisContext(df_prices, tickers, start_date, end_date)
-                module_info["func"](context.df_prices, context.tickers)
+                st.info("👈 **Please fetch data from the sidebar to begin analysis**")
+                st.markdown("""
+                ### Getting Started
+                1. Enter ticker symbols (or select a preset)
+                2. Choose your date range
+                3. Click **Fetch Data**
+                4. Results will appear here automatically
+                """)
             else:
-                # Module has its own inputs
-                module_info["func"]()
+                # Modules that don't need price data can run anyway
+                pass
+        
+        # Call module with appropriate parameters
+        if module_info["uses_context"]:
+            # Create context object
+            context = AnalysisContext(df_prices, tickers, start_date, end_date)
+            module_info["func"](context.df_prices, context.tickers)
+        else:
+            # Module has its own inputs / doesn't need shared data
+            module_info["func"]()
                 
     except Exception as e:
         st.error(f"❌ **Module Error:** {str(e)}")
