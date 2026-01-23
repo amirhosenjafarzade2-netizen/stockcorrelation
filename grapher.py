@@ -22,32 +22,33 @@ def render_grapher() -> None:
         frequency = st.selectbox("Frequency", ["Quarterly", "Annual"], index=0)
 
     with col3:
-        years_back = st.slider("Years back", 1, 30, 12)
+        years_back = st.slider("Price history lookback (years)", 1, 30, 10)
 
     if not ticker:
-        st.info("Enter a ticker symbol.")
+        st.info("Enter a ticker symbol to begin.")
         return
 
     end_date = date.today()
-    start_date = end_date - timedelta(days=365 * (years_back + 2))
+    start_date = end_date - timedelta(days=365 * (years_back + 1))
 
-    if st.button("Load Fundamentals", type="primary"):
-        with st.spinner(f"Loading {ticker} data…"):
+    if st.button("Load & Plot", type="primary", use_container_width=True):
+        with st.spinner(f"Fetching data for {ticker} ({frequency.lower()})..."):
             try:
                 ticker_obj = yf.Ticker(ticker)
 
                 is_annual = (frequency == "Annual")
 
-                # Modern yfinance access
+                # ── Financial statements ────────────────────────────────────────
                 income   = ticker_obj.income_stmt    if is_annual else ticker_obj.quarterly_income_stmt
                 balance  = ticker_obj.balance_sheet  if is_annual else ticker_obj.quarterly_balance_sheet
                 cashflow = ticker_obj.cashflow       if is_annual else ticker_obj.quarterly_cashflow
 
-                # Fallback
+                # Fallback (in case properties fail)
                 if income.empty:   income   = ticker_obj.get_income_stmt(freq="yearly" if is_annual else "quarterly")
                 if balance.empty:  balance  = ticker_obj.get_balance_sheet(freq="yearly" if is_annual else "quarterly")
                 if cashflow.empty: cashflow = ticker_obj.get_cashflow(freq="yearly" if is_annual else "quarterly")
 
+                # Price history (respects slider)
                 prices = yf.download(
                     ticker,
                     start=start_date,
@@ -56,33 +57,37 @@ def render_grapher() -> None:
                     auto_adjust=True
                 )["Close"]
 
-                if income.empty and balance.empty and cashflow.empty and prices.empty:
-                    st.error("No meaningful data returned for this ticker.")
+                if prices.empty and income.empty and balance.empty and cashflow.empty:
+                    st.error(f"No data available for {ticker} in the selected period/frequency.")
                     return
+
+                # Show actual available ranges
+                if not prices.empty:
+                    st.caption(f"**Price data range:** {prices.index.min().date()} → {prices.index.max().date()}  ({len(prices)} points)")
+                if not income.empty:
+                    st.caption(f"**Financials range:** {income.columns.min().date()} → {income.columns.max().date()}  ({len(income.columns)} periods)")
 
                 common_dates = income.columns.intersection(balance.columns).intersection(cashflow.columns)
                 income   = income[common_dates]
                 balance  = balance[common_dates]
                 cashflow = cashflow[common_dates]
 
-                st.success(f"Loaded {len(common_dates)} periods • {len(prices)} price points")
-
-                # ── Robust plotting helpers ──────────────────────────────────────
+                # ── Plotting helpers ─────────────────────────────────────────────
                 def to_1d(data):
-                    """Force input to 1-dimensional Series or array"""
                     if isinstance(data, pd.DataFrame):
                         if data.shape[1] == 1:
                             return data.squeeze()
-                        elif data.shape[1] > 1:
-                            return data.iloc[:, 0]  # take first column as fallback
+                        return data.iloc[:, 0]
                     if isinstance(data, pd.Series):
                         return data
                     if hasattr(data, 'to_numpy'):
                         return pd.Series(data.to_numpy().flatten(), index=getattr(data, 'index', None))
                     return pd.Series(data)
 
-                def plot_line(data, title: str, yaxis: str = "$", color=None, show_growth=False):
+                def plot_line(data, title: str, yaxis: str = "Value", color=None, show_growth=False):
                     data = to_1d(data)
+                    if data.empty:
+                        return
                     fig = px.line(
                         x=data.index if hasattr(data, 'index') else range(len(data)),
                         y=data,
@@ -90,7 +95,6 @@ def render_grapher() -> None:
                         markers=True,
                         color_discrete_sequence=[color] if color else None
                     )
-
                     if show_growth and len(data) > 4:
                         growth = data.pct_change().rolling(4).mean() * 100
                         fig.add_scatter(
@@ -100,15 +104,14 @@ def render_grapher() -> None:
                             yaxis="y2",
                             line=dict(dash='dot', color='gray')
                         )
-                        fig.update_layout(
-                            yaxis2=dict(title="Growth %", overlaying="y", side="right")
-                        )
-
+                        fig.update_layout(yaxis2=dict(title="Growth %", overlaying="y", side="right"))
                     fig.update_layout(yaxis_title=yaxis, hovermode="x unified")
                     st.plotly_chart(fig, use_container_width=True)
 
-                def plot_bar(data, title: str, yaxis: str = "$", color=None):
+                def plot_bar(data, title: str, yaxis: str = "Value", color=None):
                     data = to_1d(data)
+                    if data.empty:
+                        return
                     fig = px.bar(
                         x=data.index if hasattr(data, 'index') else range(len(data)),
                         y=data,
@@ -118,107 +121,99 @@ def render_grapher() -> None:
                     fig.update_layout(yaxis_title=yaxis)
                     st.plotly_chart(fig, use_container_width=True)
 
-                def plot_multi(df: pd.DataFrame, title: str, yaxis: str = "$", colors=None):
+                def plot_multi(df: pd.DataFrame, title: str, yaxis: str = "Value", colors=None):
+                    if df.empty:
+                        return
                     fig = go.Figure()
                     for i, col in enumerate(df.columns):
-                        series = to_1d(df[col])
+                        s = to_1d(df[col])
+                        if s.empty:
+                            continue
                         fig.add_trace(go.Scatter(
-                            x=series.index,
-                            y=series,
+                            x=s.index,
+                            y=s,
                             mode="lines+markers",
                             name=col,
                             line=dict(color=colors[i] if colors and i < len(colors) else None)
                         ))
-                    fig.update_layout(title=title, yaxis_title=yaxis, hovermode="x unified")
-                    st.plotly_chart(fig, use_container_width=True)
+                    if fig.data:
+                        fig.update_layout(title=title, yaxis_title=yaxis, hovermode="x unified")
+                        st.plotly_chart(fig, use_container_width=True)
 
-                # ── 1. Price History ─────────────────────────────────────────────
-                st.markdown("### Price History")
-                plot_line(prices, f"{ticker} Adjusted Close", color="#1f77b4")
+                # ── Graphs ───────────────────────────────────────────────────────
+                st.markdown("### 1. Price History")
+                plot_line(prices, f"{ticker} Adjusted Close Price", color="#1f77b4")
 
-                # ── 2. Revenue ───────────────────────────────────────────────────
                 if "Total Revenue" in income.index:
-                    st.markdown("### Revenue")
+                    st.markdown("### 2. Revenue")
                     plot_bar(income.loc["Total Revenue"], "Total Revenue", color="#2ca02c")
 
-                # ── 3. Margins ───────────────────────────────────────────────────
                 if all(k in income.index for k in ["Gross Profit", "Operating Income", "Net Income", "Total Revenue"]):
-                    st.markdown("### Margin Trends")
+                    st.markdown("### 3. Margin Trends (%)")
                     margins = pd.DataFrame({
-                        "Gross Margin":   income.loc["Gross Profit"]     / income.loc["Total Revenue"],
-                        "Operating Margin": income.loc["Operating Income"] / income.loc["Total Revenue"],
-                        "Net Margin":     income.loc["Net Income"]       / income.loc["Total Revenue"]
+                        "Gross":     income.loc["Gross Profit"]     / income.loc["Total Revenue"],
+                        "Operating": income.loc["Operating Income"] / income.loc["Total Revenue"],
+                        "Net":       income.loc["Net Income"]       / income.loc["Total Revenue"]
                     }) * 100
-                    plot_multi(margins, "Gross / Operating / Net Margin (%)", yaxis="Margin %",
-                               colors=["#ff7f0e", "#d62728", "#9467bd"])
+                    plot_multi(margins, "Gross / Operating / Net Margin", yaxis="%", colors=["#ff7f0e","#d62728","#9467bd"])
 
-                # ── 4. Net Income & Operating Income ─────────────────────────────
-                st.markdown("### Profitability")
                 profit_df = pd.DataFrame({
                     "Operating Income": income.get("Operating Income", pd.Series()),
                     "Net Income":       income.get("Net Income", pd.Series())
                 })
                 if not profit_df.empty:
+                    st.markdown("### 4. Profitability")
                     plot_multi(profit_df, "Operating & Net Income", colors=["#17becf", "#bcbd22"])
 
-                # ── 5. Operating Cash Flow vs Net Income ─────────────────────────
                 if "Operating Cash Flow" in cashflow.index and "Net Income" in income.index:
-                    st.markdown("### Earnings Quality: Op. Cash Flow vs Net Income")
+                    st.markdown("### 5. Earnings Quality")
                     eq_df = pd.DataFrame({
-                        "Operating Cash Flow": cashflow.loc["Operating Cash Flow"],
-                        "Net Income": income.loc["Net Income"]
+                        "Op. Cash Flow": cashflow.loc["Operating Cash Flow"],
+                        "Net Income":    income.loc["Net Income"]
                     })
-                    plot_multi(eq_df, "Op. Cash Flow vs Net Income", colors=["#1f77b4", "#ff7f0e"])
+                    plot_multi(eq_df, "Operating Cash Flow vs Net Income", colors=["#1f77b4", "#ff7f0e"])
 
-                # ── 6. Free Cash Flow ────────────────────────────────────────────
                 ocf   = cashflow.get("Operating Cash Flow", pd.Series())
                 capex = cashflow.get("Capital Expenditure", pd.Series(0, index=ocf.index))
                 fcf   = ocf + capex
-
                 if not fcf.empty and fcf.abs().sum() > 0:
-                    st.markdown("### Free Cash Flow")
-                    plot_line(fcf, f"{ticker} Free Cash Flow", show_growth=True)
+                    st.markdown("### 6. Free Cash Flow")
+                    plot_line(fcf, f"Free Cash Flow", show_growth=True)
 
-                # ── 7. Stock-Based Compensation ──────────────────────────────────
                 sbc = cashflow.get("Stock Based Compensation", pd.Series())
                 if not sbc.empty and sbc.abs().sum() > 0:
-                    st.markdown("### Stock-Based Compensation")
+                    st.markdown("### 7. Stock-Based Compensation")
                     plot_bar(sbc, "Stock-Based Compensation (negative = expense)", color="#9467bd")
 
-                # ── 8. Shares Outstanding & Dilution ─────────────────────────────
                 shares_basic   = income.get("Basic Average Shares", pd.Series())
                 shares_diluted = income.get("Diluted Average Shares", pd.Series())
-
                 if not shares_basic.empty or not shares_diluted.empty:
-                    st.markdown("### Share Count & Dilution Trend")
+                    st.markdown("### 8. Share Count & Dilution")
                     shares_df = pd.DataFrame({
-                        "Basic Avg Shares": shares_basic,
-                        "Diluted Avg Shares": shares_diluted
+                        "Basic Avg":   shares_basic,
+                        "Diluted Avg": shares_diluted
                     })
-                    plot_multi(shares_df, "Basic vs Diluted Average Shares", yaxis="Shares (millions)")
+                    plot_multi(shares_df, "Basic vs Diluted Shares", yaxis="Shares")
 
-                    # Buyback / Dilution intensity
                     if not shares_diluted.empty:
-                        share_change_pct = shares_diluted.pct_change() * 100
-                        st.markdown("### YoY Share Count Change (positive = buyback, negative = dilution)")
-                        plot_line(share_change_pct.dropna(), "Share Count Change % (YoY)", yaxis="% Change", color="#e377c2")
+                        chg_pct = shares_diluted.pct_change() * 100
+                        st.markdown("### 9. YoY Share Change % (positive = buyback)")
+                        plot_line(chg_pct.dropna(), "Share Count Change YoY %", yaxis="% Change", color="#e377c2")
 
-                # ── 9. ROIC (simplified) ─────────────────────────────────────────
                 if all(k in d for k in ["Net Income", "Total Assets", "Total Debt", "Cash And Cash Equivalents"] for d in [income, balance]):
-                    st.markdown("### Return on Invested Capital (ROIC) – simplified")
+                    st.markdown("### 10. Return on Invested Capital (ROIC) – approx")
                     nopat = income.loc["Net Income"] + income.get("Tax Provision", pd.Series(0, index=common_dates))
-                    invested_capital = balance.loc["Total Assets"] - balance.get("Cash And Cash Equivalents", pd.Series(0, index=common_dates)) - balance.get("Total Debt", pd.Series(0, index=common_dates))
-                    roic = (nopat / invested_capital.shift(1)) * 100
+                    inv_cap = balance.loc["Total Assets"] - balance.get("Cash And Cash Equivalents", pd.Series(0, index=common_dates)) - balance.get("Total Debt", pd.Series(0, index=common_dates))
+                    roic = (nopat / inv_cap.shift(1)) * 100
                     plot_line(roic.dropna(), "ROIC (%)", yaxis="ROIC %", color="#7f7f7f")
 
-                st.markdown("---")
-                st.caption("Note: Some metrics may be missing or approximate depending on data availability.")
+                st.caption("Some graphs appear only when the required data fields are available.")
 
             except Exception as e:
                 st.error(f"Error: {str(e)}")
-                st.info("• Try a major US stock (AAPL, MSFT, NVDA…)\n• Some tickers have incomplete fundamentals\n• Check your internet connection")
+                st.info("Common fixes:\n• Use a major US stock (AAPL, META, TSLA, NVDA)\n• Try Annual instead of Quarterly\n• Check internet connection")
 
 
 if __name__ == "__main__":
-    st.set_page_config(page_title="Enhanced Grapher", layout="wide")
+    st.set_page_config(page_title="Grapher", layout="wide")
     render_grapher()
