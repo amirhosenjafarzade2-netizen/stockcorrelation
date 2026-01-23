@@ -38,7 +38,7 @@ def render_grapher() -> None:
 
                 is_annual = (frequency == "Annual")
 
-                # Modern yfinance access (2025–2026 style)
+                # Modern yfinance access
                 income   = ticker_obj.income_stmt    if is_annual else ticker_obj.quarterly_income_stmt
                 balance  = ticker_obj.balance_sheet  if is_annual else ticker_obj.quarterly_balance_sheet
                 cashflow = ticker_obj.cashflow       if is_annual else ticker_obj.quarterly_cashflow
@@ -48,7 +48,13 @@ def render_grapher() -> None:
                 if balance.empty:  balance  = ticker_obj.get_balance_sheet(freq="yearly" if is_annual else "quarterly")
                 if cashflow.empty: cashflow = ticker_obj.get_cashflow(freq="yearly" if is_annual else "quarterly")
 
-                prices = yf.download(ticker, start=start_date, end=end_date, progress=False, auto_adjust=True)["Close"]
+                prices = yf.download(
+                    ticker,
+                    start=start_date,
+                    end=end_date,
+                    progress=False,
+                    auto_adjust=True
+                )["Close"]
 
                 if income.empty and balance.empty and cashflow.empty and prices.empty:
                     st.error("No meaningful data returned for this ticker.")
@@ -61,27 +67,68 @@ def render_grapher() -> None:
 
                 st.success(f"Loaded {len(common_dates)} periods • {len(prices)} price points")
 
-                # ── Plot helper functions ────────────────────────────────────────
-                def plot_line(s: pd.Series, title: str, yaxis: str = "$", color=None, show_growth=False):
-                    fig = px.line(x=s.index, y=s, title=title, markers=True, color_discrete_sequence=[color] if color else None)
-                    if show_growth:
-                        growth = s.pct_change().rolling(4).mean() * 100 if len(s) > 4 else pd.Series()
-                        fig.add_scatter(x=growth.index, y=growth, name="4-per. Avg Growth %", yaxis="y2",
-                                        line=dict(dash='dot', color='gray'))
-                        fig.update_layout(yaxis2=dict(title="Growth %", overlaying="y", side="right"))
+                # ── Robust plotting helpers ──────────────────────────────────────
+                def to_1d(data):
+                    """Force input to 1-dimensional Series or array"""
+                    if isinstance(data, pd.DataFrame):
+                        if data.shape[1] == 1:
+                            return data.squeeze()
+                        elif data.shape[1] > 1:
+                            return data.iloc[:, 0]  # take first column as fallback
+                    if isinstance(data, pd.Series):
+                        return data
+                    if hasattr(data, 'to_numpy'):
+                        return pd.Series(data.to_numpy().flatten(), index=getattr(data, 'index', None))
+                    return pd.Series(data)
+
+                def plot_line(data, title: str, yaxis: str = "$", color=None, show_growth=False):
+                    data = to_1d(data)
+                    fig = px.line(
+                        x=data.index if hasattr(data, 'index') else range(len(data)),
+                        y=data,
+                        title=title,
+                        markers=True,
+                        color_discrete_sequence=[color] if color else None
+                    )
+
+                    if show_growth and len(data) > 4:
+                        growth = data.pct_change().rolling(4).mean() * 100
+                        fig.add_scatter(
+                            x=growth.index,
+                            y=growth,
+                            name="4-per. Avg Growth %",
+                            yaxis="y2",
+                            line=dict(dash='dot', color='gray')
+                        )
+                        fig.update_layout(
+                            yaxis2=dict(title="Growth %", overlaying="y", side="right")
+                        )
+
                     fig.update_layout(yaxis_title=yaxis, hovermode="x unified")
                     st.plotly_chart(fig, use_container_width=True)
 
-                def plot_bar(s: pd.Series, title: str, yaxis: str = "$", color=None):
-                    fig = px.bar(x=s.index, y=s, title=title, color_discrete_sequence=[color] if color else None)
+                def plot_bar(data, title: str, yaxis: str = "$", color=None):
+                    data = to_1d(data)
+                    fig = px.bar(
+                        x=data.index if hasattr(data, 'index') else range(len(data)),
+                        y=data,
+                        title=title,
+                        color_discrete_sequence=[color] if color else None
+                    )
                     fig.update_layout(yaxis_title=yaxis)
                     st.plotly_chart(fig, use_container_width=True)
 
                 def plot_multi(df: pd.DataFrame, title: str, yaxis: str = "$", colors=None):
                     fig = go.Figure()
                     for i, col in enumerate(df.columns):
-                        fig.add_trace(go.Scatter(x=df.index, y=df[col], mode="lines+markers",
-                                                 name=col, line=dict(color=colors[i] if colors and i < len(colors) else None)))
+                        series = to_1d(df[col])
+                        fig.add_trace(go.Scatter(
+                            x=series.index,
+                            y=series,
+                            mode="lines+markers",
+                            name=col,
+                            line=dict(color=colors[i] if colors and i < len(colors) else None)
+                        ))
                     fig.update_layout(title=title, yaxis_title=yaxis, hovermode="x unified")
                     st.plotly_chart(fig, use_container_width=True)
 
@@ -157,11 +204,11 @@ def render_grapher() -> None:
                         plot_line(share_change_pct.dropna(), "Share Count Change % (YoY)", yaxis="% Change", color="#e377c2")
 
                 # ── 9. ROIC (simplified) ─────────────────────────────────────────
-                if all(k in item for k in ["Net Income", "Total Assets", "Total Debt", "Cash And Cash Equivalents"] for item in [income, balance]):
+                if all(k in d for k in ["Net Income", "Total Assets", "Total Debt", "Cash And Cash Equivalents"] for d in [income, balance]):
                     st.markdown("### Return on Invested Capital (ROIC) – simplified")
-                    nopat = income.loc["Net Income"] + income.get("Tax Provision", 0)  # rough
-                    invested_capital = balance.loc["Total Assets"] - balance.get("Cash And Cash Equivalents", 0) - balance.get("Total Debt", 0)
-                    roic = (nopat / invested_capital.shift(1)) * 100  # lagged capital
+                    nopat = income.loc["Net Income"] + income.get("Tax Provision", pd.Series(0, index=common_dates))
+                    invested_capital = balance.loc["Total Assets"] - balance.get("Cash And Cash Equivalents", pd.Series(0, index=common_dates)) - balance.get("Total Debt", pd.Series(0, index=common_dates))
+                    roic = (nopat / invested_capital.shift(1)) * 100
                     plot_line(roic.dropna(), "ROIC (%)", yaxis="ROIC %", color="#7f7f7f")
 
                 st.markdown("---")
@@ -170,6 +217,7 @@ def render_grapher() -> None:
             except Exception as e:
                 st.error(f"Error: {str(e)}")
                 st.info("• Try a major US stock (AAPL, MSFT, NVDA…)\n• Some tickers have incomplete fundamentals\n• Check your internet connection")
+
 
 if __name__ == "__main__":
     st.set_page_config(page_title="Enhanced Grapher", layout="wide")
