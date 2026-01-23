@@ -6,3 +6,5 @@ scipy
 plotly
 pandas_ta
 xlsxwriter
+matplotlib
+seaborn
