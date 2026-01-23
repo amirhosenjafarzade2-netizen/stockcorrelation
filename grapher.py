@@ -54,12 +54,21 @@ def render_grapher() -> None:
 
                 # ── FILTER fundamentals by years_back ───────────────────────────
                 cutoff_date = pd.Timestamp(start_date)
+                
+                # Show available date range BEFORE filtering
                 if not income.empty:
-                    income = income.loc[:, income.columns >= cutoff_date]
+                    orig_start = income.columns.min()
+                    orig_end = income.columns.max()
+                    st.caption(f"📊 Raw data range: {orig_start.date()} to {orig_end.date()} ({len(income.columns)} periods)")
+                    st.caption(f"🔍 Filtering to keep only data from {start_date} onwards...")
+                    
+                    income = income.loc[:, income.columns >= cutoff_date].copy()
+                    st.caption(f"✓ After filter: {len(income.columns)} periods remaining")
+                    
                 if not balance.empty:
-                    balance = balance.loc[:, balance.columns >= cutoff_date]
+                    balance = balance.loc[:, balance.columns >= cutoff_date].copy()
                 if not cashflow.empty:
-                    cashflow = cashflow.loc[:, cashflow.columns >= cutoff_date]
+                    cashflow = cashflow.loc[:, cashflow.columns >= cutoff_date].copy()
 
                 # Price history
                 prices = yf.download(
@@ -297,7 +306,7 @@ def render_grapher() -> None:
                         plot_line(roic.dropna(), "ROIC (%) - Net Income / Invested Capital", yaxis="ROIC %", color="#7f7f7f")
 
                 st.success("✓ Analysis complete")
-                st.caption(f"Showing data from {start_date.date()} onwards (where available)")
+                st.caption(f"Showing data from {start_date} onwards (where available)")
 
             except Exception as e:
                 st.error(f"Error: {str(e)}")
