@@ -25,7 +25,7 @@ def render_grapher() -> None:
             min_value=1,
             max_value=30,
             value=10,
-            help="Years of history to display for all charts"
+            help="Applies to price chart only. Fundamentals limited by Yahoo Finance API (4 periods max)"
         )
 
     if not ticker:
@@ -41,8 +41,8 @@ def render_grapher() -> None:
                 ticker_obj = yf.Ticker(ticker)
                 is_annual = (frequency == "Annual")
 
-                # ── Get financials - fetch all, then filter ──────────
-                st.info("📊 Fetching fundamental data...")
+                # ── Get financials - Yahoo Finance API limits to 4 periods ──
+                st.info("📊 Fetching fundamental data (Yahoo Finance provides max 4 periods)...")
                 
                 # Use the newer API methods
                 if is_annual:
@@ -54,18 +54,9 @@ def render_grapher() -> None:
                     balance = ticker_obj.get_balance_sheet(freq="quarterly")
                     cashflow = ticker_obj.get_cashflow(freq="quarterly")
 
-                # ── FILTER fundamental data by date range ──────────────────
-                def filter_by_date(df, start_date):
-                    """Filter DataFrame columns by date range"""
-                    if df.empty:
-                        return df
-                    # Keep only columns (dates) that are >= start_date
-                    valid_cols = [col for col in df.columns if col.date() >= start_date]
-                    return df[valid_cols]
-                
-                income = filter_by_date(income, start_date)
-                balance = filter_by_date(balance, start_date)
-                cashflow = filter_by_date(cashflow, start_date)
+                # ── Don't filter fundamental data - API already limited to 4 periods ──
+                # Yahoo Finance API only returns 4 periods regardless of time range requested
+                # So filtering by date would just reduce the already limited data further
 
                 # Price history - respects slider
                 prices = yf.download(
@@ -95,8 +86,9 @@ def render_grapher() -> None:
                     dates = sorted(income.columns)
                     years_available = (dates[-1] - dates[0]).days / 365.25
                     st.success(f"✓ Fundamentals: {dates[0].date()} → {dates[-1].date()} ({len(dates)} periods, ~{years_available:.1f} years)")
+                    st.caption("⚠️ Yahoo Finance API limitation: max 4 periods (annual or quarterly)")
                 else:
-                    st.warning("⚠️ No fundamental data available for this ticker in the selected time range")
+                    st.warning("⚠️ No fundamental data available for this ticker")
 
                 # Align dates across statements
                 if not income.empty and not balance.empty and not cashflow.empty:
