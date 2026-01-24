@@ -10,11 +10,22 @@ from typing import List, Tuple, Optional, Dict
 import warnings
 warnings.filterwarnings('ignore')
 
+# ── Helper: Clean and validate user-entered tickers ─────────────────────────
 def validate_tickers(ticker_list: list[str]) -> list[str]:
+    """
+    Clean ticker list:
+    - strip whitespace
+    - uppercase
+    - remove empty entries
+    - remove duplicates
+    - basic sanity check
+    """
     if not ticker_list:
         return []
+    
     cleaned = []
     seen = set()
+    
     for t in ticker_list:
         t = t.strip().upper()
         if not t or len(t) < 1 or t in seen:
@@ -22,8 +33,9 @@ def validate_tickers(ticker_list: list[str]) -> list[str]:
         if len(t) > 1 and not t.isdigit():
             cleaned.append(t)
             seen.add(t)
-    return cleaned
     
+    return cleaned
+
 # ────────────────────────────────────────────────
 #   Configuration
 # ────────────────────────────────────────────────
@@ -140,7 +152,7 @@ class DataProvider:
         return issues
 
 # ────────────────────────────────────────────────
-#   Input Validation
+#   Module Registry
 # ────────────────────────────────────────────────
 def get_available_modules() -> Dict[str, dict]:
     """Return available modules with metadata"""
@@ -334,12 +346,15 @@ with st.sidebar:
     )
     
     # Parse and validate tickers
-    raw_tickers = [t.strip().upper() for t in tickers_input.split(",") if t.strip()]
+    raw_tickers = [t.strip() for t in tickers_input.split(",") if t.strip()]
     tickers = validate_tickers(raw_tickers)
     
     if tickers:
         st.caption(f"✅ {len(tickers)} valid ticker(s)")
         st.session_state.preferences['last_tickers'] = tickers
+    else:
+        if tickers_input.strip():
+            st.warning("No valid tickers found. Please check your input.")
     
     st.markdown("---")
     
@@ -382,10 +397,10 @@ with st.sidebar:
     df_prices = None
     failed_tickers = []
     
-    cache_key = f"{','.join(tickers)}_{start_date}_{end_date}"
+    cache_key = f"{','.join(tickers)}_{start_date}_{end_date}" if tickers else ""
     cache_valid = st.session_state.data_cache.get('date_range') == cache_key
     
-    if fetch_button or not cache_valid:
+    if fetch_button or (tickers and not cache_valid):
         if tickers:
             with st.spinner("📡 Fetching market data..."):
                 df_prices, failed_tickers = DataProvider.fetch_prices(tickers, start_date, end_date)
@@ -459,10 +474,10 @@ with st.sidebar:
 # ────────────────────────────────────────────────
 #   MAIN CONTENT AREA
 # ────────────────────────────────────────────────
-st.title(selected_mode)
+st.title(selected_mode if 'selected_mode' in locals() else "Welcome")
 
 # Show active configuration
-if tickers and df_prices is not None and not df_prices.empty:
+if 'tickers' in locals() and tickers and 'df_prices' in locals() and df_prices is not None and not df_prices.empty:
     col1, col2, col3 = st.columns(3)
     with col1:
         st.metric("Active Tickers", len(df_prices.columns), delta=None)
@@ -475,11 +490,11 @@ if tickers and df_prices is not None and not df_prices.empty:
     st.markdown("---")
 
 # Execute selected module
-if available_modules and selected_mode in available_modules:
+if 'available_modules' in locals() and 'selected_mode' in locals() and selected_mode in available_modules:
     module_info = available_modules[selected_mode]
     
     try:
-        if df_prices is None or df_prices.empty:
+        if 'df_prices' not in locals() or df_prices is None or df_prices.empty:
             st.info("👈 **Please fetch data from the sidebar to begin analysis**")
             st.markdown("""
             ### Getting Started
@@ -504,7 +519,10 @@ if available_modules and selected_mode in available_modules:
             st.code(str(e))
         st.info("💡 Try refreshing the page or checking your inputs")
 else:
-    st.warning("⚠️ No modules available. Please check module files.")
+    if 'selected_mode' in locals():
+        st.warning(f"⚠️ Module '{selected_mode}' not available. Please check module files.")
+    else:
+        st.info("Select an analysis mode from the sidebar")
 
 # ────────────────────────────────────────────────
 #   Footer
