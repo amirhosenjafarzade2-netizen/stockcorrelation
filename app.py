@@ -128,37 +128,11 @@ class DataProvider:
 # ────────────────────────────────────────────────
 #   Input Validation
 # ────────────────────────────────────────────────
-def validate_tickers(tickers_list: List[str]) -> List[str]:
-    """Validate ticker format and return clean list"""
-    valid = []
-    
-    for t in tickers_list:
-        # Check length
-        if len(t) > 15:
-            st.sidebar.warning(f"⚠️ '{t}' looks too long for a ticker symbol")
-            continue
-        
-        # Check for valid characters (alphanumeric + special chars for forex/futures)
-        if not all(c.isalnum() or c in ['-', '=', '^', '.'] for c in t):
-            st.sidebar.warning(f"⚠️ '{t}' contains invalid characters")
-            continue
-        
-        valid.append(t)
-    
-    # Check max limit
-    if len(valid) > Config.MAX_TICKERS:
-        st.sidebar.error(f"⚠️ Maximum {Config.MAX_TICKERS} tickers allowed. Using first {Config.MAX_TICKERS}.")
-        return valid[:Config.MAX_TICKERS]
-    
-    return valid
-
-# ────────────────────────────────────────────────
-#   Module Registry
-# ────────────────────────────────────────────────
 def get_available_modules() -> Dict[str, dict]:
     """Return available modules with metadata"""
     modules = {}
     
+    # ── Existing modules ─────────────────────────────────────────────────────
     try:
         from additional_metrics import render_additional_metrics
         modules["📊 Additional Metrics"] = {
@@ -218,6 +192,17 @@ def get_available_modules() -> Dict[str, dict]:
         }
     except ImportError:
         pass
+    
+    # ── New module: Advanced Valuation + S&P 500 Undervalued Screener ────────
+    try:
+        from advanced_valuation import render_advanced_valuation
+        modules["💹 Advanced Valuation & Screener"] = {
+            "func": render_advanced_valuation,
+            "desc": "Multi-model intrinsic value, Monte Carlo, sensitivity + S&P 500 undervalued screener (Yahoo + Finviz)",
+            "uses_context": False
+        }
+    except ImportError as e:
+        st.warning(f"Could not load Advanced Valuation module: {e}")
     
     return modules
 
