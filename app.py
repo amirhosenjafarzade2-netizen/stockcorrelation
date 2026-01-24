@@ -10,6 +10,20 @@ from typing import List, Tuple, Optional, Dict
 import warnings
 warnings.filterwarnings('ignore')
 
+def validate_tickers(ticker_list: list[str]) -> list[str]:
+    if not ticker_list:
+        return []
+    cleaned = []
+    seen = set()
+    for t in ticker_list:
+        t = t.strip().upper()
+        if not t or len(t) < 1 or t in seen:
+            continue
+        if len(t) > 1 and not t.isdigit():
+            cleaned.append(t)
+            seen.add(t)
+    return cleaned
+    
 # ────────────────────────────────────────────────
 #   Configuration
 # ────────────────────────────────────────────────
