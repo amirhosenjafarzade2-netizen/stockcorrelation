@@ -254,59 +254,86 @@ def monte_carlo_simulation(portfolio: Dict, prices: pd.DataFrame, iterations: in
     tickers = portfolio['tickers']
     weights = np.array(portfolio['weights'])
     
+    # Validate inputs
+    if not isinstance(initial_investment, (int, float)):
+        raise ValueError(f"Initial investment must be numeric, got {type(initial_investment)}: {initial_investment}")
+    
+    initial_investment = float(initial_investment)
+    
+    # Ensure we only use the portfolio stocks
     available_tickers = [t for t in tickers if t in prices.columns]
     if len(available_tickers) != len(tickers):
         missing = set(tickers) - set(available_tickers)
         raise ValueError(f"Missing price data for: {missing}")
     
+    # Filter to only portfolio stocks
     portfolio_prices = prices[available_tickers].copy()
     portfolio_prices = portfolio_prices.dropna()
     
     if len(portfolio_prices) < 30:
         raise ValueError(f"Insufficient data: only {len(portfolio_prices)} days available (need at least 30)")
     
+    # Calculate daily returns using percentage change
     returns = portfolio_prices.pct_change().dropna()
     
     if len(returns) < 20:
         raise ValueError(f"Insufficient return data: only {len(returns)} days")
     
+    # Get most recent prices
     current_prices = portfolio_prices.iloc[-1].values
     
     if np.any(np.isnan(current_prices)) or np.any(current_prices <= 0):
         raise ValueError("Invalid current prices")
     
+    # Calculate statistics for GBM
     mean_returns = returns.mean().values
     cov_matrix = returns.cov().values
     
     if np.any(np.isnan(mean_returns)) or np.any(np.isnan(cov_matrix)):
         raise ValueError("NaN values in returns statistics")
     
+    # Ensure covariance matrix is positive semi-definite
     min_eig = np.min(np.real(np.linalg.eigvals(cov_matrix)))
     if min_eig < 0:
         cov_matrix = cov_matrix + np.eye(len(cov_matrix)) * abs(min_eig) * 1.1
     
+    # Cholesky decomposition for correlated random variables
     try:
         L = np.linalg.cholesky(cov_matrix)
     except np.linalg.LinAlgError:
         cov_matrix = cov_matrix + np.eye(len(cov_matrix)) * 1e-5
         L = np.linalg.cholesky(cov_matrix)
     
+    # Calculate shares owned based on portfolio weights
     stock_values = weights * initial_investment
     shares = stock_values / current_prices
     
+    # Time increment (1 trading day)
     dt = 1.0 / 252.0
+    
+    # Pre-allocate results array
     final_values = np.zeros(iterations)
     
+    # Run Monte Carlo simulations
     for i in range(iterations):
+        # Start with current prices
         sim_prices = current_prices.copy()
         
+        # Simulate each day forward
         for _ in range(timespan_days):
+            # Generate correlated random shocks
             Z = np.random.normal(0, 1, len(tickers))
             correlated_Z = L @ Z
+            
+            # Geometric Brownian Motion formula
+            # S(t+dt) = S(t) * exp((μ - σ²/2)dt + σ√dt*Z)
             drift = (mean_returns - 0.5 * np.diag(cov_matrix)) * dt
             diffusion = np.sqrt(dt) * correlated_Z
+            
+            # Update prices
             sim_prices = sim_prices * np.exp(drift + diffusion)
         
+        # Calculate final portfolio value based on shares owned
         final_values[i] = np.sum(sim_prices * shares)
     
     return final_values
@@ -640,20 +667,33 @@ def render_portfolio_optimizer() -> None:
         col1, col2, col3 = st.columns(3)
         
         with col1:
-            mc_iterations = st.number_input("Iterations", 1000, 100000, 10000, 1000)
+            mc_iterations = st.number_input("Iterations", 1000, 100000, 10000, 1000, key="mc_iter_new")
         with col2:
-            mc_years = st.number_input("Years to Project", 1, 30, 5)
+            mc_years = st.number_input("Years to Project", 1, 30, 5, key="mc_years_new")
         with col3:
-            initial_investment = st.number_input("Initial Investment ($)", 1000, 10000000, 10000, 1000)
+            initial_investment = st.number_input("Initial Investment ($)", 1000, 10000000, 10000, 1000, key="mc_invest_new")
         
         run_mc = st.button("🎯 Run Monte Carlo Simulation", type="primary", use_container_width=True)
         
         if run_mc:
+            # Debug info
+            with st.expander("🔍 Debug Info", expanded=False):
+                st.write(f"Initial Investment Type: {type(initial_investment)}")
+                st.write(f"Initial Investment Value: {initial_investment}")
+                st.write(f"Iterations Type: {type(mc_iterations)}")
+                st.write(f"Years Type: {type(mc_years)}")
+                st.write(f"Portfolio Tickers: {portfolio['tickers']}")
+                st.write(f"Portfolio Weights: {portfolio['weights']}")
+            
             with st.spinner(f"Running {mc_iterations:,} Monte Carlo simulations..."):
                 try:
-                    timespan_days = mc_years * 252
+                    timespan_days = int(mc_years * 252)
+                    
+                    # Ensure initial_investment is a clean float
+                    clean_investment = float(initial_investment)
+                    
                     final_values = monte_carlo_simulation(
-                        portfolio, prices, mc_iterations, timespan_days, initial_investment
+                        portfolio, prices, int(mc_iterations), timespan_days, clean_investment
                     )
                     
                     st.session_state['mc_results'] = {
