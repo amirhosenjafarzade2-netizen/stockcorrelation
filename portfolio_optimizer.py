@@ -178,13 +178,21 @@ def negative_sharpe(weights: np.ndarray, mean_returns: np.ndarray, cov_matrix: n
     return -sharpe
 
 
+def constraint_sum_to_one(weights: np.ndarray) -> float:
+    """Constraint: weights must sum to 1"""
+    return np.sum(weights) - 1.0
+
+
 def optimize_portfolio(returns_df: pd.DataFrame, max_stocks: int, use_fundamentals: bool, 
                       fundamentals: Dict, risk_free_rate: float = 0.02,
                       min_weight: float = 0.01) -> Dict:
     """Optimize portfolio using scipy minimize with SLSQP."""
-    mean_returns = returns_df.mean().values * 252  # Annualize
-    cov_matrix = returns_df.cov().values * 252
     
+    # Calculate annualized mean returns and covariance
+    mean_returns = returns_df.mean().values * 252  # Annualize daily returns
+    cov_matrix = returns_df.cov().values * 252     # Annualize covariance
+    
+    # Adjust for fundamentals if requested
     if use_fundamentals:
         mean_returns = adjust_expected_returns(mean_returns, fundamentals, returns_df.columns.tolist())
     
@@ -196,13 +204,12 @@ def optimize_portfolio(returns_df: pd.DataFrame, max_stocks: int, use_fundamenta
     # Bounds: 0 to 1 for each weight
     bounds = tuple((0.0, 1.0) for _ in range(num_assets))
     
-    # Constraints
+    # Constraint: weights sum to 1
     constraints = [
-        {'type': 'eq', 'fun': lambda w: np.sum(w) - 1.0},  # Weights sum to 1
-        {'type': 'ineq', 'fun': lambda w: max_stocks - np.sum(w > min_weight)}  # Max stocks constraint
+        {'type': 'eq', 'fun': constraint_sum_to_one}
     ]
     
-    # Optimize
+    # Optimize using SLSQP
     result = minimize(
         negative_sharpe,
         initial_weights,
@@ -214,44 +221,46 @@ def optimize_portfolio(returns_df: pd.DataFrame, max_stocks: int, use_fundamenta
     )
     
     if not result.success:
-        # Fallback: try without max_stocks constraint
-        constraints = [{'type': 'eq', 'fun': lambda w: np.sum(w) - 1.0}]
-        result = minimize(
-            negative_sharpe,
-            initial_weights,
-            args=(mean_returns, cov_matrix, risk_free_rate),
-            method='SLSQP',
-            bounds=bounds,
-            constraints=constraints,
-            options={'maxiter': 1000}
-        )
-    
-    if not result.success:
         raise ValueError(f"Optimization failed: {result.message}")
     
     weights = result.x
     
-    # Filter to top stocks
-    top_indices = np.argsort(weights)[-max_stocks:]
-    top_indices = top_indices[weights[top_indices] > min_weight]
+    # Filter to top N stocks by weight
+    sorted_indices = np.argsort(weights)[::-1]  # Sort descending
     
-    if len(top_indices) == 0:
-        top_indices = np.argsort(weights)[-max_stocks:]
+    # Take top max_stocks with meaningful weights
+    top_indices = []
+    for idx in sorted_indices:
+        if weights[idx] > min_weight and len(top_indices) < max_stocks:
+            top_indices.append(idx)
+        if len(top_indices) >= max_stocks:
+            break
+    
+    # If we don't have enough, just take the top max_stocks
+    if len(top_indices) < min(max_stocks, num_assets):
+        top_indices = sorted_indices[:min(max_stocks, num_assets)]
+    
+    top_indices = np.array(top_indices)
     
     best_tickers = returns_df.columns[top_indices].tolist()
     best_weights = weights[top_indices]
-    best_weights /= best_weights.sum()  # Renormalize
+    best_weights /= best_weights.sum()  # Renormalize to sum to 1
     
-    port_return, port_vol, sharpe = portfolio_performance(best_weights, mean_returns[top_indices], 
-                                                           cov_matrix[np.ix_(top_indices, top_indices)],
-                                                           risk_free_rate)
+    # Calculate final portfolio metrics
+    port_return, port_vol, sharpe = portfolio_performance(
+        best_weights, 
+        mean_returns[top_indices], 
+        cov_matrix[np.ix_(top_indices, top_indices)],
+        risk_free_rate
+    )
     
     return {
         'tickers': best_tickers,
         'weights': best_weights.tolist(),
         'expected_return': port_return,
         'volatility': port_vol,
-        'sharpe': sharpe
+        'sharpe': sharpe,
+        'individual_returns': mean_returns[top_indices].tolist()
     }
 
 
@@ -555,6 +564,14 @@ def render_portfolio_optimizer() -> None:
                     risk_free_rate,
                     min_weight
                 )
+                
+                # Validation check
+                if portfolio['sharpe'] < -1:
+                    st.warning("⚠️ Warning: Portfolio has very negative Sharpe ratio. This suggests poor risk-adjusted returns based on historical data.")
+                
+                if portfolio['expected_return'] < 0:
+                    st.warning("⚠️ Warning: Portfolio has negative expected return based on historical performance. Consider a longer time period or different stocks.")
+                
             except ValueError as e:
                 st.error(f"❌ Optimization failed: {str(e)}")
                 st.info("💡 Try: reducing max stocks, increasing history, or using different tickers")
@@ -585,7 +602,7 @@ def render_portfolio_optimizer() -> None:
         results_df = pd.DataFrame({
             "Stock": portfolio['tickers'],
             "Weight (%)": [w * 100 for w in portfolio['weights']],
-            "Expected Return (%)": [returns_df[t].mean() * 252 * 100 for t in portfolio['tickers']],
+            "Expected Return (%)": [r * 100 for r in portfolio['individual_returns']],
             "Volatility (%)": [returns_df[t].std() * np.sqrt(252) * 100 for t in portfolio['tickers']]
         })
         
@@ -596,6 +613,9 @@ def render_portfolio_optimizer() -> None:
             results_df["ROE (%)"] = [fundamentals.get(t, {}).get('returnOnEquity', 0) * 100 
                                      for t in portfolio['tickers']]
         
+        # Sort by weight for better display
+        results_df = results_df.sort_values("Weight (%)", ascending=False)
+        
         st.dataframe(
             results_df.style.format({
                 "Weight (%)": "{:.2f}",
@@ -603,9 +623,15 @@ def render_portfolio_optimizer() -> None:
                 "Volatility (%)": "{:.2f}",
                 "P/E Ratio": "{:.1f}",
                 "ROE (%)": "{:.1f}"
-            }).background_gradient(subset=["Weight (%)"], cmap="Greens"),
+            }).background_gradient(subset=["Weight (%)"], cmap="Greens")
+            .background_gradient(subset=["Expected Return (%)"], cmap="RdYlGn"),
             use_container_width=True
         )
+        
+        # Sanity check warning
+        negative_returns = results_df[results_df["Expected Return (%)"] < 0]
+        if len(negative_returns) > 0:
+            st.warning(f"⚠️ Note: {len(negative_returns)} stock(s) have negative expected returns based on historical data. This is based on past performance and may not reflect future results.")
         
         # Visualizations
         col1, col2 = st.columns(2)
@@ -633,12 +659,49 @@ def render_portfolio_optimizer() -> None:
                 size="Weight (%)",
                 text="Stock",
                 title="Individual Stock Positions",
-                color="Weight (%)",
-                color_continuous_scale="Viridis"
+                color="Expected Return (%)",
+                color_continuous_scale="RdYlGn"
             )
             fig_scatter.update_traces(textposition='top center')
             fig_scatter.update_layout(height=400)
             st.plotly_chart(fig_scatter, use_container_width=True)
+        
+        # Diagnostics
+        with st.expander("🔍 Optimization Diagnostics", expanded=False):
+            st.markdown("**Algorithm Performance**")
+            
+            diag_col1, diag_col2 = st.columns(2)
+            
+            with diag_col1:
+                st.metric("Total Stocks Analyzed", len(valid_tickers))
+                st.metric("Stocks Selected", len(portfolio['tickers']))
+                st.metric("Optimization Success", "✅ Yes")
+                
+            with diag_col2:
+                avg_return = np.mean(portfolio['individual_returns'])
+                st.metric("Avg Stock Return", f"{avg_return*100:.2f}%")
+                st.metric("Portfolio Return", f"{portfolio['expected_return']*100:.2f}%")
+                benefit = ((portfolio['expected_return'] - avg_return) / abs(avg_return) * 100) if avg_return != 0 else 0
+                st.metric("Diversification Benefit", f"{benefit:.1f}%",
+                         help="How much better the portfolio performs vs simple average")
+            
+            st.markdown("**Individual Stock Returns (Annualized)**")
+            stock_returns = pd.DataFrame({
+                'Stock': portfolio['tickers'],
+                'Expected Return (%)': [r * 100 for r in portfolio['individual_returns']],
+                'Weight (%)': [w * 100 for w in portfolio['weights']]
+            }).sort_values('Expected Return (%)', ascending=False)
+            
+            st.dataframe(
+                stock_returns.style.format({
+                    'Expected Return (%)': '{:.2f}',
+                    'Weight (%)': '{:.2f}'
+                }).background_gradient(subset=['Expected Return (%)'], cmap='RdYlGn'),
+                use_container_width=True,
+                hide_index=True
+            )
+            
+            st.caption("ℹ️ The optimizer balances return and risk. A stock with lower return but lower volatility/correlation might get higher weight for better risk-adjusted returns (Sharpe ratio).")
         
         # Historical Performance
         st.markdown("#### 📈 Historical Portfolio Performance")
@@ -680,74 +743,156 @@ def render_portfolio_optimizer() -> None:
         # ═══════════════════════════════════════════════════════════════
         st.markdown("---")
         st.subheader("🎲 Monte Carlo Simulation")
+        st.caption("Project portfolio value into the future using randomized simulations")
         
-        with st.expander("Run Monte Carlo Future Value Projection", expanded=False):
-            col1, col2, col3 = st.columns(3)
+        col1, col2, col3 = st.columns(3)
+        
+        with col1:
+            mc_iterations = st.number_input("Iterations", 1000, 100000, 10000, 1000,
+                                           help="More iterations = more accurate",
+                                           key="mc_iter")
+        with col2:
+            mc_years = st.number_input("Years to Project", 1, 30, 5,
+                                      help="Future timespan",
+                                      key="mc_years")
+        with col3:
+            initial_investment = st.number_input("Initial Investment ($)", 1000, 10000000, 10000, 1000,
+                                                key="mc_investment")
+        
+        run_mc_button = st.button("🎯 Run Monte Carlo Simulation", type="primary", use_container_width=True, key="run_mc")
+        
+        if run_mc_button:
+            with st.spinner(f"Running {mc_iterations:,} Monte Carlo simulations..."):
+                try:
+                    timespan_days = mc_years * 252
+                    final_values = monte_carlo_simulation(
+                        portfolio, prices, mc_iterations, timespan_days, initial_investment
+                    )
+                    
+                    # Store in session state
+                    st.session_state['mc_results'] = {
+                        'final_values': final_values,
+                        'iterations': mc_iterations,
+                        'years': mc_years,
+                        'investment': initial_investment
+                    }
+                    
+                except Exception as e:
+                    st.error(f"❌ Monte Carlo simulation failed: {str(e)}")
+                    st.info("💡 This can happen if there's insufficient price data or numerical issues")
+                    import traceback
+                    with st.expander("🔍 Error Details"):
+                        st.code(traceback.format_exc())
+        
+        # Display results if available
+        if 'mc_results' in st.session_state:
+            mc_data = st.session_state['mc_results']
+            final_values = mc_data['final_values']
+            initial_investment = mc_data['investment']
+            mc_years = mc_data['years']
             
+            # Calculate percentiles
+            p5, p25, p50, p75, p95 = np.percentile(final_values, [5, 25, 50, 75, 95])
+            
+            st.markdown("#### 📊 Simulation Results")
+            
+            col1, col2, col3, col4 = st.columns(4)
             with col1:
-                mc_iterations = st.number_input("Iterations", 1000, 100000, 10000, 1000,
-                                               help="More iterations = more accurate")
+                st.metric("Median Outcome", f"${p50:,.0f}", 
+                         delta=f"{((p50/initial_investment - 1) * 100):.1f}%")
             with col2:
-                mc_years = st.number_input("Years to Project", 1, 30, 5,
-                                          help="Future timespan")
+                st.metric("5th Percentile", f"${p5:,.0f}",
+                         help="Worst case (95% confidence)")
             with col3:
-                initial_investment = st.number_input("Initial Investment ($)", 1000, 1000000, 10000, 1000)
+                st.metric("95th Percentile", f"${p95:,.0f}",
+                         help="Best case (95% confidence)")
+            with col4:
+                prob_loss = (final_values < initial_investment).sum() / len(final_values) * 100
+                st.metric("Probability of Loss", f"{prob_loss:.1f}%")
             
-            if st.button("🎯 Run Simulation"):
-                with st.spinner(f"Running {mc_iterations:,} Monte Carlo simulations..."):
-                    try:
-                        timespan_days = mc_years * 252
-                        final_values = monte_carlo_simulation(
-                            portfolio, prices, mc_iterations, timespan_days, initial_investment
-                        )
-                    except Exception as e:
-                        st.error(f"❌ Monte Carlo simulation failed: {str(e)}")
-                        st.info("💡 This can happen if there's insufficient price data or numerical issues")
-                        st.stop()
-                
-                # Results
-                p5, p25, p50, p75, p95 = np.percentile(final_values, [5, 25, 50, 75, 95])
-                
-                col1, col2, col3, col4 = st.columns(4)
-                with col1:
-                    st.metric("Median Outcome", f"${p50:,.0f}", 
-                             delta=f"{((p50/initial_investment - 1) * 100):.1f}%")
-                with col2:
-                    st.metric("5th Percentile", f"${p5:,.0f}",
-                             help="Worst case (95% confidence)")
-                with col3:
-                    st.metric("95th Percentile", f"${p95:,.0f}",
-                             help="Best case (95% confidence)")
-                with col4:
-                    prob_loss = (final_values < initial_investment).sum() / len(final_values) * 100
-                    st.metric("Probability of Loss", f"{prob_loss:.1f}%")
-                
-                # Distribution plot
-                fig_hist = go.Figure()
-                fig_hist.add_trace(go.Histogram(
-                    x=final_values,
-                    nbinsx=50,
-                    name='Distribution',
-                    marker_color='lightblue'
-                ))
-                
-                # Add percentile lines
-                for pct, val, name, color in [
-                    (5, p5, '5th', 'red'),
-                    (50, p50, 'Median', 'green'),
-                    (95, p95, '95th', 'blue')
-                ]:
-                    fig_hist.add_vline(x=val, line_dash="dash", line_color=color,
-                                      annotation_text=f"{name}: ${val:,.0f}")
-                
-                fig_hist.update_layout(
-                    title=f"Portfolio Value Distribution After {mc_years} Years (${initial_investment:,} initial)",
-                    xaxis_title="Final Value ($)",
-                    yaxis_title="Frequency",
-                    height=400,
-                    showlegend=False
+            # Additional statistics
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.metric("Mean Return", f"{((final_values.mean()/initial_investment - 1) * 100):.1f}%")
+            with col2:
+                cagr = ((final_values.mean() / initial_investment) ** (1/mc_years) - 1) * 100
+                st.metric("CAGR (Mean)", f"{cagr:.1f}%")
+            with col3:
+                st.metric("Std Deviation", f"${final_values.std():,.0f}")
+            
+            # Distribution plot
+            st.markdown("#### 📈 Distribution of Outcomes")
+            
+            fig_hist = go.Figure()
+            fig_hist.add_trace(go.Histogram(
+                x=final_values,
+                nbinsx=50,
+                name='Distribution',
+                marker_color='lightblue',
+                opacity=0.7
+            ))
+            
+            # Add percentile lines
+            colors = {'5th': 'red', 'Median': 'green', '95th': 'blue', 'Initial': 'orange'}
+            for pct, val, name, color in [
+                (5, p5, '5th', 'red'),
+                (50, p50, 'Median', 'green'),
+                (95, p95, '95th', 'blue')
+            ]:
+                fig_hist.add_vline(
+                    x=val, 
+                    line_dash="dash", 
+                    line_color=color,
+                    annotation_text=f"{name}: ${val:,.0f}",
+                    annotation_position="top"
                 )
-                st.plotly_chart(fig_hist, use_container_width=True)
+            
+            # Add initial investment line
+            fig_hist.add_vline(
+                x=initial_investment,
+                line_dash="dot",
+                line_color="orange",
+                annotation_text=f"Initial: ${initial_investment:,.0f}",
+                annotation_position="bottom"
+            )
+            
+            fig_hist.update_layout(
+                title=f"Portfolio Value Distribution After {mc_years} Years (${initial_investment:,} initial, {mc_data['iterations']:,} simulations)",
+                xaxis_title="Final Value ($)",
+                yaxis_title="Frequency",
+                height=400,
+                showlegend=False
+            )
+            st.plotly_chart(fig_hist, use_container_width=True)
+            
+            # Probability table
+            st.markdown("#### 🎯 Probability Analysis")
+            
+            targets = [
+                initial_investment * 0.5,  # 50% loss
+                initial_investment * 0.8,  # 20% loss
+                initial_investment,        # Break even
+                initial_investment * 1.5,  # 50% gain
+                initial_investment * 2.0,  # Double
+                initial_investment * 3.0,  # Triple
+            ]
+            
+            prob_data = []
+            for target in targets:
+                prob_above = (final_values >= target).sum() / len(final_values) * 100
+                change_pct = (target / initial_investment - 1) * 100
+                prob_data.append({
+                    "Target": f"${target:,.0f}",
+                    "Change": f"{change_pct:+.0f}%",
+                    "Probability ≥ Target": f"{prob_above:.1f}%"
+                })
+            
+            prob_df = pd.DataFrame(prob_data)
+            st.dataframe(
+                prob_df.style.background_gradient(subset=["Probability ≥ Target"], cmap="RdYlGn"),
+                use_container_width=True,
+                hide_index=True
+            )
         
         # ═══════════════════════════════════════════════════════════════
         # DOWNLOAD & EXPORT
