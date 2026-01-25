@@ -241,6 +241,17 @@ def get_available_modules() -> Dict[str, dict]:
     except ImportError:
         pass
 
+    # ── NEW MODULE: Stock Style Screener ─────────────────────────────────────
+    try:
+        from stock_style_screener import render_stock_style_screener
+        modules["🎯 Stock Style Screener"] = {
+            "func": render_stock_style_screener,
+            "desc": "Screen for investment styles: Growth, Value, Momentum, Quality, Aristocrats, GARP, High Volume, etc.",
+            "uses_context": False
+        }
+    except ImportError:
+        pass
+
     return modules
 
 # ────────────────────────────────────────────────
