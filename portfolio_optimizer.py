@@ -199,19 +199,55 @@ def monte_carlo_simulation(portfolio: Dict, prices: pd.DataFrame, iterations: in
     tickers = portfolio['tickers']
     weights = np.array(portfolio['weights'])
     
-    current_prices = prices[tickers].iloc[-1].values
-    shares = (weights * initial_investment) / current_prices
+    # Ensure we have the right tickers in prices
+    available_tickers = [t for t in tickers if t in prices.columns]
+    if len(available_tickers) != len(tickers):
+        missing = set(tickers) - set(available_tickers)
+        raise ValueError(f"Missing price data for: {missing}")
     
-    returns_df = calculate_returns(prices[tickers])
+    # Get current prices
+    current_prices = prices[available_tickers].iloc[-1]
+    if current_prices.isna().any():
+        raise ValueError("Some current prices are NaN")
+    
+    current_prices = current_prices.values
+    
+    # Calculate returns
+    returns_df = calculate_returns(prices[available_tickers])
+    
+    # Check for sufficient data
+    if len(returns_df) < 20:
+        raise ValueError(f"Insufficient data for simulation: only {len(returns_df)} days available")
+    
     mean_returns = returns_df.mean().values
     cov_matrix = returns_df.cov().values
     
-    # Simulate paths
-    sim_returns = np.random.multivariate_normal(mean_returns, cov_matrix, (iterations, timespan_days))
-    sim_prices = current_prices * np.exp(np.cumsum(sim_returns, axis=1))
+    # Validate covariance matrix
+    if np.any(np.isnan(cov_matrix)) or np.any(np.isinf(cov_matrix)):
+        raise ValueError("Invalid covariance matrix (contains NaN or Inf)")
+    
+    # Make sure cov_matrix is positive semi-definite
+    try:
+        np.linalg.cholesky(cov_matrix)
+    except np.linalg.LinAlgError:
+        # Add small diagonal to make it positive definite
+        cov_matrix = cov_matrix + np.eye(len(cov_matrix)) * 1e-6
+    
+    # Simulate paths (geometric Brownian motion)
+    try:
+        sim_returns = np.random.multivariate_normal(mean_returns, cov_matrix, (iterations, timespan_days))
+    except Exception as e:
+        raise ValueError(f"Failed to generate random returns: {str(e)}")
+    
+    # Calculate cumulative returns and prices
+    cumulative_returns = np.cumsum(sim_returns, axis=1)
+    sim_prices = current_prices[np.newaxis, np.newaxis, :] * np.exp(cumulative_returns)
+    
+    # Calculate shares owned
+    shares = (weights * initial_investment) / current_prices
     
     # Portfolio values
-    port_values = np.dot(sim_prices, shares)
+    port_values = np.dot(sim_prices[:, :, :], shares)
     
     return port_values[:, -1]  # Final values
 
@@ -295,22 +331,31 @@ def render_portfolio_optimizer() -> None:
             max_candidates = st.number_input("Max Candidates", 10, 200, 50, 10,
                                             help="Maximum stocks to fetch per sector")
         
-        if st.button("🔍 Fetch Sector Tickers", type="primary"):
+        fetch_clicked = st.button("🔍 Fetch Sector Tickers", type="primary", use_container_width=True)
+        
+        # Auto-fetch on first load if not already fetched
+        if fetch_clicked or ('finviz_fetched' not in st.session_state):
             with st.spinner(f"Fetching tickers from {sector}..."):
-                if sector == "All Sectors":
-                    candidate_tickers = get_all_sectors_tickers(max_per_sector=10)[:max_candidates]
-                else:
-                    candidate_tickers = get_finviz_tickers(sector)[:max_candidates]
-            
-            if candidate_tickers:
-                st.success(f"✅ Loaded {len(candidate_tickers)} tickers")
-                st.session_state['candidate_tickers'] = candidate_tickers
-            else:
-                st.error("❌ No tickers found. Try a different sector or use Manual Entry.")
-    
-    # Use session state if available
-    if 'candidate_tickers' in st.session_state and not candidate_tickers:
-        candidate_tickers = st.session_state['candidate_tickers']
+                try:
+                    if sector == "All Sectors":
+                        candidate_tickers = get_all_sectors_tickers(max_per_sector=10)[:max_candidates]
+                    else:
+                        candidate_tickers = get_finviz_tickers(sector)[:max_candidates]
+                    
+                    if candidate_tickers:
+                        st.success(f"✅ Loaded {len(candidate_tickers)} tickers")
+                        st.session_state['candidate_tickers'] = candidate_tickers
+                        st.session_state['finviz_fetched'] = True
+                    else:
+                        st.error("❌ No tickers found. Try a different sector or use Manual Entry.")
+                        st.session_state['candidate_tickers'] = []
+                except Exception as e:
+                    st.error(f"❌ Error fetching tickers: {str(e)}")
+                    st.session_state['candidate_tickers'] = []
+        
+        # Use session state if available
+        if 'candidate_tickers' in st.session_state:
+            candidate_tickers = st.session_state['candidate_tickers']
     
     # Show ticker preview
     if candidate_tickers:
