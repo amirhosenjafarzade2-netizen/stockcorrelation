@@ -31,9 +31,6 @@ def fallback_sp500_tickers() -> List[str]:
     return ["AAPL", "MSFT", "GOOGL", "AMZN", "NVDA", "META", "TSLA", "BRK-B", "JPM", "V",
             "UNH", "MA", "XOM", "PG", "JNJ", "HD", "CVX", "MRK", "ABBV", "KO", "PEP"]
 
-def fallback_all_sectors(max_per_sector: int = 25) -> List[str]:
-    return fallback_sp500_tickers()  # simplified fallback
-
 # ── Helper Functions ───────────────────────────────────────────────
 def calculate_rsi(prices: pd.Series, period: int = 14) -> float:
     try:
@@ -139,7 +136,7 @@ def render_stock_style_screener():
     col_u, col_s, col_p = st.columns([2, 2, 1])
     
     with col_u:
-        universe = st.selectbox("Universe", ["S&P 500", "All Finviz Sectors (limited)", "Custom list"], index=0)
+        universe = st.selectbox("Universe", ["S&P 500", "Custom list"], index=0)
     
     with col_s:
         style = st.selectbox("Stock Style", [
@@ -217,22 +214,8 @@ def render_stock_style_screener():
     
     if st.button("🚀 Run Screener", type="primary", use_container_width=True):
         with st.spinner("Loading..."):
-            # Get tickers based on universe
             if universe == "S&P 500":
                 tickers = get_sp500_tickers() if HAS_SCREENER else fallback_sp500_tickers()
-            elif universe == "All Finviz Sectors (limited)":
-                tickers = []
-                if HAS_SCREENER:
-                    sectors = ["Technology", "Healthcare", "Financials", "Energy", 
-                              "Consumer Discretionary", "Consumer Staples", "Industrials", 
-                              "Basic Materials", "Communication Services", "Utilities", "Real Estate"]
-                    per_sector = max_screen // len(sectors)
-                    for sec in sectors:
-                        tickers += get_finviz_tickers(sec)[:per_sector]
-                        time.sleep(0.25)  # Rate limit between sector fetches
-                    tickers = list(set(tickers))[:max_screen]
-                else:
-                    tickers = fallback_all_sectors()
             else:
                 custom = st.text_input("Comma separated tickers", "AAPL,MSFT,NVDA")
                 tickers = [t.strip().upper() for t in custom.split(",") if t.strip()]
@@ -288,12 +271,14 @@ def render_stock_style_screener():
                     if len(p) < 200:
                         continue
                     
+                    # Price-based metrics
                     ret_daily = p.pct_change().dropna()
                     ann_ret = (p.iloc[-1]/p.iloc[0]) ** (252/len(p)) - 1
                     ann_vol = ret_daily.std() * np.sqrt(252)
                     sharpe = safe_divide(ann_ret, ann_vol)
                     max_dd = calculate_max_drawdown(p)
                     
+                    # Fundamental metrics with safe extraction
                     pe = safe_get(info.get('trailingPE'))
                     pb = safe_get(info.get('priceToBook'))
                     peg = safe_get(info.get('pegRatio'))
