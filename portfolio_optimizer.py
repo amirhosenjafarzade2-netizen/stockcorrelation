@@ -1,6 +1,6 @@
 # portfolio_optimizer.py
-# Portfolio Optimizer Module using Genetic Algorithm and Monte Carlo
-# FIXED VERSION - Constraint handling, UI improvements, better optimization
+# Portfolio Optimizer Module using Scipy Optimization and Monte Carlo
+# FIXED VERSION - Monte Carlo completely rewritten, improved error handling
 
 import streamlit as st
 import yfinance as yf
@@ -38,7 +38,7 @@ def get_all_sectors_tickers(max_per_sector: int = 20) -> List[str]:
         tickers = get_finviz_tickers(sector)
         all_tickers.extend(tickers[:max_per_sector])
     
-    return list(set(all_tickers))  # Remove duplicates
+    return list(set(all_tickers))
 
 
 def get_sp500_tickers() -> List[str]:
@@ -50,7 +50,7 @@ def get_sp500_tickers() -> List[str]:
         tables = pd.read_html(url)
         df = tables[0]
         tickers = df["Symbol"].str.replace(".", "-", regex=False).tolist()
-        if len(tickers) > 400:  # Should have ~500
+        if len(tickers) > 400:
             return tickers
     except:
         pass
@@ -188,28 +188,17 @@ def optimize_portfolio(returns_df: pd.DataFrame, max_stocks: int, use_fundamenta
                       min_weight: float = 0.01) -> Dict:
     """Optimize portfolio using scipy minimize with SLSQP."""
     
-    # Calculate annualized mean returns and covariance
-    mean_returns = returns_df.mean().values * 252  # Annualize daily returns
-    cov_matrix = returns_df.cov().values * 252     # Annualize covariance
+    mean_returns = returns_df.mean().values * 252
+    cov_matrix = returns_df.cov().values * 252
     
-    # Adjust for fundamentals if requested
     if use_fundamentals:
         mean_returns = adjust_expected_returns(mean_returns, fundamentals, returns_df.columns.tolist())
     
     num_assets = len(returns_df.columns)
-    
-    # Initial guess: equal weights
     initial_weights = np.array([1.0 / num_assets] * num_assets)
-    
-    # Bounds: 0 to 1 for each weight
     bounds = tuple((0.0, 1.0) for _ in range(num_assets))
+    constraints = [{'type': 'eq', 'fun': constraint_sum_to_one}]
     
-    # Constraint: weights sum to 1
-    constraints = [
-        {'type': 'eq', 'fun': constraint_sum_to_one}
-    ]
-    
-    # Optimize using SLSQP
     result = minimize(
         negative_sharpe,
         initial_weights,
@@ -224,11 +213,8 @@ def optimize_portfolio(returns_df: pd.DataFrame, max_stocks: int, use_fundamenta
         raise ValueError(f"Optimization failed: {result.message}")
     
     weights = result.x
+    sorted_indices = np.argsort(weights)[::-1]
     
-    # Filter to top N stocks by weight
-    sorted_indices = np.argsort(weights)[::-1]  # Sort descending
-    
-    # Take top max_stocks with meaningful weights
     top_indices = []
     for idx in sorted_indices:
         if weights[idx] > min_weight and len(top_indices) < max_stocks:
@@ -236,17 +222,14 @@ def optimize_portfolio(returns_df: pd.DataFrame, max_stocks: int, use_fundamenta
         if len(top_indices) >= max_stocks:
             break
     
-    # If we don't have enough, just take the top max_stocks
     if len(top_indices) < min(max_stocks, num_assets):
         top_indices = sorted_indices[:min(max_stocks, num_assets)]
     
     top_indices = np.array(top_indices)
-    
     best_tickers = returns_df.columns[top_indices].tolist()
     best_weights = weights[top_indices]
-    best_weights /= best_weights.sum()  # Renormalize to sum to 1
+    best_weights /= best_weights.sum()
     
-    # Calculate final portfolio metrics
     port_return, port_vol, sharpe = portfolio_performance(
         best_weights, 
         mean_returns[top_indices], 
@@ -266,95 +249,89 @@ def optimize_portfolio(returns_df: pd.DataFrame, max_stocks: int, use_fundamenta
 
 def monte_carlo_simulation(portfolio: Dict, prices: pd.DataFrame, iterations: int, 
                           timespan_days: int, initial_investment: float = 10000) -> np.ndarray:
-    """Monte Carlo for future portfolio value distribution."""
+    """Monte Carlo simulation using Geometric Brownian Motion - FIXED VERSION"""
+    
     tickers = portfolio['tickers']
     weights = np.array(portfolio['weights'])
     
-    # Ensure we have the right tickers in prices
     available_tickers = [t for t in tickers if t in prices.columns]
     if len(available_tickers) != len(tickers):
         missing = set(tickers) - set(available_tickers)
         raise ValueError(f"Missing price data for: {missing}")
     
-    # Get current prices
-    current_prices = prices[available_tickers].iloc[-1]
-    if current_prices.isna().any():
-        raise ValueError("Some current prices are NaN")
+    portfolio_prices = prices[available_tickers].copy()
+    portfolio_prices = portfolio_prices.dropna()
     
-    current_prices = current_prices.values
+    if len(portfolio_prices) < 30:
+        raise ValueError(f"Insufficient data: only {len(portfolio_prices)} days available (need at least 30)")
     
-    # Calculate returns
-    returns_df = calculate_returns(prices[available_tickers])
+    returns = portfolio_prices.pct_change().dropna()
     
-    # Check for sufficient data
-    if len(returns_df) < 20:
-        raise ValueError(f"Insufficient data for simulation: only {len(returns_df)} days available")
+    if len(returns) < 20:
+        raise ValueError(f"Insufficient return data: only {len(returns)} days")
     
-    mean_returns = returns_df.mean().values
-    cov_matrix = returns_df.cov().values
+    current_prices = portfolio_prices.iloc[-1].values
     
-    # Validate covariance matrix
-    if np.any(np.isnan(cov_matrix)) or np.any(np.isinf(cov_matrix)):
-        raise ValueError("Invalid covariance matrix (contains NaN or Inf)")
+    if np.any(np.isnan(current_prices)) or np.any(current_prices <= 0):
+        raise ValueError("Invalid current prices")
     
-    # Make sure cov_matrix is positive semi-definite
+    mean_returns = returns.mean().values
+    cov_matrix = returns.cov().values
+    
+    if np.any(np.isnan(mean_returns)) or np.any(np.isnan(cov_matrix)):
+        raise ValueError("NaN values in returns statistics")
+    
+    min_eig = np.min(np.real(np.linalg.eigvals(cov_matrix)))
+    if min_eig < 0:
+        cov_matrix = cov_matrix + np.eye(len(cov_matrix)) * abs(min_eig) * 1.1
+    
     try:
-        np.linalg.cholesky(cov_matrix)
+        L = np.linalg.cholesky(cov_matrix)
     except np.linalg.LinAlgError:
-        # Add small diagonal to make it positive definite
-        cov_matrix = cov_matrix + np.eye(len(cov_matrix)) * 1e-6
+        cov_matrix = cov_matrix + np.eye(len(cov_matrix)) * 1e-5
+        L = np.linalg.cholesky(cov_matrix)
     
-    # Simulate paths (geometric Brownian motion)
-    try:
-        sim_returns = np.random.multivariate_normal(mean_returns, cov_matrix, (iterations, timespan_days))
-    except Exception as e:
-        raise ValueError(f"Failed to generate random returns: {str(e)}")
+    stock_values = weights * initial_investment
+    shares = stock_values / current_prices
     
-    # Calculate cumulative returns and prices
-    cumulative_returns = np.cumsum(sim_returns, axis=1)
-    sim_prices = current_prices[np.newaxis, np.newaxis, :] * np.exp(cumulative_returns)
+    dt = 1.0 / 252.0
+    final_values = np.zeros(iterations)
     
-    # Calculate shares owned
-    shares = (weights * initial_investment) / current_prices
+    for i in range(iterations):
+        sim_prices = current_prices.copy()
+        
+        for _ in range(timespan_days):
+            Z = np.random.normal(0, 1, len(tickers))
+            correlated_Z = L @ Z
+            drift = (mean_returns - 0.5 * np.diag(cov_matrix)) * dt
+            diffusion = np.sqrt(dt) * correlated_Z
+            sim_prices = sim_prices * np.exp(drift + diffusion)
+        
+        final_values[i] = np.sum(sim_prices * shares)
     
-    # Portfolio values
-    port_values = np.dot(sim_prices[:, :, :], shares)
-    
-    return port_values[:, -1]  # Final values
+    return final_values
 
 
 def render_portfolio_optimizer() -> None:
-    st.subheader("📊 Portfolio Optimizer • Genetic Algorithm + Monte Carlo")
+    st.subheader("📊 Portfolio Optimizer • Advanced Analytics")
     st.caption("Build optimal portfolios maximizing risk-adjusted returns")
 
-    # ═══════════════════════════════════════════════════════════════════════
-    # CONFIGURATION
-    # ═══════════════════════════════════════════════════════════════════════
     with st.expander("⚙️ Optimization Settings", expanded=True):
         col1, col2, col3 = st.columns(3)
         
         with col1:
-            max_stocks = st.slider("Max Stocks in Portfolio", 3, 20, 8,
-                                  help="Maximum number of stocks to include")
-            years_back = st.slider("Historical Years", 1, 10, 3,
-                                  help="Years of price history for optimization")
+            max_stocks = st.slider("Max Stocks in Portfolio", 3, 20, 8)
+            years_back = st.slider("Historical Years", 1, 10, 3)
         
         with col2:
-            risk_free_rate = st.number_input("Risk-Free Rate (%)", 0.0, 10.0, 2.0, 0.5,
-                                            help="For Sharpe ratio calculation") / 100
-            min_weight = st.number_input("Min Weight per Stock (%)", 0.1, 10.0, 1.0, 0.5,
-                                        help="Minimum allocation per stock") / 100
+            risk_free_rate = st.number_input("Risk-Free Rate (%)", 0.0, 10.0, 2.0, 0.5) / 100
+            min_weight = st.number_input("Min Weight per Stock (%)", 0.1, 10.0, 1.0, 0.5) / 100
         
         with col3:
-            use_fundamentals = st.checkbox("Use Fundamentals", value=True,
-                                          help="Adjust expected returns using fundamentals")
+            use_fundamentals = st.checkbox("Use Fundamentals", value=True)
             rebalancing_freq = st.selectbox("Rebalancing Frequency", 
-                                           ["Monthly", "Quarterly", "Annually"],
-                                           help="Assumed portfolio rebalancing frequency")
+                                           ["Monthly", "Quarterly", "Annually"])
 
-    # ═══════════════════════════════════════════════════════════════════════
-    # TICKER SELECTION
-    # ═══════════════════════════════════════════════════════════════════════
     st.markdown("---")
     st.subheader("🎯 Stock Universe Selection")
     
@@ -366,15 +343,10 @@ def render_portfolio_optimizer() -> None:
                               horizontal=True)
     
     with col_reset:
-        if st.button("🔄 Reset", help="Clear cached tickers"):
-            if 'candidate_tickers' in st.session_state:
-                del st.session_state['candidate_tickers']
-            if 'finviz_fetched' in st.session_state:
-                del st.session_state['finviz_fetched']
-            if 'sp500_fetched' in st.session_state:
-                del st.session_state['sp500_fetched']
-            if 'last_sector' in st.session_state:
-                del st.session_state['last_sector']
+        if st.button("🔄 Reset"):
+            for key in ['candidate_tickers', 'finviz_fetched', 'sp500_fetched', 'last_sector', 'last_source']:
+                if key in st.session_state:
+                    del st.session_state[key]
             st.rerun()
     
     candidate_tickers = []
@@ -383,39 +355,31 @@ def render_portfolio_optimizer() -> None:
         tickers_input = st.text_area(
             "Enter Tickers (one per line or comma-separated)",
             "AAPL\nMSFT\nGOOGL\nAMZN\nMETA\nTSLA\nNVDA\nJPM",
-            height=150,
-            help="Enter stock tickers you want to consider"
+            height=150
         )
         candidate_tickers = [t.strip().upper() for t in tickers_input.replace(',', '\n').split('\n') if t.strip()]
         
-        # Clear cache when switching to manual mode
-        if 'finviz_fetched' in st.session_state:
-            del st.session_state['finviz_fetched']
-        if 'sp500_fetched' in st.session_state:
-            del st.session_state['sp500_fetched']
-        if 'candidate_tickers' in st.session_state:
-            del st.session_state['candidate_tickers']
+        for key in ['finviz_fetched', 'sp500_fetched', 'candidate_tickers']:
+            if key in st.session_state:
+                del st.session_state[key]
     
     elif ticker_mode == "S&P 500":
         col1, col2 = st.columns([2, 1])
         
         with col1:
-            max_sp500 = st.number_input("Max S&P 500 Stocks", 10, 500, 100, 10,
-                                       help="Maximum stocks to use from S&P 500 (top by market cap)")
+            max_sp500 = st.number_input("Max S&P 500 Stocks", 10, 500, 100, 10)
         
         with col2:
-            st.write("")  # Spacer
-            st.write("")  # Spacer
+            st.write("")
+            st.write("")
             fetch_sp500 = st.button("📥 Load S&P 500", type="primary", use_container_width=True)
         
-        # Auto-fetch on first load or when button clicked
         if fetch_sp500 or ('sp500_fetched' not in st.session_state and ticker_mode == "S&P 500"):
             with st.spinner("Fetching S&P 500 constituents..."):
                 try:
                     candidate_tickers = get_sp500_tickers()
                     
                     if candidate_tickers:
-                        # Limit to requested number
                         candidate_tickers = candidate_tickers[:max_sp500]
                         st.success(f"✅ Loaded {len(candidate_tickers)} S&P 500 stocks")
                         st.session_state['candidate_tickers'] = candidate_tickers
@@ -423,20 +387,16 @@ def render_portfolio_optimizer() -> None:
                         st.session_state['last_source'] = f"S&P 500 (first {len(candidate_tickers)})"
                     else:
                         st.error("❌ Could not fetch S&P 500 list")
-                        st.info("💡 Using fallback list of major S&P 500 stocks")
                         st.session_state['candidate_tickers'] = []
                 except Exception as e:
-                    st.error(f"❌ Error fetching S&P 500: {str(e)}")
-                    st.info("💡 Try Manual Entry mode instead")
+                    st.error(f"❌ Error: {str(e)}")
                     st.session_state['candidate_tickers'] = []
         
-        # Use session state if available
         if 'candidate_tickers' in st.session_state:
             candidate_tickers = st.session_state['candidate_tickers']
             if 'last_source' in st.session_state:
                 st.caption(f"Currently loaded: {st.session_state['last_source']}")
         
-        # Clear Finviz cache
         if 'finviz_fetched' in st.session_state:
             del st.session_state['finviz_fetched']
         
@@ -449,34 +409,22 @@ def render_portfolio_optimizer() -> None:
         
         with col1:
             sector_options = [
-                "All Sectors",
-                "Technology",
-                "Healthcare",
-                "Financials",
-                "Energy",
-                "Consumer Discretionary",
-                "Consumer Staples",
-                "Industrials",
-                "Basic Materials",
-                "Communication Services",
-                "Utilities",
-                "Real Estate"
+                "All Sectors", "Technology", "Healthcare", "Financials", "Energy",
+                "Consumer Discretionary", "Consumer Staples", "Industrials",
+                "Basic Materials", "Communication Services", "Utilities", "Real Estate"
             ]
-            
             sector = st.selectbox("Select Sector", sector_options, index=0)
         
         with col2:
-            max_candidates = st.number_input("Max Candidates", 10, 200, 50, 10,
-                                            help="Maximum stocks to fetch per sector")
+            max_candidates = st.number_input("Max Candidates", 10, 200, 50, 10)
         
         fetch_clicked = st.button("🔍 Fetch Sector Tickers", type="primary", use_container_width=True)
         
-        # Auto-fetch on first load if not already fetched
         if fetch_clicked or ('finviz_fetched' not in st.session_state and ticker_mode == "Finviz Sectors (Auto)"):
             with st.spinner(f"Fetching tickers from {sector}..."):
                 try:
                     if sector == "All Sectors":
-                        st.info("Fetching from all 11 sectors (this may take 30-60 seconds)...")
+                        st.info("Fetching from all 11 sectors...")
                         candidate_tickers = get_all_sectors_tickers(max_per_sector=10)[:max_candidates]
                     else:
                         candidate_tickers = get_finviz_tickers(sector)[:max_candidates]
@@ -488,24 +436,19 @@ def render_portfolio_optimizer() -> None:
                         st.session_state['last_sector'] = sector
                     else:
                         st.error(f"❌ No tickers found for {sector}")
-                        st.info("💡 Try a different sector, check your internet connection, or use S&P 500/Manual Entry mode")
                         st.session_state['candidate_tickers'] = []
                 except Exception as e:
-                    st.error(f"❌ Error fetching tickers: {str(e)}")
-                    st.info("💡 This can happen if Finviz is blocking requests. Try S&P 500 or Manual Entry mode instead.")
+                    st.error(f"❌ Error: {str(e)}")
                     st.session_state['candidate_tickers'] = []
         
-        # Use session state if available
         if 'candidate_tickers' in st.session_state:
             candidate_tickers = st.session_state['candidate_tickers']
             if 'last_sector' in st.session_state:
                 st.caption(f"Currently loaded: {st.session_state['last_sector']}")
         
-        # Clear S&P 500 cache
         if 'sp500_fetched' in st.session_state:
             del st.session_state['sp500_fetched']
     
-    # Show ticker preview
     if candidate_tickers:
         with st.expander(f"📋 Candidate Tickers ({len(candidate_tickers)})", expanded=False):
             st.write(", ".join(candidate_tickers[:50]))
@@ -513,23 +456,18 @@ def render_portfolio_optimizer() -> None:
                 st.caption(f"... and {len(candidate_tickers) - 50} more")
     else:
         if ticker_mode == "Finviz Sectors (Auto)":
-            st.info("👆 Click 'Fetch Sector Tickers' to load stocks from the selected sector")
+            st.info("👆 Click 'Fetch Sector Tickers' to load stocks")
         elif ticker_mode == "S&P 500":
-            st.info("👆 Click 'Load S&P 500' to fetch the S&P 500 constituent list")
+            st.info("👆 Click 'Load S&P 500' to fetch the list")
     
-    # Validation
     if not candidate_tickers:
-        st.warning(f"⚠️ No tickers available. Please {'fetch tickers' if ticker_mode != 'Manual Entry' else 'enter tickers'} or switch to a different mode.")
+        st.warning(f"⚠️ No tickers available.")
         st.stop()
     
     if len(candidate_tickers) < max_stocks:
         st.error(f"❌ Not enough candidates ({len(candidate_tickers)}). Need at least {max_stocks}.")
-        st.info(f"💡 Either reduce 'Max Stocks' to {len(candidate_tickers)} or fewer, or fetch more tickers")
         st.stop()
     
-    # ═══════════════════════════════════════════════════════════════════════
-    # RUN OPTIMIZATION
-    # ═══════════════════════════════════════════════════════════════════════
     st.markdown("---")
     
     run_opt = st.button("🚀 Optimize Portfolio", type="primary", use_container_width=True)
@@ -539,14 +477,13 @@ def render_portfolio_optimizer() -> None:
             prices, fundamentals = fetch_stock_data(candidate_tickers, years_back)
         
         if prices.empty:
-            st.error("❌ No price data available. Check tickers or try different time period.")
+            st.error("❌ No price data available.")
             st.stop()
         
-        # Filter to stocks with sufficient data
         valid_tickers = [col for col in prices.columns if prices[col].notna().sum() > 252]
         
         if len(valid_tickers) < max_stocks:
-            st.warning(f"⚠️ Only {len(valid_tickers)} stocks have sufficient data. Adjusting max_stocks.")
+            st.warning(f"⚠️ Only {len(valid_tickers)} stocks have sufficient data.")
             max_stocks = len(valid_tickers)
         
         prices = prices[valid_tickers]
@@ -554,7 +491,7 @@ def render_portfolio_optimizer() -> None:
         
         st.info(f"📊 Analyzing {len(valid_tickers)} stocks with {len(prices)} trading days")
         
-        with st.spinner("Running optimization algorithm..."):
+        with st.spinner("Running optimization..."):
             try:
                 portfolio = optimize_portfolio(
                     returns_df, 
@@ -565,27 +502,27 @@ def render_portfolio_optimizer() -> None:
                     min_weight
                 )
                 
-                # Validation check
                 if portfolio['sharpe'] < -1:
-                    st.warning("⚠️ Warning: Portfolio has very negative Sharpe ratio. This suggests poor risk-adjusted returns based on historical data.")
+                    st.warning("⚠️ Warning: Portfolio has very negative Sharpe ratio.")
                 
                 if portfolio['expected_return'] < 0:
-                    st.warning("⚠️ Warning: Portfolio has negative expected return based on historical performance. Consider a longer time period or different stocks.")
+                    st.warning("⚠️ Warning: Portfolio has negative expected return.")
                 
             except ValueError as e:
                 st.error(f"❌ Optimization failed: {str(e)}")
-                st.info("💡 Try: reducing max stocks, increasing history, or using different tickers")
                 st.stop()
+        
+        st.session_state['optimized_portfolio'] = portfolio
+        st.session_state['prices_data'] = prices
+        st.session_state['returns_data'] = returns_df
+        st.session_state['fundamentals_data'] = fundamentals
+        st.session_state['use_fundamentals'] = use_fundamentals
         
         st.success("✅ Optimization Complete!")
         
-        # ═══════════════════════════════════════════════════════════════
-        # RESULTS DISPLAY
-        # ═══════════════════════════════════════════════════════════════
         st.markdown("---")
         st.subheader("📈 Optimized Portfolio")
         
-        # Metrics
         col1, col2, col3, col4 = st.columns(4)
         with col1:
             st.metric("Expected Annual Return", f"{portfolio['expected_return']:.2%}")
@@ -596,7 +533,6 @@ def render_portfolio_optimizer() -> None:
         with col4:
             st.metric("Number of Stocks", len(portfolio['tickers']))
         
-        # Allocation Table
         st.markdown("#### 📊 Portfolio Allocation")
         
         results_df = pd.DataFrame({
@@ -606,14 +542,12 @@ def render_portfolio_optimizer() -> None:
             "Volatility (%)": [returns_df[t].std() * np.sqrt(252) * 100 for t in portfolio['tickers']]
         })
         
-        # Add fundamental data if available
         if use_fundamentals:
             results_df["P/E Ratio"] = [fundamentals.get(t, {}).get('trailingPE', np.nan) 
                                        for t in portfolio['tickers']]
             results_df["ROE (%)"] = [fundamentals.get(t, {}).get('returnOnEquity', 0) * 100 
                                      for t in portfolio['tickers']]
         
-        # Sort by weight for better display
         results_df = results_df.sort_values("Weight (%)", ascending=False)
         
         st.dataframe(
@@ -628,16 +562,13 @@ def render_portfolio_optimizer() -> None:
             use_container_width=True
         )
         
-        # Sanity check warning
         negative_returns = results_df[results_df["Expected Return (%)"] < 0]
         if len(negative_returns) > 0:
-            st.warning(f"⚠️ Note: {len(negative_returns)} stock(s) have negative expected returns based on historical data. This is based on past performance and may not reflect future results.")
+            st.warning(f"⚠️ Note: {len(negative_returns)} stock(s) have negative expected returns.")
         
-        # Visualizations
         col1, col2 = st.columns(2)
         
         with col1:
-            # Pie Chart
             st.markdown("#### 🥧 Allocation Breakdown")
             fig_pie = px.pie(
                 results_df, 
@@ -650,7 +581,6 @@ def render_portfolio_optimizer() -> None:
             st.plotly_chart(fig_pie, use_container_width=True)
         
         with col2:
-            # Risk-Return Scatter
             st.markdown("#### 📍 Risk-Return Profile")
             fig_scatter = px.scatter(
                 results_df,
@@ -666,44 +596,6 @@ def render_portfolio_optimizer() -> None:
             fig_scatter.update_layout(height=400)
             st.plotly_chart(fig_scatter, use_container_width=True)
         
-        # Diagnostics
-        with st.expander("🔍 Optimization Diagnostics", expanded=False):
-            st.markdown("**Algorithm Performance**")
-            
-            diag_col1, diag_col2 = st.columns(2)
-            
-            with diag_col1:
-                st.metric("Total Stocks Analyzed", len(valid_tickers))
-                st.metric("Stocks Selected", len(portfolio['tickers']))
-                st.metric("Optimization Success", "✅ Yes")
-                
-            with diag_col2:
-                avg_return = np.mean(portfolio['individual_returns'])
-                st.metric("Avg Stock Return", f"{avg_return*100:.2f}%")
-                st.metric("Portfolio Return", f"{portfolio['expected_return']*100:.2f}%")
-                benefit = ((portfolio['expected_return'] - avg_return) / abs(avg_return) * 100) if avg_return != 0 else 0
-                st.metric("Diversification Benefit", f"{benefit:.1f}%",
-                         help="How much better the portfolio performs vs simple average")
-            
-            st.markdown("**Individual Stock Returns (Annualized)**")
-            stock_returns = pd.DataFrame({
-                'Stock': portfolio['tickers'],
-                'Expected Return (%)': [r * 100 for r in portfolio['individual_returns']],
-                'Weight (%)': [w * 100 for w in portfolio['weights']]
-            }).sort_values('Expected Return (%)', ascending=False)
-            
-            st.dataframe(
-                stock_returns.style.format({
-                    'Expected Return (%)': '{:.2f}',
-                    'Weight (%)': '{:.2f}'
-                }).background_gradient(subset=['Expected Return (%)'], cmap='RdYlGn'),
-                use_container_width=True,
-                hide_index=True
-            )
-            
-            st.caption("ℹ️ The optimizer balances return and risk. A stock with lower return but lower volatility/correlation might get higher weight for better risk-adjusted returns (Sharpe ratio).")
-        
-        # Historical Performance
         st.markdown("#### 📈 Historical Portfolio Performance")
         
         portfolio_hist = (returns_df[portfolio['tickers']] * portfolio['weights']).sum(axis=1)
@@ -718,7 +610,6 @@ def render_portfolio_optimizer() -> None:
             line=dict(color='blue', width=2)
         ))
         
-        # Add benchmark if SPY is available
         if 'SPY' in prices.columns:
             spy_returns = calculate_returns(prices[['SPY']])
             spy_cumulative = (1 + spy_returns['SPY']).cumprod() * 100
@@ -737,31 +628,27 @@ def render_portfolio_optimizer() -> None:
             height=400
         )
         st.plotly_chart(fig_perf, use_container_width=True)
-        
-        # ═══════════════════════════════════════════════════════════════
-        # MONTE CARLO SIMULATION
-        # ═══════════════════════════════════════════════════════════════
+    
+    if 'optimized_portfolio' in st.session_state and 'prices_data' in st.session_state:
         st.markdown("---")
         st.subheader("🎲 Monte Carlo Simulation")
-        st.caption("Project portfolio value into the future using randomized simulations")
+        st.caption("Project portfolio value into the future")
+        
+        portfolio = st.session_state['optimized_portfolio']
+        prices = st.session_state['prices_data']
         
         col1, col2, col3 = st.columns(3)
         
         with col1:
-            mc_iterations = st.number_input("Iterations", 1000, 100000, 10000, 1000,
-                                           help="More iterations = more accurate",
-                                           key="mc_iter")
+            mc_iterations = st.number_input("Iterations", 1000, 100000, 10000, 1000)
         with col2:
-            mc_years = st.number_input("Years to Project", 1, 30, 5,
-                                      help="Future timespan",
-                                      key="mc_years")
+            mc_years = st.number_input("Years to Project", 1, 30, 5)
         with col3:
-            initial_investment = st.number_input("Initial Investment ($)", 1000, 10000000, 10000, 1000,
-                                                key="mc_investment")
+            initial_investment = st.number_input("Initial Investment ($)", 1000, 10000000, 10000, 1000)
         
-        run_mc_button = st.button("🎯 Run Monte Carlo Simulation", type="primary", use_container_width=True, key="run_mc")
+        run_mc = st.button("🎯 Run Monte Carlo Simulation", type="primary", use_container_width=True)
         
-        if run_mc_button:
+        if run_mc:
             with st.spinner(f"Running {mc_iterations:,} Monte Carlo simulations..."):
                 try:
                     timespan_days = mc_years * 252
@@ -769,7 +656,6 @@ def render_portfolio_optimizer() -> None:
                         portfolio, prices, mc_iterations, timespan_days, initial_investment
                     )
                     
-                    # Store in session state
                     st.session_state['mc_results'] = {
                         'final_values': final_values,
                         'iterations': mc_iterations,
@@ -779,19 +665,16 @@ def render_portfolio_optimizer() -> None:
                     
                 except Exception as e:
                     st.error(f"❌ Monte Carlo simulation failed: {str(e)}")
-                    st.info("💡 This can happen if there's insufficient price data or numerical issues")
                     import traceback
                     with st.expander("🔍 Error Details"):
                         st.code(traceback.format_exc())
         
-        # Display results if available
         if 'mc_results' in st.session_state:
             mc_data = st.session_state['mc_results']
             final_values = mc_data['final_values']
             initial_investment = mc_data['investment']
             mc_years = mc_data['years']
             
-            # Calculate percentiles
             p5, p25, p50, p75, p95 = np.percentile(final_values, [5, 25, 50, 75, 95])
             
             st.markdown("#### 📊 Simulation Results")
@@ -810,7 +693,6 @@ def render_portfolio_optimizer() -> None:
                 prob_loss = (final_values < initial_investment).sum() / len(final_values) * 100
                 st.metric("Probability of Loss", f"{prob_loss:.1f}%")
             
-            # Additional statistics
             col1, col2, col3 = st.columns(3)
             with col1:
                 st.metric("Mean Return", f"{((final_values.mean()/initial_investment - 1) * 100):.1f}%")
@@ -820,7 +702,6 @@ def render_portfolio_optimizer() -> None:
             with col3:
                 st.metric("Std Deviation", f"${final_values.std():,.0f}")
             
-            # Distribution plot
             st.markdown("#### 📈 Distribution of Outcomes")
             
             fig_hist = go.Figure()
@@ -832,8 +713,6 @@ def render_portfolio_optimizer() -> None:
                 opacity=0.7
             ))
             
-            # Add percentile lines
-            colors = {'5th': 'red', 'Median': 'green', '95th': 'blue', 'Initial': 'orange'}
             for pct, val, name, color in [
                 (5, p5, '5th', 'red'),
                 (50, p50, 'Median', 'green'),
@@ -847,7 +726,6 @@ def render_portfolio_optimizer() -> None:
                     annotation_position="top"
                 )
             
-            # Add initial investment line
             fig_hist.add_vline(
                 x=initial_investment,
                 line_dash="dot",
@@ -857,7 +735,7 @@ def render_portfolio_optimizer() -> None:
             )
             
             fig_hist.update_layout(
-                title=f"Portfolio Value Distribution After {mc_years} Years (${initial_investment:,} initial, {mc_data['iterations']:,} simulations)",
+                title=f"Portfolio Value After {mc_years} Years ({mc_data['iterations']:,} simulations)",
                 xaxis_title="Final Value ($)",
                 yaxis_title="Frequency",
                 height=400,
@@ -865,16 +743,15 @@ def render_portfolio_optimizer() -> None:
             )
             st.plotly_chart(fig_hist, use_container_width=True)
             
-            # Probability table
             st.markdown("#### 🎯 Probability Analysis")
             
             targets = [
-                initial_investment * 0.5,  # 50% loss
-                initial_investment * 0.8,  # 20% loss
-                initial_investment,        # Break even
-                initial_investment * 1.5,  # 50% gain
-                initial_investment * 2.0,  # Double
-                initial_investment * 3.0,  # Triple
+                initial_investment * 0.5,
+                initial_investment * 0.8,
+                initial_investment,
+                initial_investment * 1.5,
+                initial_investment * 2.0,
+                initial_investment * 3.0,
             ]
             
             prob_data = []
@@ -894,11 +771,14 @@ def render_portfolio_optimizer() -> None:
                 hide_index=True
             )
         
-        # ═══════════════════════════════════════════════════════════════
-        # DOWNLOAD & EXPORT
-        # ═══════════════════════════════════════════════════════════════
         st.markdown("---")
         st.markdown("### 📥 Export Results")
+        
+        results_df = pd.DataFrame({
+            "Stock": portfolio['tickers'],
+            "Weight (%)": [w * 100 for w in portfolio['weights']],
+            "Expected Return (%)": [r * 100 for r in portfolio['individual_returns']]
+        })
         
         col1, col2 = st.columns(2)
         
@@ -912,9 +792,7 @@ def render_portfolio_optimizer() -> None:
             )
         
         with col2:
-            # Create summary report
-            report = f"""
-PORTFOLIO OPTIMIZATION REPORT
+            report = f"""PORTFOLIO OPTIMIZATION REPORT
 Generated: {date.today()}
 
 PORTFOLIO METRICS:
@@ -928,12 +806,6 @@ HOLDINGS:
             for ticker, weight in zip(portfolio['tickers'], portfolio['weights']):
                 report += f"\n{ticker}: {weight*100:.2f}%"
             
-            report += f"\n\nOPTIMIZATION PARAMETERS:\n"
-            report += f"- Historical Period: {years_back} years\n"
-            report += f"- Risk-Free Rate: {risk_free_rate*100:.1f}%\n"
-            report += f"- Fundamentals Adjustment: {use_fundamentals}\n"
-            report += f"- Candidate Universe: {len(candidate_tickers)} stocks\n"
-            
             st.download_button(
                 label="📄 Download Report (TXT)",
                 data=report,
@@ -942,9 +814,6 @@ HOLDINGS:
             )
 
 
-# ═══════════════════════════════════════════════════════════════════════
-# MAIN ENTRY POINT
-# ═══════════════════════════════════════════════════════════════════════
 if __name__ == "__main__":
     st.set_page_config(page_title="Portfolio Optimizer", layout="wide")
     render_portfolio_optimizer()
