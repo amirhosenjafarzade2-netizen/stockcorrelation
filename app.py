@@ -230,6 +230,17 @@ def get_available_modules() -> Dict[str, dict]:
     except ImportError as e:
         st.warning(f"Could not load Advanced Valuation module: {e}")
     
+    # ── NEW MODULE: Portfolio Optimizer ──────────────────────────────────────
+    try:
+        from portfolio_optimizer import render_portfolio_optimizer
+        modules["📊 Portfolio Optimizer"] = {
+            "func": render_portfolio_optimizer,
+            "desc": "Genetic algorithm portfolio optimization (max Sharpe) + optional Monte Carlo simulation",
+            "uses_context": False
+        }
+    except ImportError:
+        pass
+
     return modules
 
 # ────────────────────────────────────────────────
