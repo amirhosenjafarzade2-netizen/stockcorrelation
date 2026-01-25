@@ -41,6 +41,68 @@ def get_all_sectors_tickers(max_per_sector: int = 20) -> List[str]:
     return list(set(all_tickers))  # Remove duplicates
 
 
+def get_sp500_tickers() -> List[str]:
+    """Fetch S&P 500 ticker list with multiple fallback methods"""
+    
+    # Method 1: Try Wikipedia with pandas
+    try:
+        url = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
+        tables = pd.read_html(url)
+        df = tables[0]
+        tickers = df["Symbol"].str.replace(".", "-", regex=False).tolist()
+        if len(tickers) > 400:  # Should have ~500
+            return tickers
+    except:
+        pass
+    
+    # Method 2: Try direct Wikipedia scraping
+    try:
+        import requests
+        from bs4 import BeautifulSoup
+        
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        }
+        response = requests.get(
+            "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies",
+            headers=headers,
+            timeout=15
+        )
+        soup = BeautifulSoup(response.text, 'html.parser')
+        table = soup.find('table', {'id': 'constituents'})
+        if not table:
+            table = soup.find('table', {'class': 'wikitable'})
+        
+        tickers = []
+        for row in table.find_all('tr')[1:]:
+            cells = row.find_all('td')
+            if cells:
+                ticker = cells[0].text.strip().replace('.', '-')
+                if ticker:
+                    tickers.append(ticker)
+        
+        if len(tickers) > 400:
+            return tickers
+    except:
+        pass
+    
+    # Fallback: Return major S&P 500 stocks
+    return [
+        "AAPL", "MSFT", "GOOGL", "AMZN", "NVDA", "META", "TSLA", "BRK.B", 
+        "UNH", "XOM", "JNJ", "JPM", "V", "PG", "MA", "HD", "CVX", "MRK", 
+        "ABBV", "PEP", "COST", "AVGO", "KO", "WMT", "MCD", "DIS", "ADBE",
+        "CRM", "NFLX", "AMD", "CSCO", "ACN", "TMO", "ORCL", "ABT", "DHR",
+        "CMCSA", "VZ", "TXN", "INTC", "NEE", "PM", "HON", "UPS", "IBM",
+        "QCOM", "INTU", "LOW", "AMGN", "RTX", "SPGI", "BA", "GE", "CAT",
+        "BKNG", "LMT", "NOW", "SBUX", "ISRG", "GILD", "AXP", "DE", "BLK",
+        "MMC", "TJX", "MDLZ", "CI", "SYK", "ADI", "REGN", "ZTS", "CB",
+        "VRTX", "AMT", "SO", "PLD", "EOG", "DUK", "SCHW", "BSX", "MO",
+        "TGT", "LRCX", "FI", "MS", "BDX", "HCA", "PNC", "ETN", "USB",
+        "CL", "ADP", "TMUS", "APD", "CVS", "BMY", "GD", "SLB", "AON",
+        "ITW", "CME", "MCO", "EQIX", "COP", "NOC", "SHW", "WM", "ICE"
+    ]
+
+
 def fetch_stock_data(tickers: List[str], years_back: int) -> Tuple[pd.DataFrame, Dict[str, Dict]]:
     """Fetch historical prices and fundamentals."""
     start_date = (date.today() - timedelta(days=365 * years_back)).strftime('%Y-%m-%d')
@@ -287,9 +349,24 @@ def render_portfolio_optimizer() -> None:
     st.markdown("---")
     st.subheader("🎯 Stock Universe Selection")
     
-    ticker_mode = st.radio("Selection Method", 
-                          ["Manual Entry", "Finviz Sectors (Auto)"],
-                          horizontal=True)
+    col_mode, col_reset = st.columns([3, 1])
+    
+    with col_mode:
+        ticker_mode = st.radio("Selection Method", 
+                              ["Manual Entry", "S&P 500", "Finviz Sectors (Auto)"],
+                              horizontal=True)
+    
+    with col_reset:
+        if st.button("🔄 Reset", help="Clear cached tickers"):
+            if 'candidate_tickers' in st.session_state:
+                del st.session_state['candidate_tickers']
+            if 'finviz_fetched' in st.session_state:
+                del st.session_state['finviz_fetched']
+            if 'sp500_fetched' in st.session_state:
+                del st.session_state['sp500_fetched']
+            if 'last_sector' in st.session_state:
+                del st.session_state['last_sector']
+            st.rerun()
     
     candidate_tickers = []
     
@@ -302,9 +379,61 @@ def render_portfolio_optimizer() -> None:
         )
         candidate_tickers = [t.strip().upper() for t in tickers_input.replace(',', '\n').split('\n') if t.strip()]
         
+        # Clear cache when switching to manual mode
+        if 'finviz_fetched' in st.session_state:
+            del st.session_state['finviz_fetched']
+        if 'sp500_fetched' in st.session_state:
+            del st.session_state['sp500_fetched']
+        if 'candidate_tickers' in st.session_state:
+            del st.session_state['candidate_tickers']
+    
+    elif ticker_mode == "S&P 500":
+        col1, col2 = st.columns([2, 1])
+        
+        with col1:
+            max_sp500 = st.number_input("Max S&P 500 Stocks", 10, 500, 100, 10,
+                                       help="Maximum stocks to use from S&P 500 (top by market cap)")
+        
+        with col2:
+            st.write("")  # Spacer
+            st.write("")  # Spacer
+            fetch_sp500 = st.button("📥 Load S&P 500", type="primary", use_container_width=True)
+        
+        # Auto-fetch on first load or when button clicked
+        if fetch_sp500 or ('sp500_fetched' not in st.session_state and ticker_mode == "S&P 500"):
+            with st.spinner("Fetching S&P 500 constituents..."):
+                try:
+                    candidate_tickers = get_sp500_tickers()
+                    
+                    if candidate_tickers:
+                        # Limit to requested number
+                        candidate_tickers = candidate_tickers[:max_sp500]
+                        st.success(f"✅ Loaded {len(candidate_tickers)} S&P 500 stocks")
+                        st.session_state['candidate_tickers'] = candidate_tickers
+                        st.session_state['sp500_fetched'] = True
+                        st.session_state['last_source'] = f"S&P 500 (first {len(candidate_tickers)})"
+                    else:
+                        st.error("❌ Could not fetch S&P 500 list")
+                        st.info("💡 Using fallback list of major S&P 500 stocks")
+                        st.session_state['candidate_tickers'] = []
+                except Exception as e:
+                    st.error(f"❌ Error fetching S&P 500: {str(e)}")
+                    st.info("💡 Try Manual Entry mode instead")
+                    st.session_state['candidate_tickers'] = []
+        
+        # Use session state if available
+        if 'candidate_tickers' in st.session_state:
+            candidate_tickers = st.session_state['candidate_tickers']
+            if 'last_source' in st.session_state:
+                st.caption(f"Currently loaded: {st.session_state['last_source']}")
+        
+        # Clear Finviz cache
+        if 'finviz_fetched' in st.session_state:
+            del st.session_state['finviz_fetched']
+        
     else:
         if not HAS_SCREENER:
-            st.error("❌ Screener module not available. Please use Manual Entry mode.")
+            st.error("❌ Screener module not available. Please use Manual Entry or S&P 500 mode.")
             return
         
         col1, col2 = st.columns([2, 1])
@@ -334,28 +463,38 @@ def render_portfolio_optimizer() -> None:
         fetch_clicked = st.button("🔍 Fetch Sector Tickers", type="primary", use_container_width=True)
         
         # Auto-fetch on first load if not already fetched
-        if fetch_clicked or ('finviz_fetched' not in st.session_state):
+        if fetch_clicked or ('finviz_fetched' not in st.session_state and ticker_mode == "Finviz Sectors (Auto)"):
             with st.spinner(f"Fetching tickers from {sector}..."):
                 try:
                     if sector == "All Sectors":
+                        st.info("Fetching from all 11 sectors (this may take 30-60 seconds)...")
                         candidate_tickers = get_all_sectors_tickers(max_per_sector=10)[:max_candidates]
                     else:
                         candidate_tickers = get_finviz_tickers(sector)[:max_candidates]
                     
                     if candidate_tickers:
-                        st.success(f"✅ Loaded {len(candidate_tickers)} tickers")
+                        st.success(f"✅ Loaded {len(candidate_tickers)} tickers from {sector}")
                         st.session_state['candidate_tickers'] = candidate_tickers
                         st.session_state['finviz_fetched'] = True
+                        st.session_state['last_sector'] = sector
                     else:
-                        st.error("❌ No tickers found. Try a different sector or use Manual Entry.")
+                        st.error(f"❌ No tickers found for {sector}")
+                        st.info("💡 Try a different sector, check your internet connection, or use S&P 500/Manual Entry mode")
                         st.session_state['candidate_tickers'] = []
                 except Exception as e:
                     st.error(f"❌ Error fetching tickers: {str(e)}")
+                    st.info("💡 This can happen if Finviz is blocking requests. Try S&P 500 or Manual Entry mode instead.")
                     st.session_state['candidate_tickers'] = []
         
         # Use session state if available
         if 'candidate_tickers' in st.session_state:
             candidate_tickers = st.session_state['candidate_tickers']
+            if 'last_sector' in st.session_state:
+                st.caption(f"Currently loaded: {st.session_state['last_sector']}")
+        
+        # Clear S&P 500 cache
+        if 'sp500_fetched' in st.session_state:
+            del st.session_state['sp500_fetched']
     
     # Show ticker preview
     if candidate_tickers:
@@ -363,10 +502,20 @@ def render_portfolio_optimizer() -> None:
             st.write(", ".join(candidate_tickers[:50]))
             if len(candidate_tickers) > 50:
                 st.caption(f"... and {len(candidate_tickers) - 50} more")
+    else:
+        if ticker_mode == "Finviz Sectors (Auto)":
+            st.info("👆 Click 'Fetch Sector Tickers' to load stocks from the selected sector")
+        elif ticker_mode == "S&P 500":
+            st.info("👆 Click 'Load S&P 500' to fetch the S&P 500 constituent list")
     
     # Validation
+    if not candidate_tickers:
+        st.warning(f"⚠️ No tickers available. Please {'fetch tickers' if ticker_mode != 'Manual Entry' else 'enter tickers'} or switch to a different mode.")
+        st.stop()
+    
     if len(candidate_tickers) < max_stocks:
         st.error(f"❌ Not enough candidates ({len(candidate_tickers)}). Need at least {max_stocks}.")
+        st.info(f"💡 Either reduce 'Max Stocks' to {len(candidate_tickers)} or fewer, or fetch more tickers")
         st.stop()
     
     # ═══════════════════════════════════════════════════════════════════════
@@ -546,10 +695,15 @@ def render_portfolio_optimizer() -> None:
             
             if st.button("🎯 Run Simulation"):
                 with st.spinner(f"Running {mc_iterations:,} Monte Carlo simulations..."):
-                    timespan_days = mc_years * 252
-                    final_values = monte_carlo_simulation(
-                        portfolio, prices, mc_iterations, timespan_days, initial_investment
-                    )
+                    try:
+                        timespan_days = mc_years * 252
+                        final_values = monte_carlo_simulation(
+                            portfolio, prices, mc_iterations, timespan_days, initial_investment
+                        )
+                    except Exception as e:
+                        st.error(f"❌ Monte Carlo simulation failed: {str(e)}")
+                        st.info("💡 This can happen if there's insufficient price data or numerical issues")
+                        st.stop()
                 
                 # Results
                 p5, p25, p50, p75, p95 = np.percentile(final_values, [5, 25, 50, 75, 95])
