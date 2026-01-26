@@ -430,7 +430,7 @@ def create_advanced_dashboard(price_data: Dict, inventory_data: Dict,
         rows=n_panels,
         cols=1,
         subplot_titles=panels,
-        vertical_spacing=0.08,
+        vertical_spacing=0.12,
         row_heights=[1/n_panels] * n_panels
     )
     
@@ -723,8 +723,20 @@ def commodities_module(analysis_context: Optional[Dict] = None):
     st.header("📊 Key Metrics")
     cols = st.columns(4)
     
+    # Safe price extraction
+    if len(price_data) == 0:
+        st.error("No price data available")
+        return
+    
     current_price = price_data.iloc[-1, 0]
-    price_change_1m = ((current_price - price_data.iloc[-20, 0]) / price_data.iloc[-20, 0] * 100) if len(price_data) >= 20 else 0
+    
+    # Safe price change calculation
+    if len(price_data) >= 20:
+        price_change_1m = ((current_price - price_data.iloc[-20, 0]) / price_data.iloc[-20, 0] * 100)
+    elif len(price_data) > 1:
+        price_change_1m = ((current_price - price_data.iloc[0, 0]) / price_data.iloc[0, 0] * 100)
+    else:
+        price_change_1m = 0
     
     with cols[0]:
         st.metric(
@@ -743,24 +755,30 @@ def commodities_module(analysis_context: Optional[Dict] = None):
             )
     
     with cols[2]:
-        if 'z_score' in analytics and not analytics['z_score'].empty:
-            z_val = analytics['z_score'].iloc[-1, 0]
-            z_status = "Overbought" if z_val > 2 else "Oversold" if z_val < -2 else "Normal"
-            st.metric(
-                "Z-Score Signal",
+        if 'z_score' in analytics and not analytics['z_score'].empty and len(analytics['z_score']) > 0:
+            try:
+                z_val = analytics['z_score'].iloc[-1, 0]
+                z_status = "Overbought" if z_val > 2 else "Oversold" if z_val < -2 else "Normal"
+                st.metric(
+                    "Z-Score Signal",
                 f"{z_val:.2f}",
                 z_status
             )
+            except (IndexError, KeyError):
+                pass
     
     with cols[3]:
-        if 'price_to_cost' in analytics and not analytics['price_to_cost'].empty:
-            ratio = analytics['price_to_cost'].iloc[-1, 0]
-            profitability = "Highly Profitable" if ratio > 1.5 else "Profitable" if ratio > 1.2 else "Marginal"
-            st.metric(
-                "Price/Cost Ratio",
-                f"{ratio:.2f}x",
-                profitability
-            )
+        if 'price_to_cost' in analytics and not analytics['price_to_cost'].empty and len(analytics['price_to_cost']) > 0:
+            try:
+                ratio = analytics['price_to_cost'].iloc[-1, 0]
+                profitability = "Highly Profitable" if ratio > 1.5 else "Profitable" if ratio > 1.2 else "Marginal"
+                st.metric(
+                    "Price/Cost Ratio",
+                    f"{ratio:.2f}x",
+                    profitability
+                )
+            except (IndexError, KeyError):
+                pass
     
     # Main Dashboard
     st.header("📈 Interactive Dashboard")
@@ -1020,7 +1038,7 @@ def commodities_module(analysis_context: Optional[Dict] = None):
             with col2:
                 st.subheader("📊 Inventory Stats")
                 
-                current_inv = inv_data.iloc[-1, 0]
+                current_inv = inv_data.iloc[-1, 0] if len(inv_data) > 0 else 0
                 avg_inv = inv_data.mean()[0]
                 pct_vs_avg = ((current_inv - avg_inv) / avg_inv * 100)
                 
@@ -1068,7 +1086,7 @@ def commodities_module(analysis_context: Optional[Dict] = None):
                 st.info("Shows how many days current inventory would last at current production rates. Higher = more supply cushion.")
             
             # Supply/Demand Balance
-            if 'supply_demand' in analytics and not analytics['supply_demand'].empty:
+            if 'supply_demand' in analytics and not analytics['supply_demand'].empty and len(analytics['supply_demand']) > 0:
                 st.subheader("⚖️ Supply/Demand Balance")
                 
                 sd_data = analytics['supply_demand']
@@ -1103,7 +1121,7 @@ def commodities_module(analysis_context: Optional[Dict] = None):
                 fig.add_hline(y=0, line_dash="dot", line_color="gray", row=2, col=1)
                 
                 fig.update_layout(
-                    height=500,
+                    height=700,
                     template='plotly_white',
                     hovermode='x unified'
                 )
@@ -1153,7 +1171,7 @@ def commodities_module(analysis_context: Optional[Dict] = None):
                 st.plotly_chart(fig, use_container_width=True)
             
             with col2:
-                current_spread = spread_data.iloc[-1, 0]
+                current_spread = spread_data.iloc[-1, 0] if len(spread_data) > 0 else 0
                 avg_spread = spread_data.mean()[0]
                 
                 st.metric(
@@ -1192,7 +1210,7 @@ def commodities_module(analysis_context: Optional[Dict] = None):
             fig = make_subplots(
                 rows=4, cols=1,
                 subplot_titles=("Original", "Trend", "Seasonal", "Residual"),
-                vertical_spacing=0.08
+                vertical_spacing=0.15
             )
             
             components = ['Original', 'Trend', 'Seasonal', 'Residual']
@@ -1257,39 +1275,52 @@ def commodities_module(analysis_context: Optional[Dict] = None):
     insights = []
     
     # Price vs cost analysis
-    if 'price_to_cost' in analytics and not analytics['price_to_cost'].empty:
-        ratio = analytics['price_to_cost'].iloc[-1, 0]
-        if ratio > 1.5:
-            insights.append(f"✅ **Highly Profitable**: Current price is {ratio:.1f}x production cost - expect increased supply")
-        elif ratio < 1.2:
-            insights.append(f"⚠️ **Marginal Economics**: Price only {ratio:.1f}x cost - producers may cut output")
+    if 'price_to_cost' in analytics and not analytics['price_to_cost'].empty and len(analytics['price_to_cost']) > 0:
+        try:
+            ratio = analytics['price_to_cost'].iloc[-1, 0]
+            if ratio > 1.5:
+                insights.append(f"✅ **Highly Profitable**: Current price is {ratio:.1f}x production cost - expect increased supply")
+            elif ratio < 1.2:
+                insights.append(f"⚠️ **Marginal Economics**: Price only {ratio:.1f}x cost - producers may cut output")
+        except (IndexError, KeyError):
+            pass
     
     # Z-score signals
-    if 'z_score' in analytics and not analytics['z_score'].empty:
-        z_val = analytics['z_score'].iloc[-1, 0]
-        if z_val > 2:
-            insights.append(f"📊 **Overbought Signal**: Z-score at +{z_val:.1f} suggests prices may be due for correction")
-        elif z_val < -2:
-            insights.append(f"📊 **Oversold Signal**: Z-score at {z_val:.1f} suggests prices may rebound")
+    if 'z_score' in analytics and not analytics['z_score'].empty and len(analytics['z_score']) > 0:
+        try:
+            z_val = analytics['z_score'].iloc[-1, 0]
+            if z_val > 2:
+                insights.append(f"📊 **Overbought Signal**: Z-score at +{z_val:.1f} suggests prices may be due for correction")
+            elif z_val < -2:
+                insights.append(f"📊 **Oversold Signal**: Z-score at {z_val:.1f} suggests prices may rebound")
+        except (IndexError, KeyError):
+            pass
     
     # Inventory analysis
     if inventory_data:
-        inv_key = list(inventory_data.keys())[0]
-        inv_data = inventory_data[inv_key]
-        current_inv = inv_data.iloc[-1, 0]
-        avg_inv = inv_data.mean()[0]
-        if current_inv < avg_inv * 0.9:
-            insights.append(f"📦 **Low Inventory**: Stocks {((current_inv/avg_inv-1)*100):.1f}% below average - bullish for prices")
-        elif current_inv > avg_inv * 1.1:
-            insights.append(f"📦 **High Inventory**: Stocks {((current_inv/avg_inv-1)*100):.1f}% above average - bearish for prices")
+        try:
+            inv_key = list(inventory_data.keys())[0]
+            inv_data = inventory_data[inv_key]
+            if len(inv_data) > 0:
+                current_inv = inv_data.iloc[-1, 0]
+                avg_inv = inv_data.mean()[0]
+                if current_inv < avg_inv * 0.9:
+                    insights.append(f"📦 **Low Inventory**: Stocks {((current_inv/avg_inv-1)*100):.1f}% below average - bullish for prices")
+                elif current_inv > avg_inv * 1.1:
+                    insights.append(f"📦 **High Inventory**: Stocks {((current_inv/avg_inv-1)*100):.1f}% above average - bearish for prices")
+        except (IndexError, KeyError):
+            pass
     
     # Crack spread
-    if 'crack_spread' in analytics and not analytics['crack_spread'].empty:
-        spread = analytics['crack_spread'].iloc[-1, 0]
-        if spread > 20:
-            insights.append(f"⚙️ **Strong Refinery Margins**: Crack spread at ${spread:.2f} - refiners incentivized to maximize runs")
-        elif spread < 10:
-            insights.append(f"⚙️ **Weak Refinery Margins**: Crack spread only ${spread:.2f} - refiners may cut utilization")
+    if 'crack_spread' in analytics and not analytics['crack_spread'].empty and len(analytics['crack_spread']) > 0:
+        try:
+            spread = analytics['crack_spread'].iloc[-1, 0]
+            if spread > 20:
+                insights.append(f"⚙️ **Strong Refinery Margins**: Crack spread at ${spread:.2f} - refiners incentivized to maximize runs")
+            elif spread < 10:
+                insights.append(f"⚙️ **Weak Refinery Margins**: Crack spread only ${spread:.2f} - refiners may cut utilization")
+        except (IndexError, KeyError):
+            pass
     
     # Volatility
     if 'volatility' in analytics:
