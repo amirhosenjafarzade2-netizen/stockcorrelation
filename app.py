@@ -243,7 +243,7 @@ def get_available_modules() -> Dict[str, dict]:
     
     # ── NEW MODULES: Enhanced Financial Analysis Suite ──────────────────────
     try:
-        from economics_improved import economics_module
+        from economics import economics_module
         modules["🌍 Macro/Economic Context"] = {
             "func": economics_module,
             "desc": "OECD/FRED data for GDP, inflation, rates, unemployment with visualizations",
