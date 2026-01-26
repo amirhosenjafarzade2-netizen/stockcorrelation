@@ -304,8 +304,13 @@ def get_available_modules() -> Dict[str, dict]:
             "desc": "Advanced commodities analysis with FRED prices, EIA inventory/production data, and analytics",
             "uses_context": False
         }
-    except ImportError:
-        pass
+    except ImportError as e:
+        # Show import error in Streamlit for debugging
+        if 'st' in dir():
+            st.sidebar.warning(f"⚠️ Commodities module not loaded: {str(e)}")
+    except Exception as e:
+        if 'st' in dir():
+            st.sidebar.error(f"❌ Error loading Commodities: {str(e)}")
   
     return modules
 # ────────────────────────────────────────────────
