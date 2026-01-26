@@ -240,6 +240,67 @@ def get_available_modules() -> Dict[str, dict]:
         }
     except ImportError:
         pass
+    
+    # ── NEW MODULES: Enhanced Financial Analysis Suite ──────────────────────
+    try:
+        from economics_improved import economics_module
+        modules["🌍 Macro/Economic Context"] = {
+            "func": economics_module,
+            "desc": "OECD/FRED data for GDP, inflation, rates, unemployment with visualizations",
+            "uses_context": False
+        }
+    except ImportError:
+        pass
+    
+    try:
+        from fixed_income_improved import fixed_income_module
+        modules["💰 Fixed Income / Bonds"] = {
+            "func": fixed_income_module,
+            "desc": "Bond pricing, YTM, duration, convexity, yield curves, and strategy analysis",
+            "uses_context": False
+        }
+    except ImportError:
+        pass
+    
+    try:
+        from options_improved import options_module
+        modules["📊 Options Pricing & Greeks"] = {
+            "func": options_module,
+            "desc": "Black-Scholes pricing, Greeks analysis, strategies, implied volatility",
+            "uses_context": False
+        }
+    except ImportError:
+        pass
+    
+    try:
+        from advanced_risk_improved import advanced_risk_module
+        modules["⚠️ Advanced Risk Analytics"] = {
+            "func": advanced_risk_module,
+            "desc": "VaR, CVaR, GARCH volatility modeling, stress testing, backtesting",
+            "uses_context": False
+        }
+    except ImportError:
+        pass
+    
+    try:
+        from sector_valuation_improved import sector_valuation_module
+        modules["🎯 Sector Valuation & SWOT"] = {
+            "func": sector_valuation_module,
+            "desc": "Sector-tuned DCF, multiples, peer comparison, automated SWOT analysis",
+            "uses_context": False
+        }
+    except ImportError:
+        pass
+    
+    try:
+        from advanced_models_improved import advanced_models_module
+        modules["🔬 Advanced Financial Models"] = {
+            "func": advanced_models_module,
+            "desc": "DuPont analysis, Altman Z-Score, Piotroski F-Score, WACC, Graham Number",
+            "uses_context": False
+        }
+    except ImportError:
+        pass
 
     return modules
 
