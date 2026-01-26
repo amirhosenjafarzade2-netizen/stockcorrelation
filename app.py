@@ -301,17 +301,6 @@ def get_available_modules() -> Dict[str, dict]:
         }
     except ImportError:
         pass
-    
-    # ── NEW MODULE: Commodities Analysis ──────────────────────────────────────
-    try:
-        from commodities import commodities_module
-        modules["📦 Commodities Analysis"] = {
-            "func": commodities_module,
-            "desc": "Advanced commodity analysis: prices, inventories, crack spreads, supply/demand, seasonality (FRED + EIA)",
-            "uses_context": False
-        }
-    except ImportError:
-        pass
 
     return modules
 
