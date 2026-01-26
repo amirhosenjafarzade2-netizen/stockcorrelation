@@ -298,10 +298,10 @@ def get_available_modules() -> Dict[str, dict]:
   
     # ── NEW MODULE: Commodities ──────────────────────────────────────────────
     try:
-        from commodities import render_commodities
+        from commodities import commodities_module
         modules["🛢️ Commodities Analysis"] = {
-            "func": render_commodities,
-            "desc": "Comprehensive commodities analysis including prices, correlations, and market insights",
+            "func": commodities_module,
+            "desc": "Advanced commodities analysis with FRED prices, EIA inventory/production data, and analytics",
             "uses_context": False
         }
     except ImportError:
