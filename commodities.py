@@ -1,6 +1,5 @@
-# commodities.py - Advanced Commodities Analysis Module
-# Integrates FRED prices, EIA inventory/production, with advanced analytics
-
+# commodities.py - Advanced Commodities Analysis Module (FIXED)
+# Integrates FRED prices, EIA inventory/production, yfinance fallback, with advanced analytics
 import streamlit as st
 import pandas as pd
 import requests
@@ -13,32 +12,35 @@ from typing import Dict, Optional, List, Tuple
 import numpy as np
 from scipy import stats
 from sklearn.linear_model import LinearRegression
+import yfinance as yf
 
 # API Configuration
 FRED_API_KEY = "your_fred_api_key_here"
 EIA_API_KEY = "your_eia_api_key_here"
-
 FRED_API_URL = "https://api.stlouisfed.org/fred/series/observations"
 EIA_API_URL = "https://api.eia.gov/v2"
 
-# Commodity Data Sources
+# Commodity Data Sources (FIXED with yfinance tickers)
 COMMODITIES = {
     "Energy": {
         "WTI_Crude": {
             "fred_code": "DCOILWTICO",
+            "yf_ticker": "CL=F",
             "unit": "$/Barrel",
             "description": "WTI Crude Oil Spot Price",
             "inventory_link": "Crude_Oil_Stock",
-            "production_cost": 45  # Approx breakeven
+            "production_cost": 45
         },
         "Brent_Crude": {
             "fred_code": "DCOILBRENTEU",
+            "yf_ticker": "BZ=F",
             "unit": "$/Barrel",
             "description": "Brent Crude Oil Spot Price",
             "production_cost": 50
         },
         "Natural_Gas": {
             "fred_code": "DHHNGSP",
+            "yf_ticker": "NG=F",
             "unit": "$/MMBtu",
             "description": "Henry Hub Natural Gas Spot Price",
             "inventory_link": "Natural_Gas_Storage",
@@ -46,12 +48,14 @@ COMMODITIES = {
         },
         "Gasoline": {
             "fred_code": "GASREGW",
+            "yf_ticker": "RB=F",
             "unit": "$/Gallon",
             "description": "US Regular Gasoline Price",
             "inventory_link": "Gasoline_Stock"
         },
         "Heating_Oil": {
             "fred_code": "DHOILNYH",
+            "yf_ticker": "HO=F",
             "unit": "$/Gallon",
             "description": "NY Harbor Heating Oil Spot Price"
         }
@@ -59,29 +63,34 @@ COMMODITIES = {
     "Metals": {
         "Gold": {
             "fred_code": "GOLDAMGBD228NLBM",
+            "yf_ticker": "GC=F",
             "unit": "$/Troy Oz",
             "description": "Gold Fixing Price (London)",
             "production_cost": 1200
         },
         "Silver": {
             "fred_code": "SLVPRUSD",
+            "yf_ticker": "SI=F",
             "unit": "$/Troy Oz",
             "description": "Silver Price (London)",
             "production_cost": 18
         },
         "Copper": {
             "fred_code": "PCOPPUSDM",
-            "unit": "$/Metric Ton",
+            "yf_ticker": "HG=F",
+            "unit": "$/Pound",
             "description": "Global Copper Price",
-            "production_cost": 6000
+            "production_cost": 3.0
         },
         "Platinum": {
             "fred_code": "PLATINUMLBMA",
+            "yf_ticker": "PL=F",
             "unit": "$/Troy Oz",
             "description": "Platinum Price (London)"
         },
         "Palladium": {
             "fred_code": "PALLADIUMLBMA",
+            "yf_ticker": "PA=F",
             "unit": "$/Troy Oz",
             "description": "Palladium Price (London)"
         }
@@ -89,27 +98,32 @@ COMMODITIES = {
     "Agriculture": {
         "Wheat": {
             "fred_code": "PWHEAMTUSDM",
-            "unit": "$/Metric Ton",
+            "yf_ticker": "ZW=F",
+            "unit": "$/Bushel",
             "description": "Global Wheat Price"
         },
         "Corn": {
             "fred_code": "PMAIZMTUSDM",
-            "unit": "$/Metric Ton",
+            "yf_ticker": "ZC=F",
+            "unit": "$/Bushel",
             "description": "Global Corn Price"
         },
         "Soybeans": {
             "fred_code": "PSOYBUSDQ",
-            "unit": "$/Metric Ton",
+            "yf_ticker": "ZS=F",
+            "unit": "$/Bushel",
             "description": "Global Soybean Price"
         },
         "Coffee": {
             "fred_code": "PCOFFOTMUSDM",
-            "unit": "$/Kg",
+            "yf_ticker": "KC=F",
+            "unit": "cents/lb",
             "description": "Global Coffee Price"
         },
         "Cotton": {
             "fred_code": "PCOTTINDUSDM",
-            "unit": "$/Kg",
+            "yf_ticker": "CT=F",
+            "unit": "cents/lb",
             "description": "Global Cotton Price"
         }
     }
@@ -152,7 +166,7 @@ EIA_INVENTORY_SERIES = {
     }
 }
 
-# Data fetching functions (same as before)
+# Data fetching functions
 @st.cache_data(ttl=3600)
 def get_fred_data_csv(series_id: str, start_date: str, end_date: str) -> pd.DataFrame:
     try:
@@ -161,17 +175,14 @@ def get_fred_data_csv(series_id: str, start_date: str, end_date: str) -> pd.Data
         response.raise_for_status()
         df = pd.read_csv(StringIO(response.text), index_col=0, parse_dates=True)
         
-        # Handle different column formats
         if len(df.columns) == 0:
             return pd.DataFrame()
         
         df.columns = [series_id]
         
-        # Filter by date range
         try:
             df = df.loc[start_date:end_date]
         except:
-            # If date filtering fails, just use all data
             pass
         
         df[series_id] = pd.to_numeric(df[series_id], errors='coerce')
@@ -182,7 +193,6 @@ def get_fred_data_csv(series_id: str, start_date: str, end_date: str) -> pd.Data
             
         return df
     except Exception as e:
-        # Return empty dataframe on any error
         return pd.DataFrame()
 
 @st.cache_data(ttl=3600)
@@ -209,8 +219,21 @@ def get_fred_data_api(series_id: str, start_date: str, end_date: str, api_key: s
     except Exception as e:
         return pd.DataFrame()
 
+@st.cache_data(ttl=3600)
+def get_yfinance_price(ticker: str, start_date: str, end_date: str) -> pd.DataFrame:
+    """Fetch commodity prices from yfinance (fallback for FRED)."""
+    try:
+        data = yf.download(ticker, start=start_date, end=end_date, progress=False, auto_adjust=True)
+        if not data.empty and "Close" in data.columns:
+            df = data[["Close"]].copy()
+            df.columns = [ticker]
+            return df.dropna()
+        return pd.DataFrame()
+    except Exception as e:
+        return pd.DataFrame()
+
 @st.cache_data(ttl=1800)
-def get_eia_data(series_path: str, api_key: str, filters: Optional[Dict] = None, 
+def get_eia_data(series_path: str, api_key: str, filters: Optional[Dict] = None,
                  start_date: Optional[str] = None, end_date: Optional[str] = None) -> pd.DataFrame:
     if not api_key or api_key == "your_eia_api_key_here":
         return pd.DataFrame()
@@ -245,34 +268,24 @@ def get_eia_data(series_path: str, api_key: str, filters: Optional[Dict] = None,
         return pd.DataFrame()
 
 # ============= ADVANCED ANALYTICS FUNCTIONS =============
-
-def calculate_crack_spread(crude_price: pd.DataFrame, gasoline_price: pd.DataFrame, 
+def calculate_crack_spread(crude_price: pd.DataFrame, gasoline_price: pd.DataFrame,
                           heating_oil_price: Optional[pd.DataFrame] = None) -> pd.DataFrame:
-    """
-    Calculate 3-2-1 crack spread (refinery margin indicator).
-    Formula: (2*Gasoline + 1*Heating Oil) / 3 - Crude Price
-    """
+    """Calculate 3-2-1 crack spread (refinery margin indicator)."""
     if crude_price.empty or gasoline_price.empty:
         return pd.DataFrame()
     
-    # Align data
     combined = pd.concat([crude_price, gasoline_price], axis=1, join='inner')
     
     if heating_oil_price is not None and not heating_oil_price.empty:
         combined = pd.concat([combined, heating_oil_price], axis=1, join='inner')
-        # 3-2-1 crack spread (barrels to gallons conversion: 42 gallons/barrel)
         spread = ((2 * combined.iloc[:, 1] * 42) + (1 * combined.iloc[:, 2] * 42)) / 3 - combined.iloc[:, 0]
     else:
-        # Simplified 2-1 crack spread
         spread = (2 * combined.iloc[:, 1] * 42) - combined.iloc[:, 0]
     
     return pd.DataFrame({'Crack_Spread': spread})
 
 def calculate_inventory_coverage(inventory: pd.DataFrame, production: pd.DataFrame) -> pd.DataFrame:
-    """
-    Calculate days of supply coverage (inventory / daily production).
-    Higher = more supply cushion
-    """
+    """Calculate days of supply coverage."""
     if inventory.empty or production.empty:
         return pd.DataFrame()
     
@@ -280,15 +293,11 @@ def calculate_inventory_coverage(inventory: pd.DataFrame, production: pd.DataFra
     if len(combined) == 0:
         return pd.DataFrame()
     
-    # Convert production from daily to get days of coverage
     coverage = combined.iloc[:, 0] / combined.iloc[:, 1]
     return pd.DataFrame({'Days_Coverage': coverage})
 
 def calculate_price_to_cost_ratio(price: pd.DataFrame, production_cost: float) -> pd.DataFrame:
-    """
-    Calculate price to production cost ratio.
-    > 1.5 = very profitable, < 1.2 = marginal
-    """
+    """Calculate price to production cost ratio."""
     if price.empty or production_cost is None:
         return pd.DataFrame()
     
@@ -296,10 +305,7 @@ def calculate_price_to_cost_ratio(price: pd.DataFrame, production_cost: float) -
     return pd.DataFrame({'Price_to_Cost': ratio})
 
 def calculate_contango_backwardation(price: pd.DataFrame, window: int = 30) -> pd.DataFrame:
-    """
-    Estimate market structure using price momentum.
-    Positive slope = Contango (future > spot), Negative = Backwardation
-    """
+    """Estimate market structure using price momentum."""
     if price.empty or len(price) < window:
         return pd.DataFrame()
     
@@ -310,19 +316,12 @@ def calculate_contango_backwardation(price: pd.DataFrame, window: int = 30) -> p
     return pd.DataFrame({'Market_Structure': rolling_slope})
 
 def calculate_seasonal_pattern(data: pd.DataFrame, period: int = 52) -> pd.DataFrame:
-    """
-    Extract seasonal pattern using moving average decomposition.
-    """
+    """Extract seasonal pattern using moving average decomposition."""
     if data.empty or len(data) < period * 2:
         return pd.DataFrame()
     
-    # Calculate trend (moving average)
     trend = data.iloc[:, 0].rolling(window=period, center=True).mean()
-    
-    # Detrend
     detrended = data.iloc[:, 0] - trend
-    
-    # Calculate seasonal component
     seasonal = detrended.groupby(detrended.index.isocalendar().week).transform('mean')
     
     return pd.DataFrame({
@@ -333,9 +332,7 @@ def calculate_seasonal_pattern(data: pd.DataFrame, period: int = 52) -> pd.DataF
     })
 
 def calculate_volatility_metrics(price: pd.DataFrame) -> Dict:
-    """
-    Calculate various volatility metrics.
-    """
+    """Calculate various volatility metrics."""
     if price.empty or len(price) < 30:
         return {}
     
@@ -350,10 +347,7 @@ def calculate_volatility_metrics(price: pd.DataFrame) -> Dict:
     }
 
 def calculate_z_score(data: pd.DataFrame, window: int = 90) -> pd.DataFrame:
-    """
-    Calculate rolling z-score (how many std devs from mean).
-    Useful for mean reversion signals.
-    """
+    """Calculate rolling z-score."""
     if data.empty or len(data) < window:
         return pd.DataFrame()
     
@@ -365,9 +359,7 @@ def calculate_z_score(data: pd.DataFrame, window: int = 90) -> pd.DataFrame:
     return pd.DataFrame({'Z_Score': z_score})
 
 def calculate_supply_demand_balance(price: pd.DataFrame, inventory: pd.DataFrame) -> pd.DataFrame:
-    """
-    Advanced supply/demand indicator using price-inventory relationship.
-    """
+    """Advanced supply/demand indicator."""
     if price.empty or inventory.empty:
         return pd.DataFrame()
     
@@ -375,28 +367,19 @@ def calculate_supply_demand_balance(price: pd.DataFrame, inventory: pd.DataFrame
     if len(combined) < 50:
         return pd.DataFrame()
     
-    # Calculate inventory change
     inv_change = combined.iloc[:, 1].diff()
-    
-    # Calculate price change
     price_change = combined.iloc[:, 0].pct_change() * 100
-    
-    # Supply/demand indicator: inverse relationship expected
-    # Negative inventory change (drawdown) + price increase = strong demand
-    # Positive inventory change (build) + price decrease = weak demand
     
     sd_indicator = pd.DataFrame({
         'Price_Change_%': price_change,
         'Inventory_Change': inv_change,
-        'Demand_Signal': -inv_change / inv_change.rolling(20).std()  # Normalized drawdown
+        'Demand_Signal': -inv_change / inv_change.rolling(20).std()
     })
     
     return sd_indicator
 
 def perform_regression_analysis(y: pd.DataFrame, x: pd.DataFrame, name: str = "Factor") -> Dict:
-    """
-    Perform linear regression and return statistics.
-    """
+    """Perform linear regression and return statistics."""
     if y.empty or x.empty:
         return {}
     
@@ -412,8 +395,6 @@ def perform_regression_analysis(y: pd.DataFrame, x: pd.DataFrame, name: str = "F
     
     predictions = model.predict(X)
     r_squared = model.score(X, Y)
-    
-    # Calculate correlation
     correlation = np.corrcoef(X.flatten(), Y.flatten())[0, 1]
     
     return {
@@ -424,12 +405,9 @@ def perform_regression_analysis(y: pd.DataFrame, x: pd.DataFrame, name: str = "F
         'Correlation': correlation
     }
 
-def create_advanced_dashboard(price_data: Dict, inventory_data: Dict, 
+def create_advanced_dashboard(price_data: Dict, inventory_data: Dict,
                              analytics: Dict, commodity_info: Dict) -> go.Figure:
-    """
-    Create comprehensive multi-panel dashboard.
-    """
-    # Determine number of panels needed
+    """Create comprehensive multi-panel dashboard."""
     panels = []
     if price_data:
         panels.append("Prices")
@@ -437,7 +415,7 @@ def create_advanced_dashboard(price_data: Dict, inventory_data: Dict,
         panels.append("Inventory")
     if 'crack_spread' in analytics:
         panels.append("Crack Spread")
-    if 'volatility' in analytics:
+    if 'z_score' in analytics and not analytics['z_score'].empty:
         panels.append("Volatility")
     
     n_panels = len(panels)
@@ -455,7 +433,7 @@ def create_advanced_dashboard(price_data: Dict, inventory_data: Dict,
     colors = px.colors.qualitative.Set2
     row = 1
     
-    # Panel 1: Prices with production cost overlay
+    # Panel 1: Prices
     if "Prices" in panels:
         for idx, (name, df) in enumerate(price_data.items()):
             fig.add_trace(
@@ -470,7 +448,6 @@ def create_advanced_dashboard(price_data: Dict, inventory_data: Dict,
                 col=1
             )
             
-            # Add production cost line if available
             if commodity_info.get('production_cost'):
                 fig.add_hline(
                     y=commodity_info['production_cost'],
@@ -484,7 +461,7 @@ def create_advanced_dashboard(price_data: Dict, inventory_data: Dict,
         fig.update_yaxes(title_text="Price", row=row, col=1)
         row += 1
     
-    # Panel 2: Inventory levels
+    # Panel 2: Inventory
     if "Inventory" in panels and inventory_data:
         for idx, (name, df) in enumerate(inventory_data.items()):
             fig.add_trace(
@@ -521,7 +498,7 @@ def create_advanced_dashboard(price_data: Dict, inventory_data: Dict,
         fig.update_yaxes(title_text="$/Barrel", row=row, col=1)
         row += 1
     
-    # Panel 4: Volatility
+    # Panel 4: Z-Score
     if "Volatility" in panels and 'z_score' in analytics:
         z_score = analytics['z_score']
         fig.add_trace(
@@ -535,7 +512,6 @@ def create_advanced_dashboard(price_data: Dict, inventory_data: Dict,
             row=row,
             col=1
         )
-        # Add overbought/oversold zones
         fig.add_hline(y=2, line_dash="dash", line_color="red", annotation_text="Overbought", row=row, col=1)
         fig.add_hline(y=-2, line_dash="dash", line_color="green", annotation_text="Oversold", row=row, col=1)
         fig.update_yaxes(title_text="Std Devs", row=row, col=1)
@@ -592,16 +568,20 @@ def commodities_module(analysis_context: Optional[Dict] = None):
         show_price_cost = st.checkbox("Price vs Production Cost", value='production_cost' in commodity_info)
         
         # Energy-specific analytics
+        show_crack_spread = False
+        show_inventory_analysis = False
+        show_supply_demand = False
+        
         if selected_category == "Energy":
             st.subheader("⚡ Energy-Specific Analytics")
-            show_crack_spread = st.checkbox("Crack Spread (Refinery Margins)", 
+            show_crack_spread = st.checkbox("Crack Spread (Refinery Margins)",
                                           value=selected_commodity in ["WTI_Crude", "Brent_Crude"])
             show_inventory_analysis = st.checkbox("Inventory Coverage Analysis", value=True)
             show_supply_demand = st.checkbox("Supply/Demand Balance", value=True)
         
         # Date range
         st.subheader("📅 Date Range")
-        lookback = st.selectbox("Lookback Period", 
+        lookback = st.selectbox("Lookback Period",
                                options=['1Y', '2Y', '3Y', '5Y', '10Y'],
                                index=2)
         
@@ -609,8 +589,12 @@ def commodities_module(analysis_context: Optional[Dict] = None):
         start_date = datetime.now() - timedelta(days=lookback_days[lookback])
         end_date = datetime.now()
     
-    # Fetch primary commodity data
+    # Fetch primary commodity data (WITH YFINANCE FALLBACK)
     with st.spinner(f"Fetching {commodity_info['description']} data..."):
+        price_data = pd.DataFrame()
+        data_source = "FRED"
+        
+        # Try FRED first
         if use_fred_api and fred_key:
             price_data = get_fred_data_api(
                 commodity_info['fred_code'],
@@ -618,23 +602,39 @@ def commodities_module(analysis_context: Optional[Dict] = None):
                 end_date.strftime("%Y-%m-%d"),
                 fred_key
             )
-        else:
+        
+        if price_data.empty:
             price_data = get_fred_data_csv(
                 commodity_info['fred_code'],
                 start_date.strftime("%Y-%m-%d"),
                 end_date.strftime("%Y-%m-%d")
             )
+        
+        # Fallback to yfinance if FRED fails
+        if price_data.empty and 'yf_ticker' in commodity_info:
+            price_data = get_yfinance_price(
+                commodity_info['yf_ticker'],
+                start_date.strftime("%Y-%m-%d"),
+                end_date.strftime("%Y-%m-%d")
+            )
+            if not price_data.empty:
+                data_source = "Yahoo Finance"
+                st.info(f"✅ Using {data_source} ({commodity_info['yf_ticker']}) for daily prices")
     
     if price_data.empty:
         st.error(f"❌ Could not fetch commodity price data for {selected_commodity}.")
         st.info(f"""
         **Troubleshooting:**
         - FRED Series Code: `{commodity_info['fred_code']}`
-        - Try enabling 'Use FRED API' and adding your API key in the sidebar
-        - Check if the series is available on [FRED website](https://fred.stlouisfed.org/series/{commodity_info['fred_code']})
-        - Try a different date range
+        - yfinance Ticker: `{commodity_info.get('yf_ticker', 'N/A')}`
+        - Try enabling 'Use FRED API' and adding your API key
+        - Check if the series is available on [FRED](https://fred.stlouisfed.org/series/{commodity_info['fred_code']})
         """)
         return
+    
+    # Ensure minimum data points
+    if len(price_data) < 30:
+        st.warning(f"⚠️ Only {len(price_data)} data points available. Some analytics may be limited.")
     
     # Fetch related data for energy commodities
     inventory_data = {}
@@ -656,7 +656,7 @@ def commodities_module(analysis_context: Optional[Dict] = None):
                         end_date.strftime("%Y-%m-%d")
                     )
         
-        # Fetch production data for coverage analysis
+        # Fetch production data
         if show_inventory_analysis:
             with st.spinner("Fetching production data..."):
                 prod_series = EIA_INVENTORY_SERIES['Crude_Production']
@@ -671,39 +671,62 @@ def commodities_module(analysis_context: Optional[Dict] = None):
         # Fetch related prices for crack spread
         if show_crack_spread and selected_commodity in ["WTI_Crude", "Brent_Crude"]:
             with st.spinner("Fetching gasoline and heating oil prices..."):
-                gasoline_fred = COMMODITIES["Energy"]["Gasoline"]['fred_code']
-                heating_fred = COMMODITIES["Energy"]["Heating_Oil"]['fred_code']
+                gasoline_info = COMMODITIES["Energy"]["Gasoline"]
+                heating_info = COMMODITIES["Energy"]["Heating_Oil"]
                 
                 if use_fred_api and fred_key:
-                    related_prices['gasoline'] = get_fred_data_api(gasoline_fred, 
-                                                                   start_date.strftime("%Y-%m-%d"),
-                                                                   end_date.strftime("%Y-%m-%d"),
-                                                                   fred_key)
-                    related_prices['heating_oil'] = get_fred_data_api(heating_fred,
-                                                                      start_date.strftime("%Y-%m-%d"),
-                                                                      end_date.strftime("%Y-%m-%d"),
-                                                                      fred_key)
+                    related_prices['gasoline'] = get_fred_data_api(
+                        gasoline_info['fred_code'],
+                        start_date.strftime("%Y-%m-%d"),
+                        end_date.strftime("%Y-%m-%d"),
+                        fred_key
+                    )
+                    related_prices['heating_oil'] = get_fred_data_api(
+                        heating_info['fred_code'],
+                        start_date.strftime("%Y-%m-%d"),
+                        end_date.strftime("%Y-%m-%d"),
+                        fred_key
+                    )
                 else:
-                    related_prices['gasoline'] = get_fred_data_csv(gasoline_fred,
-                                                                   start_date.strftime("%Y-%m-%d"),
-                                                                   end_date.strftime("%Y-%m-%d"))
-                    related_prices['heating_oil'] = get_fred_data_csv(heating_fred,
-                                                                      start_date.strftime("%Y-%m-%d"),
-                                                                      end_date.strftime("%Y-%m-%d"))
+                    related_prices['gasoline'] = get_fred_data_csv(
+                        gasoline_info['fred_code'],
+                        start_date.strftime("%Y-%m-%d"),
+                        end_date.strftime("%Y-%m-%d")
+                    )
+                    related_prices['heating_oil'] = get_fred_data_csv(
+                        heating_info['fred_code'],
+                        start_date.strftime("%Y-%m-%d"),
+                        end_date.strftime("%Y-%m-%d")
+                    )
+                
+                # Fallback to yfinance
+                if related_prices.get('gasoline', pd.DataFrame()).empty:
+                    related_prices['gasoline'] = get_yfinance_price(
+                        gasoline_info['yf_ticker'],
+                        start_date.strftime("%Y-%m-%d"),
+                        end_date.strftime("%Y-%m-%d")
+                    )
+                
+                if related_prices.get('heating_oil', pd.DataFrame()).empty:
+                    related_prices['heating_oil'] = get_yfinance_price(
+                        heating_info['yf_ticker'],
+                        start_date.strftime("%Y-%m-%d"),
+                        end_date.strftime("%Y-%m-%d")
+                    )
     
     # ============= CALCULATE ADVANCED ANALYTICS =============
     analytics = {}
     
     # Volatility metrics
-    if show_volatility:
+    if show_volatility and len(price_data) >= 30:
         analytics['volatility'] = calculate_volatility_metrics(price_data)
     
     # Z-Score
-    if show_z_score:
-        analytics['z_score'] = calculate_z_score(price_data, window=90)
+    if show_z_score and len(price_data) >= 90:
+        analytics['z_score'] = calculate_z_score(price_data, window=min(90, len(price_data) // 2))
     
     # Seasonal decomposition
-    if show_seasonal and len(price_data) >= 104:  # Need 2 years of weekly data
+    if show_seasonal and len(price_data) >= 104:
         analytics['seasonal'] = calculate_seasonal_pattern(price_data, period=52)
     
     # Price to cost ratio
@@ -713,45 +736,40 @@ def commodities_module(analysis_context: Optional[Dict] = None):
             commodity_info['production_cost']
         )
     
-    # Market structure (contango/backwardation estimate)
-    analytics['market_structure'] = calculate_contango_backwardation(price_data, window=30)
+    # Market structure
+    if len(price_data) >= 30:
+        analytics['market_structure'] = calculate_contango_backwardation(price_data, window=min(30, len(price_data) // 3))
     
     # Energy-specific analytics
     if selected_category == "Energy":
-        # Crack spread
-        if show_crack_spread and 'gasoline' in related_prices:
+        if show_crack_spread and 'gasoline' in related_prices and not related_prices['gasoline'].empty:
             analytics['crack_spread'] = calculate_crack_spread(
                 price_data,
                 related_prices['gasoline'],
                 related_prices.get('heating_oil')
             )
         
-        # Inventory coverage
         if show_inventory_analysis and inventory_data and production_data:
             inv_key = list(inventory_data.keys())[0]
-            analytics['inventory_coverage'] = calculate_inventory_coverage(
-                inventory_data[inv_key],
-                production_data['production']
-            )
+            if not inventory_data[inv_key].empty and not production_data['production'].empty:
+                analytics['inventory_coverage'] = calculate_inventory_coverage(
+                    inventory_data[inv_key],
+                    production_data['production']
+                )
         
-        # Supply/demand balance
         if show_supply_demand and inventory_data:
             inv_key = list(inventory_data.keys())[0]
-            analytics['supply_demand'] = calculate_supply_demand_balance(
-                price_data,
-                inventory_data[inv_key]
-            )
+            if not inventory_data[inv_key].empty:
+                analytics['supply_demand'] = calculate_supply_demand_balance(
+                    price_data,
+                    inventory_data[inv_key]
+                )
     
     # ============= DISPLAY RESULTS =============
     
     # Key Metrics Summary
     st.header("📊 Key Metrics")
     cols = st.columns(4)
-    
-    # Safe price extraction
-    if len(price_data) == 0:
-        st.error("No price data available")
-        return
     
     current_price = price_data.iloc[-1, 0]
     
@@ -786,9 +804,9 @@ def commodities_module(analysis_context: Optional[Dict] = None):
                 z_status = "Overbought" if z_val > 2 else "Oversold" if z_val < -2 else "Normal"
                 st.metric(
                     "Z-Score Signal",
-                f"{z_val:.2f}",
-                z_status
-            )
+                    f"{z_val:.2f}",
+                    z_status
+                )
             except (IndexError, KeyError):
                 pass
     
@@ -817,9 +835,9 @@ def commodities_module(analysis_context: Optional[Dict] = None):
     tabs_list = ["📊 Price Analysis", "🔬 Advanced Analytics"]
     if inventory_data:
         tabs_list.append("📦 Inventory Analysis")
-    if 'crack_spread' in analytics:
+    if 'crack_spread' in analytics and not analytics['crack_spread'].empty:
         tabs_list.append("⚙️ Refinery Margins")
-    if 'seasonal' in analytics:
+    if 'seasonal' in analytics and not analytics['seasonal'].empty:
         tabs_list.append("📅 Seasonality")
     
     tabs = st.tabs(tabs_list)
@@ -832,7 +850,6 @@ def commodities_module(analysis_context: Optional[Dict] = None):
         col1, col2 = st.columns([2, 1])
         
         with col1:
-            # Price chart with technical levels
             fig = go.Figure()
             
             fig.add_trace(go.Scatter(
@@ -842,25 +859,25 @@ def commodities_module(analysis_context: Optional[Dict] = None):
                 line=dict(color='#1f77b4', width=2)
             ))
             
-            # Add moving averages
-            ma_20 = price_data.iloc[:, 0].rolling(20).mean()
-            ma_50 = price_data.iloc[:, 0].rolling(50).mean()
+            # Add moving averages if enough data
+            if len(price_data) >= 50:
+                ma_20 = price_data.iloc[:, 0].rolling(20).mean()
+                ma_50 = price_data.iloc[:, 0].rolling(50).mean()
+                
+                fig.add_trace(go.Scatter(
+                    x=ma_20.index,
+                    y=ma_20,
+                    name="20-Day MA",
+                    line=dict(color='orange', width=1, dash='dash')
+                ))
+                
+                fig.add_trace(go.Scatter(
+                    x=ma_50.index,
+                    y=ma_50,
+                    name="50-Day MA",
+                    line=dict(color='red', width=1, dash='dash')
+                ))
             
-            fig.add_trace(go.Scatter(
-                x=ma_20.index,
-                y=ma_20,
-                name="20-Day MA",
-                line=dict(color='orange', width=1, dash='dash')
-            ))
-            
-            fig.add_trace(go.Scatter(
-                x=ma_50.index,
-                y=ma_50,
-                name="50-Day MA",
-                line=dict(color='red', width=1, dash='dash')
-            ))
-            
-            # Production cost line
             if 'production_cost' in commodity_info:
                 fig.add_hline(
                     y=commodity_info['production_cost'],
@@ -870,7 +887,7 @@ def commodities_module(analysis_context: Optional[Dict] = None):
                 )
             
             fig.update_layout(
-                title=f"{commodity_info['description']} - Price Chart",
+                title=f"{commodity_info['description']} - Price Chart ({data_source})",
                 xaxis_title="Date",
                 yaxis_title=commodity_info['unit'],
                 template='plotly_white',
@@ -884,16 +901,12 @@ def commodities_module(analysis_context: Optional[Dict] = None):
             st.subheader("📈 Statistics")
             
             try:
-                # Safe calculations for statistics
                 if len(price_data) >= 252:
                     high_52w = price_data.iloc[-252:, 0].max()
                     low_52w = price_data.iloc[-252:, 0].min()
-                elif len(price_data) > 0:
+                else:
                     high_52w = price_data.iloc[:, 0].max()
                     low_52w = price_data.iloc[:, 0].min()
-                else:
-                    high_52w = current_price
-                    low_52w = current_price
                 
                 stats_data = {
                     'Current': current_price,
@@ -927,12 +940,10 @@ def commodities_module(analysis_context: Optional[Dict] = None):
         col1, col2 = st.columns(2)
         
         with col1:
-            # Z-Score chart
             if 'z_score' in analytics and not analytics['z_score'].empty:
                 st.subheader("📊 Z-Score Analysis")
                 
                 fig = go.Figure()
-                
                 z_data = analytics['z_score']
                 
                 fig.add_trace(go.Scatter(
@@ -966,12 +977,10 @@ def commodities_module(analysis_context: Optional[Dict] = None):
                 """)
         
         with col2:
-            # Market structure
             if 'market_structure' in analytics and not analytics['market_structure'].empty:
                 st.subheader("📉 Market Structure")
                 
                 fig = go.Figure()
-                
                 ms_data = analytics['market_structure']
                 
                 fig.add_trace(go.Scatter(
@@ -1001,12 +1010,10 @@ def commodities_module(analysis_context: Optional[Dict] = None):
                 - **Negative Slope**: Backwardation (spot > futures, strong demand)
                 """)
         
-        # Price to Cost Analysis
         if 'price_to_cost' in analytics and not analytics['price_to_cost'].empty:
             st.subheader("💵 Price vs Production Cost")
             
             fig = go.Figure()
-            
             ptc_data = analytics['price_to_cost']
             
             fig.add_trace(go.Scatter(
@@ -1032,7 +1039,7 @@ def commodities_module(analysis_context: Optional[Dict] = None):
             
             st.plotly_chart(fig, use_container_width=True)
     
-    # Tab 3: Inventory Analysis (Energy only)
+    # Tab 3: Inventory Analysis
     if inventory_data and tab_idx < len(tabs):
         with tabs[tab_idx]:
             tab_idx += 1
@@ -1040,151 +1047,138 @@ def commodities_module(analysis_context: Optional[Dict] = None):
             inv_key = list(inventory_data.keys())[0]
             inv_data = inventory_data[inv_key]
             
-            col1, col2 = st.columns([2, 1])
-            
-            with col1:
-                fig = go.Figure()
+            if not inv_data.empty:
+                col1, col2 = st.columns([2, 1])
                 
-                fig.add_trace(go.Scatter(
-                    x=inv_data.index,
-                    y=inv_data.iloc[:, 0],
-                    name="Inventory Level",
-                    line=dict(color='#1f77b4', width=2),
-                    fill='tozeroy'
-                ))
-                
-                # Add 5-year average if enough data
-                if len(inv_data) >= 260:  # ~5 years weekly
-                    avg_5y = inv_data.iloc[:, 0].rolling(260).mean()
-                    fig.add_trace(go.Scatter(
-                        x=avg_5y.index,
-                        y=avg_5y,
-                        name="5Y Average",
-                        line=dict(color='red', width=1, dash='dash')
-                    ))
-                
-                fig.update_layout(
-                    title=f"{EIA_INVENTORY_SERIES[inv_key]['description']}",
-                    xaxis_title="Date",
-                    yaxis_title=EIA_INVENTORY_SERIES[inv_key]['unit'],
-                    template='plotly_white',
-                    height=400,
-                    hovermode='x unified'
-                )
-                
-                st.plotly_chart(fig, use_container_width=True)
-            
-            with col2:
-                st.subheader("📊 Inventory Stats")
-                
-                try:
-                    current_inv = inv_data.iloc[-1, 0] if len(inv_data) > 0 else 0
-                    avg_inv = inv_data.iloc[:, 0].mean()
-                    pct_vs_avg = ((current_inv - avg_inv) / avg_inv * 100) if avg_inv != 0 else 0
+                with col1:
+                    fig = go.Figure()
                     
-                    st.metric(
-                        "Current Level",
-                        f"{current_inv:,.0f}",
-                        f"{pct_vs_avg:+.1f}% vs avg"
-                    )
-                except Exception as e:
-                    st.error(f"Error calculating inventory stats: {e}")
-                
-                # Weekly change
-                if len(inv_data) >= 2:
-                    weekly_change = inv_data.iloc[-1, 0] - inv_data.iloc[-2, 0]
-                    st.metric(
-                        "Weekly Change",
-                        f"{weekly_change:+,.0f}",
-                        "Build" if weekly_change > 0 else "Draw"
-                    )
-            
-            # Inventory Coverage (if production data available)
-            if 'inventory_coverage' in analytics and not analytics['inventory_coverage'].empty:
-                st.subheader("📅 Days of Supply Coverage")
-                
-                cov_data = analytics['inventory_coverage']
-                
-                fig = go.Figure()
-                
-                fig.add_trace(go.Scatter(
-                    x=cov_data.index,
-                    y=cov_data.iloc[:, 0],
-                    name="Days Coverage",
-                    line=dict(color='orange', width=2)
-                ))
-                
-                fig.update_layout(
-                    title="Inventory / Daily Production",
-                    xaxis_title="Date",
-                    yaxis_title="Days",
-                    template='plotly_white',
-                    height=300,
-                    hovermode='x unified'
-                )
-                
-                st.plotly_chart(fig, use_container_width=True)
-                
-                st.info("Shows how many days current inventory would last at current production rates. Higher = more supply cushion.")
-            
-            # Supply/Demand Balance
-            if 'supply_demand' in analytics and not analytics['supply_demand'].empty and len(analytics['supply_demand']) > 0:
-                st.subheader("⚖️ Supply/Demand Balance")
-                
-                sd_data = analytics['supply_demand']
-                
-                fig = make_subplots(
-                    rows=2, cols=1,
-                    subplot_titles=("Price Change", "Demand Signal"),
-                    vertical_spacing=0.15
-                )
-                
-                fig.add_trace(
-                    go.Scatter(
-                        x=sd_data.index,
-                        y=sd_data['Price_Change_%'],
-                        name="Price Change %",
-                        line=dict(color='blue', width=2)
-                    ),
-                    row=1, col=1
-                )
-                
-                fig.add_trace(
-                    go.Scatter(
-                        x=sd_data.index,
-                        y=sd_data['Demand_Signal'],
-                        name="Demand Signal",
-                        line=dict(color='green', width=2),
+                    fig.add_trace(go.Scatter(
+                        x=inv_data.index,
+                        y=inv_data.iloc[:, 0],
+                        name="Inventory Level",
+                        line=dict(color='#1f77b4', width=2),
                         fill='tozeroy'
-                    ),
-                    row=2, col=1
-                )
+                    ))
+                    
+                    if len(inv_data) >= 260:
+                        avg_5y = inv_data.iloc[:, 0].rolling(260).mean()
+                        fig.add_trace(go.Scatter(
+                            x=avg_5y.index,
+                            y=avg_5y,
+                            name="5Y Average",
+                            line=dict(color='red', width=1, dash='dash')
+                        ))
+                    
+                    fig.update_layout(
+                        title=f"{EIA_INVENTORY_SERIES[inv_key]['description']}",
+                        xaxis_title="Date",
+                        yaxis_title=EIA_INVENTORY_SERIES[inv_key]['unit'],
+                        template='plotly_white',
+                        height=400,
+                        hovermode='x unified'
+                    )
+                    
+                    st.plotly_chart(fig, use_container_width=True)
                 
-                fig.add_hline(y=0, line_dash="dot", line_color="gray", row=2, col=1)
+                with col2:
+                    st.subheader("📊 Inventory Stats")
+                    
+                    try:
+                        current_inv = inv_data.iloc[-1, 0]
+                        avg_inv = inv_data.iloc[:, 0].mean()
+                        pct_vs_avg = ((current_inv - avg_inv) / avg_inv * 100) if avg_inv != 0 else 0
+                        
+                        st.metric(
+                            "Current Level",
+                            f"{current_inv:,.0f}",
+                            f"{pct_vs_avg:+.1f}% vs avg"
+                        )
+                        
+                        if len(inv_data) >= 2:
+                            weekly_change = inv_data.iloc[-1, 0] - inv_data.iloc[-2, 0]
+                            st.metric(
+                                "Weekly Change",
+                                f"{weekly_change:+,.0f}",
+                                "Build" if weekly_change > 0 else "Draw"
+                            )
+                    except Exception as e:
+                        st.error(f"Error: {e}")
                 
-                fig.update_layout(
-                    height=700,
-                    template='plotly_white',
-                    hovermode='x unified'
-                )
+                if 'inventory_coverage' in analytics and not analytics['inventory_coverage'].empty:
+                    st.subheader("📅 Days of Supply Coverage")
+                    
+                    cov_data = analytics['inventory_coverage']
+                    fig = go.Figure()
+                    
+                    fig.add_trace(go.Scatter(
+                        x=cov_data.index,
+                        y=cov_data.iloc[:, 0],
+                        name="Days Coverage",
+                        line=dict(color='orange', width=2)
+                    ))
+                    
+                    fig.update_layout(
+                        title="Inventory / Daily Production",
+                        xaxis_title="Date",
+                        yaxis_title="Days",
+                        template='plotly_white',
+                        height=300,
+                        hovermode='x unified'
+                    )
+                    
+                    st.plotly_chart(fig, use_container_width=True)
                 
-                st.plotly_chart(fig, use_container_width=True)
-                
-                st.info("""
-                **Demand Signal:**
-                - **Positive**: Strong demand (inventory draws, price increases)
-                - **Negative**: Weak demand (inventory builds, price decreases)
-                """)
+                if 'supply_demand' in analytics and not analytics['supply_demand'].empty:
+                    st.subheader("⚖️ Supply/Demand Balance")
+                    
+                    sd_data = analytics['supply_demand']
+                    
+                    fig = make_subplots(
+                        rows=2, cols=1,
+                        subplot_titles=("Price Change", "Demand Signal"),
+                        vertical_spacing=0.15
+                    )
+                    
+                    fig.add_trace(
+                        go.Scatter(
+                            x=sd_data.index,
+                            y=sd_data['Price_Change_%'],
+                            name="Price Change %",
+                            line=dict(color='blue', width=2)
+                        ),
+                        row=1, col=1
+                    )
+                    
+                    fig.add_trace(
+                        go.Scatter(
+                            x=sd_data.index,
+                            y=sd_data['Demand_Signal'],
+                            name="Demand Signal",
+                            line=dict(color='green', width=2),
+                            fill='tozeroy'
+                        ),
+                        row=2, col=1
+                    )
+                    
+                    fig.add_hline(y=0, line_dash="dot", line_color="gray", row=2, col=1)
+                    
+                    fig.update_layout(
+                        height=600,
+                        template='plotly_white',
+                        hovermode='x unified'
+                    )
+                    
+                    st.plotly_chart(fig, use_container_width=True)
     
-    # Tab 4: Crack Spread (Energy only)
-    if 'crack_spread' in analytics and tab_idx < len(tabs):
+    # Tab 4: Crack Spread
+    if 'crack_spread' in analytics and not analytics['crack_spread'].empty and tab_idx < len(tabs):
         with tabs[tab_idx]:
             tab_idx += 1
             
             st.subheader("⚙️ 3-2-1 Crack Spread (Refinery Margins)")
             
             spread_data = analytics['crack_spread']
-            
             col1, col2 = st.columns([2, 1])
             
             with col1:
@@ -1214,38 +1208,23 @@ def commodities_module(analysis_context: Optional[Dict] = None):
             
             with col2:
                 try:
-                    current_spread = spread_data.iloc[-1, 0] if len(spread_data) > 0 else 0
+                    current_spread = spread_data.iloc[-1, 0]
                     avg_spread = spread_data.iloc[:, 0].mean()
                     max_spread = spread_data.iloc[:, 0].max()
                     
-                    st.metric(
-                        "Current Spread",
-                        f"${current_spread:.2f}",
-                        f"${current_spread - avg_spread:+.2f} vs avg"
-                    )
-                    
-                    st.metric(
-                        "Average Spread",
-                        f"${avg_spread:.2f}"
-                    )
-                    
-                    st.metric(
-                        "Max Spread",
-                        f"${max_spread:.2f}"
-                    )
-                except Exception as e:
-                    st.error(f"Error calculating spread metrics: {e}")
+                    st.metric("Current Spread", f"${current_spread:.2f}", f"${current_spread - avg_spread:+.2f} vs avg")
+                    st.metric("Average Spread", f"${avg_spread:.2f}")
+                    st.metric("Max Spread", f"${max_spread:.2f}")
+                except:
+                    pass
             
             st.info("""
-            **3-2-1 Crack Spread**: Simulates refinery margin from processing 3 barrels of crude into 2 barrels of gasoline and 1 barrel of heating oil.
-            
-            - **Higher spread**: More profitable for refiners
-            - **Lower spread**: Squeezed margins, refiners may cut runs
-            - **Typical range**: $10-$25/barrel (varies by region and season)
+            **3-2-1 Crack Spread**: Simulates refinery margin from processing 3 barrels of crude 
+            into 2 barrels of gasoline and 1 barrel of heating oil.
             """)
     
     # Tab 5: Seasonality
-    if 'seasonal' in analytics and tab_idx < len(tabs):
+    if 'seasonal' in analytics and not analytics['seasonal'].empty and tab_idx < len(tabs):
         with tabs[tab_idx]:
             tab_idx += 1
             
@@ -1256,7 +1235,7 @@ def commodities_module(analysis_context: Optional[Dict] = None):
             fig = make_subplots(
                 rows=4, cols=1,
                 subplot_titles=("Original", "Trend", "Seasonal", "Residual"),
-                vertical_spacing=0.15
+                vertical_spacing=0.1
             )
             
             components = ['Original', 'Trend', 'Seasonal', 'Residual']
@@ -1282,31 +1261,23 @@ def commodities_module(analysis_context: Optional[Dict] = None):
             )
             
             st.plotly_chart(fig, use_container_width=True)
-            
-            st.info("""
-            **Components:**
-            - **Original**: Raw price data
-            - **Trend**: Long-term direction
-            - **Seasonal**: Recurring patterns (e.g., winter/summer demand)
-            - **Residual**: Random noise after removing trend and seasonality
-            """)
     
     # Export Section
     st.header("💾 Export Data")
     
-    export_options = {
-        'Price Data': price_data,
-    }
+    export_options = {'Price Data': price_data}
     
     if inventory_data:
-        export_options['Inventory Data'] = list(inventory_data.values())[0]
+        for key, val in inventory_data.items():
+            if not val.empty:
+                export_options[f'Inventory ({key})'] = val
     
-    if 'crack_spread' in analytics:
+    if 'crack_spread' in analytics and not analytics['crack_spread'].empty:
         export_options['Crack Spread'] = analytics['crack_spread']
     
-    cols = st.columns(len(export_options))
+    cols = st.columns(min(len(export_options), 4))
     for idx, (name, df) in enumerate(export_options.items()):
-        with cols[idx]:
+        with cols[idx % len(cols)]:
             csv = df.to_csv()
             st.download_button(
                 label=f"📥 {name}",
@@ -1320,67 +1291,63 @@ def commodities_module(analysis_context: Optional[Dict] = None):
     
     insights = []
     
-    # Price vs cost analysis
     if 'price_to_cost' in analytics and not analytics['price_to_cost'].empty and len(analytics['price_to_cost']) > 0:
         try:
             ratio = analytics['price_to_cost'].iloc[-1, 0]
             if ratio > 1.5:
-                insights.append(f"✅ **Highly Profitable**: Current price is {ratio:.1f}x production cost - expect increased supply")
+                insights.append(f"✅ **Highly Profitable**: Price is {ratio:.1f}x production cost")
             elif ratio < 1.2:
-                insights.append(f"⚠️ **Marginal Economics**: Price only {ratio:.1f}x cost - producers may cut output")
-        except (IndexError, KeyError):
+                insights.append(f"⚠️ **Marginal Economics**: Price only {ratio:.1f}x cost")
+        except:
             pass
     
-    # Z-score signals
     if 'z_score' in analytics and not analytics['z_score'].empty and len(analytics['z_score']) > 0:
         try:
             z_val = analytics['z_score'].iloc[-1, 0]
             if z_val > 2:
-                insights.append(f"📊 **Overbought Signal**: Z-score at +{z_val:.1f} suggests prices may be due for correction")
+                insights.append(f"📊 **Overbought Signal**: Z-score at +{z_val:.1f}")
             elif z_val < -2:
-                insights.append(f"📊 **Oversold Signal**: Z-score at {z_val:.1f} suggests prices may rebound")
-        except (IndexError, KeyError):
+                insights.append(f"📊 **Oversold Signal**: Z-score at {z_val:.1f}")
+        except:
             pass
     
-    # Inventory analysis
     if inventory_data:
         try:
             inv_key = list(inventory_data.keys())[0]
             inv_data = inventory_data[inv_key]
-            if len(inv_data) > 0:
+            if not inv_data.empty and len(inv_data) > 0:
                 current_inv = inv_data.iloc[-1, 0]
                 avg_inv = inv_data.iloc[:, 0].mean()
                 if avg_inv > 0:
+                    pct_diff = ((current_inv/avg_inv-1)*100)
                     if current_inv < avg_inv * 0.9:
-                        insights.append(f"📦 **Low Inventory**: Stocks {((current_inv/avg_inv-1)*100):.1f}% below average - bullish for prices")
+                        insights.append(f"📦 **Low Inventory**: Stocks {pct_diff:.1f}% below average")
                     elif current_inv > avg_inv * 1.1:
-                        insights.append(f"📦 **High Inventory**: Stocks {((current_inv/avg_inv-1)*100):.1f}% above average - bearish for prices")
-        except (IndexError, KeyError):
+                        insights.append(f"📦 **High Inventory**: Stocks {pct_diff:.1f}% above average")
+        except:
             pass
     
-    # Crack spread
     if 'crack_spread' in analytics and not analytics['crack_spread'].empty and len(analytics['crack_spread']) > 0:
         try:
             spread = analytics['crack_spread'].iloc[-1, 0]
             if spread > 20:
-                insights.append(f"⚙️ **Strong Refinery Margins**: Crack spread at ${spread:.2f} - refiners incentivized to maximize runs")
+                insights.append(f"⚙️ **Strong Refinery Margins**: Crack spread at ${spread:.2f}")
             elif spread < 10:
-                insights.append(f"⚙️ **Weak Refinery Margins**: Crack spread only ${spread:.2f} - refiners may cut utilization")
-        except (IndexError, KeyError):
+                insights.append(f"⚙️ **Weak Refinery Margins**: Crack spread only ${spread:.2f}")
+        except:
             pass
     
-    # Volatility
     if 'volatility' in analytics:
         current_vol = analytics['volatility']['Current_Vol_30d']
         avg_vol = analytics['volatility']['Avg_Vol_1Y']
         if current_vol > avg_vol * 1.3:
-            insights.append(f"⚡ **Elevated Volatility**: 30D vol at {current_vol:.1f}% vs {avg_vol:.1f}% average - uncertain market conditions")
+            insights.append(f"⚡ **Elevated Volatility**: 30D vol at {current_vol:.1f}% vs {avg_vol:.1f}% avg")
     
     if insights:
         for insight in insights:
             st.markdown(insight)
     else:
-        st.info("Analysis shows balanced market conditions with no extreme signals.")
+        st.info("Analysis shows balanced market conditions.")
 
 # Run standalone
 if __name__ == "__main__":
