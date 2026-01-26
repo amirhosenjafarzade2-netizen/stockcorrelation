@@ -17,6 +17,7 @@ try:
     from openpyxl.styles import Font, PatternFill, Border, Side, Alignment
     from openpyxl.utils.dataframe import dataframe_to_rows
     from openpyxl.chart import LineChart, BarChart, Reference
+    from openpyxl.utils import get_column_letter
     OPENPYXL_AVAILABLE = True
 except ImportError:
     OPENPYXL_AVAILABLE = False
@@ -215,8 +216,9 @@ class ExcelExporter:
             cell.alignment = Alignment(horizontal='center', vertical='center')
         
         # Auto-adjust column widths
-        for idx, col in enumerate(['Date'] + list(df.columns)):
-            max_length = len(str(col))
+        for idx in range(len(['Date'] + list(df.columns))):
+            col = ['Date'] + list(df.columns)
+            max_length = len(str(col[idx]))
             for row in ws.iter_rows(min_row=4, max_row=min(100, len(df) + 3), min_col=idx + 1, max_col=idx + 1):
                 for cell in row:
                     try:
@@ -224,7 +226,7 @@ class ExcelExporter:
                             max_length = len(str(cell.value))
                     except:
                         pass
-            ws.column_dimensions[chr(65 + idx)].width = min(max_length + 2, 15)
+            ws.column_dimensions[get_column_letter(idx + 1)].width = min(max_length + 2, 15)
         
         # Add conditional formatting for returns column if exists
         if 'Adj Close' in df.columns:
@@ -296,10 +298,24 @@ class ExcelExporter:
             cell.fill = PatternFill(start_color=self.colors['secondary'], end_color=self.colors['secondary'], fill_type='solid')
             cell.alignment = Alignment(horizontal='center', vertical='center')
         
-        # Auto-adjust column widths
-        for column_cells in ws.columns:
-            length = max(len(str(cell.value or '')) for cell in column_cells)
-            ws.column_dimensions[column_cells[0].column_letter].width = min(length + 2, 25)
+        # Auto-adjust column widths - FIXED VERSION
+        # Calculate max length for each column
+        for col_idx in range(1, len(df.columns) + 2):  # +2 for index column
+            max_length = 0
+            column_letter = get_column_letter(col_idx)
+            
+            # Check all cells in this column
+            for row_idx in range(1, ws.max_row + 1):
+                cell = ws.cell(row=row_idx, column=col_idx)
+                try:
+                    cell_length = len(str(cell.value or ''))
+                    if cell_length > max_length:
+                        max_length = cell_length
+                except:
+                    pass
+            
+            # Set column width with limits
+            ws.column_dimensions[column_letter].width = min(max_length + 2, 25)
         
         # Freeze panes
         ws.freeze_panes = 'B4'
@@ -366,10 +382,21 @@ class ExcelExporter:
                         except:
                             pass
             
-            # Auto-adjust column widths
-            for column_cells in ws.columns:
-                length = max(len(str(cell.value or '')) for cell in column_cells)
-                ws.column_dimensions[column_cells[0].column_letter].width = min(length + 2, 20)
+            # Auto-adjust column widths - FIXED VERSION
+            for col_idx in range(1, len(df_comp.columns) + 1):
+                max_length = 0
+                column_letter = get_column_letter(col_idx)
+                
+                for row_idx in range(1, ws.max_row + 1):
+                    cell = ws.cell(row=row_idx, column=col_idx)
+                    try:
+                        cell_length = len(str(cell.value or ''))
+                        if cell_length > max_length:
+                            max_length = cell_length
+                    except:
+                        pass
+                
+                ws.column_dimensions[column_letter].width = min(max_length + 2, 20)
             
             # Freeze panes
             ws.freeze_panes = 'B4'
