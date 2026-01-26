@@ -160,11 +160,29 @@ def get_fred_data_csv(series_id: str, start_date: str, end_date: str) -> pd.Data
         response = requests.get(url, timeout=30)
         response.raise_for_status()
         df = pd.read_csv(StringIO(response.text), index_col=0, parse_dates=True)
+        
+        # Handle different column formats
+        if len(df.columns) == 0:
+            return pd.DataFrame()
+        
         df.columns = [series_id]
-        df = df.loc[start_date:end_date]
+        
+        # Filter by date range
+        try:
+            df = df.loc[start_date:end_date]
+        except:
+            # If date filtering fails, just use all data
+            pass
+        
         df[series_id] = pd.to_numeric(df[series_id], errors='coerce')
-        return df.dropna()
+        df = df.dropna()
+        
+        if len(df) == 0:
+            return pd.DataFrame()
+            
+        return df
     except Exception as e:
+        # Return empty dataframe on any error
         return pd.DataFrame()
 
 @st.cache_data(ttl=3600)
@@ -608,7 +626,14 @@ def commodities_module(analysis_context: Optional[Dict] = None):
             )
     
     if price_data.empty:
-        st.error("❌ Could not fetch commodity price data.")
+        st.error(f"❌ Could not fetch commodity price data for {selected_commodity}.")
+        st.info(f"""
+        **Troubleshooting:**
+        - FRED Series Code: `{commodity_info['fred_code']}`
+        - Try enabling 'Use FRED API' and adding your API key in the sidebar
+        - Check if the series is available on [FRED website](https://fred.stlouisfed.org/series/{commodity_info['fred_code']})
+        - Try a different date range
+        """)
         return
     
     # Fetch related data for energy commodities
@@ -858,28 +883,42 @@ def commodities_module(analysis_context: Optional[Dict] = None):
         with col2:
             st.subheader("📈 Statistics")
             
-            stats_data = {
-                'Current': current_price,
-                '52W High': price_data.iloc[-252:, 0].max() if len(price_data) >= 252 else price_data.max()[0],
-                '52W Low': price_data.iloc[-252:, 0].min() if len(price_data) >= 252 else price_data.min()[0],
-                'Mean': price_data.mean()[0],
-                'Median': price_data.median()[0],
-                'Std Dev': price_data.std()[0]
-            }
-            
-            if 'volatility' in analytics:
-                stats_data.update({
-                    '30D Vol (%)': analytics['volatility']['Current_Vol_30d'],
-                    'Max Drawdown (%)': analytics['volatility']['Max_Drawdown'],
-                    'Sharpe Ratio': analytics['volatility']['Sharpe_Ratio']
-                })
-            
-            stats_df = pd.DataFrame(stats_data.items(), columns=['Metric', 'Value'])
-            st.dataframe(
-                stats_df.style.format({'Value': '{:.2f}'}),
-                hide_index=True,
-                use_container_width=True
-            )
+            try:
+                # Safe calculations for statistics
+                if len(price_data) >= 252:
+                    high_52w = price_data.iloc[-252:, 0].max()
+                    low_52w = price_data.iloc[-252:, 0].min()
+                elif len(price_data) > 0:
+                    high_52w = price_data.iloc[:, 0].max()
+                    low_52w = price_data.iloc[:, 0].min()
+                else:
+                    high_52w = current_price
+                    low_52w = current_price
+                
+                stats_data = {
+                    'Current': current_price,
+                    '52W High': high_52w,
+                    '52W Low': low_52w,
+                    'Mean': price_data.iloc[:, 0].mean(),
+                    'Median': price_data.iloc[:, 0].median(),
+                    'Std Dev': price_data.iloc[:, 0].std()
+                }
+                
+                if 'volatility' in analytics:
+                    stats_data.update({
+                        '30D Vol (%)': analytics['volatility']['Current_Vol_30d'],
+                        'Max Drawdown (%)': analytics['volatility']['Max_Drawdown'],
+                        'Sharpe Ratio': analytics['volatility']['Sharpe_Ratio']
+                    })
+                
+                stats_df = pd.DataFrame(stats_data.items(), columns=['Metric', 'Value'])
+                st.dataframe(
+                    stats_df.style.format({'Value': '{:.2f}'}),
+                    hide_index=True,
+                    use_container_width=True
+                )
+            except Exception as e:
+                st.error(f"Error calculating statistics: {e}")
     
     # Tab 2: Advanced Analytics
     with tabs[tab_idx]:
@@ -1038,15 +1077,18 @@ def commodities_module(analysis_context: Optional[Dict] = None):
             with col2:
                 st.subheader("📊 Inventory Stats")
                 
-                current_inv = inv_data.iloc[-1, 0] if len(inv_data) > 0 else 0
-                avg_inv = inv_data.mean()[0]
-                pct_vs_avg = ((current_inv - avg_inv) / avg_inv * 100)
-                
-                st.metric(
-                    "Current Level",
-                    f"{current_inv:,.0f}",
-                    f"{pct_vs_avg:+.1f}% vs avg"
-                )
+                try:
+                    current_inv = inv_data.iloc[-1, 0] if len(inv_data) > 0 else 0
+                    avg_inv = inv_data.iloc[:, 0].mean()
+                    pct_vs_avg = ((current_inv - avg_inv) / avg_inv * 100) if avg_inv != 0 else 0
+                    
+                    st.metric(
+                        "Current Level",
+                        f"{current_inv:,.0f}",
+                        f"{pct_vs_avg:+.1f}% vs avg"
+                    )
+                except Exception as e:
+                    st.error(f"Error calculating inventory stats: {e}")
                 
                 # Weekly change
                 if len(inv_data) >= 2:
@@ -1171,24 +1213,28 @@ def commodities_module(analysis_context: Optional[Dict] = None):
                 st.plotly_chart(fig, use_container_width=True)
             
             with col2:
-                current_spread = spread_data.iloc[-1, 0] if len(spread_data) > 0 else 0
-                avg_spread = spread_data.mean()[0]
-                
-                st.metric(
-                    "Current Spread",
-                    f"${current_spread:.2f}",
-                    f"${current_spread - avg_spread:+.2f} vs avg"
-                )
-                
-                st.metric(
-                    "Average Spread",
-                    f"${avg_spread:.2f}"
-                )
-                
-                st.metric(
-                    "Max Spread",
-                    f"${spread_data.max()[0]:.2f}"
-                )
+                try:
+                    current_spread = spread_data.iloc[-1, 0] if len(spread_data) > 0 else 0
+                    avg_spread = spread_data.iloc[:, 0].mean()
+                    max_spread = spread_data.iloc[:, 0].max()
+                    
+                    st.metric(
+                        "Current Spread",
+                        f"${current_spread:.2f}",
+                        f"${current_spread - avg_spread:+.2f} vs avg"
+                    )
+                    
+                    st.metric(
+                        "Average Spread",
+                        f"${avg_spread:.2f}"
+                    )
+                    
+                    st.metric(
+                        "Max Spread",
+                        f"${max_spread:.2f}"
+                    )
+                except Exception as e:
+                    st.error(f"Error calculating spread metrics: {e}")
             
             st.info("""
             **3-2-1 Crack Spread**: Simulates refinery margin from processing 3 barrels of crude into 2 barrels of gasoline and 1 barrel of heating oil.
@@ -1303,11 +1349,12 @@ def commodities_module(analysis_context: Optional[Dict] = None):
             inv_data = inventory_data[inv_key]
             if len(inv_data) > 0:
                 current_inv = inv_data.iloc[-1, 0]
-                avg_inv = inv_data.mean()[0]
-                if current_inv < avg_inv * 0.9:
-                    insights.append(f"📦 **Low Inventory**: Stocks {((current_inv/avg_inv-1)*100):.1f}% below average - bullish for prices")
-                elif current_inv > avg_inv * 1.1:
-                    insights.append(f"📦 **High Inventory**: Stocks {((current_inv/avg_inv-1)*100):.1f}% above average - bearish for prices")
+                avg_inv = inv_data.iloc[:, 0].mean()
+                if avg_inv > 0:
+                    if current_inv < avg_inv * 0.9:
+                        insights.append(f"📦 **Low Inventory**: Stocks {((current_inv/avg_inv-1)*100):.1f}% below average - bullish for prices")
+                    elif current_inv > avg_inv * 1.1:
+                        insights.append(f"📦 **High Inventory**: Stocks {((current_inv/avg_inv-1)*100):.1f}% above average - bearish for prices")
         except (IndexError, KeyError):
             pass
     
