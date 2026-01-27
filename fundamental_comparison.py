@@ -9,6 +9,14 @@ from datetime import date, datetime
 import warnings
 warnings.filterwarnings('ignore')
 
+# Try to import finviz for backup valuation data
+try:
+    from finviz.screener import Screener
+    FINVIZ_AVAILABLE = True
+except ImportError:
+    FINVIZ_AVAILABLE = False
+    st.sidebar.warning("⚠️ Install finviz-py for backup valuation data: pip install finviz")
+
 
 def render_fundamental_comparison(tickers: List[str] = None) -> None:
     """
@@ -17,6 +25,98 @@ def render_fundamental_comparison(tickers: List[str] = None) -> None:
     Args:
         tickers: List of ticker symbols to compare (optional, uses UI input if None)
     """
+    
+    # ══════════════════════════════════════════════════════════════════════════
+    # HELPER: FETCH FINVIZ DATA
+    # ══════════════════════════════════════════════════════════════════════════
+    def get_finviz_valuation(ticker: str) -> Dict:
+        """
+        Fetch valuation data from Finviz as backup source.
+        Returns dict with P/E, P/B, P/S, EPS, etc.
+        """
+        if not FINVIZ_AVAILABLE:
+            return {}
+        
+        try:
+            import requests
+            from bs4 import BeautifulSoup
+            
+            url = f"https://finviz.com/quote.ashx?t={ticker}"
+            headers = {'User-Agent': 'Mozilla/5.0'}
+            response = requests.get(url, headers=headers, timeout=10)
+            
+            if response.status_code != 200:
+                return {}
+            
+            soup = BeautifulSoup(response.content, 'html.parser')
+            
+            # Find the fundamental data table
+            table = soup.find('table', class_='snapshot-table2')
+            if not table:
+                return {}
+            
+            data = {}
+            rows = table.find_all('tr')
+            
+            for row in rows:
+                cols = row.find_all('td')
+                for i in range(0, len(cols), 2):
+                    if i + 1 < len(cols):
+                        label = cols[i].get_text(strip=True)
+                        value = cols[i + 1].get_text(strip=True)
+                        
+                        # Parse key metrics
+                        if label == 'P/E':
+                            try:
+                                data['pe'] = float(value) if value != '-' else np.nan
+                            except:
+                                data['pe'] = np.nan
+                        elif label == 'P/B':
+                            try:
+                                data['pb'] = float(value) if value != '-' else np.nan
+                            except:
+                                data['pb'] = np.nan
+                        elif label == 'P/S':
+                            try:
+                                data['ps'] = float(value) if value != '-' else np.nan
+                            except:
+                                data['ps'] = np.nan
+                        elif label == 'EPS (ttm)':
+                            try:
+                                data['eps'] = float(value) if value != '-' else np.nan
+                            except:
+                                data['eps'] = np.nan
+                        elif label == 'PEG':
+                            try:
+                                data['peg'] = float(value) if value != '-' else np.nan
+                            except:
+                                data['peg'] = np.nan
+                        elif label == 'Price':
+                            try:
+                                data['price'] = float(value) if value != '-' else np.nan
+                            except:
+                                data['price'] = np.nan
+                        elif label == 'Market Cap':
+                            try:
+                                # Parse market cap (e.g., "2.5B", "500M")
+                                value_clean = value.replace(',', '')
+                                if 'B' in value_clean:
+                                    data['market_cap'] = float(value_clean.replace('B', '')) * 1e9
+                                elif 'M' in value_clean:
+                                    data['market_cap'] = float(value_clean.replace('M', '')) * 1e6
+                                elif 'T' in value_clean:
+                                    data['market_cap'] = float(value_clean.replace('T', '')) * 1e12
+                                else:
+                                    data['market_cap'] = float(value_clean)
+                            except:
+                                data['market_cap'] = np.nan
+            
+            return data
+            
+        except Exception as e:
+            # Silent fail - just return empty dict
+            return {}
+    
     st.markdown("# 📊 Advanced Fundamental Analysis & Comparison")
     st.markdown("Compare financial metrics, analyze trends, and rank stocks by fundamental strength")
     
@@ -75,6 +175,9 @@ def render_fundamental_comparison(tickers: List[str] = None) -> None:
             progress_bar = st.progress(0)
             status_text = st.empty()
             
+            # Track Finviz usage
+            finviz_used = []
+            
             for idx, ticker in enumerate(tickers):
                 status_text.text(f"Loading {ticker}... ({idx+1}/{len(tickers)})")
                 progress_bar.progress((idx + 1) / len(tickers))
@@ -105,11 +208,30 @@ def render_fundamental_comparison(tickers: List[str] = None) -> None:
                     except Exception:
                         info = {}
                     
+                    # Try to get Finviz data if yfinance info is incomplete
+                    finviz_data = {}
+                    needs_finviz = (
+                        info.get("marketCap") is None or 
+                        info.get("trailingPE") is None or 
+                        info.get("priceToBook") is None
+                    )
+                    
+                    if needs_finviz and FINVIZ_AVAILABLE:
+                        finviz_data = get_finviz_valuation(ticker)
+                        if finviz_data:
+                            finviz_used.append(ticker)
+                            # Merge Finviz data into info
+                            if 'market_cap' in finviz_data and pd.notna(finviz_data['market_cap']):
+                                info['marketCap'] = finviz_data['market_cap']
+                            if 'price' in finviz_data and pd.notna(finviz_data['price']):
+                                info['currentPrice'] = finviz_data['price']
+                    
                     all_data[ticker] = {
                         "income": income,
                         "balance": balance,
                         "cashflow": cashflow,
-                        "info": info
+                        "info": info,
+                        "finviz": finviz_data  # Store Finviz data separately
                     }
                     
                 except Exception as e:
@@ -128,6 +250,8 @@ def render_fundamental_comparison(tickers: List[str] = None) -> None:
             col1, col2 = st.columns([3, 1])
             with col1:
                 st.success(f"✅ Successfully loaded data for **{len(tickers)} stocks**: {', '.join(tickers)}")
+                if finviz_used:
+                    st.info(f"📊 Enhanced with Finviz data: {', '.join(finviz_used)}")
             with col2:
                 if failed_tickers:
                     st.error(f"❌ Failed: {', '.join(failed_tickers)}")
@@ -228,6 +352,7 @@ def render_fundamental_comparison(tickers: List[str] = None) -> None:
                 balance = ticker_data["balance"]
                 cashflow = ticker_data["cashflow"]
                 info = ticker_data["info"]
+                finviz = ticker_data.get("finviz", {})  # Get Finviz data
                 
                 # Extract core financial data
                 revenue = safe_get(income, "Total Revenue")
@@ -300,26 +425,38 @@ def render_fundamental_comparison(tickers: List[str] = None) -> None:
                 fcf_per_share = safe_divide(fcf_latest, shares_latest)
                 book_value_per_share = safe_divide(equity_latest, shares_latest)
                 
-                # Valuation Metrics
-                # Try multiple sources for P/E
+                # Valuation Metrics - Use Finviz as fallback
+                # Try multiple sources for P/E: yfinance -> Finviz -> calculated
                 pe_ratio = info.get("trailingPE", info.get("forwardPE", np.nan))
                 if pd.isna(pe_ratio) or pe_ratio <= 0 or pe_ratio > 1000:
-                    # Calculate from price and EPS if available
-                    if not pd.isna(current_price) and not pd.isna(eps) and eps > 0:
-                        pe_ratio = current_price / eps
+                    # Try Finviz
+                    if 'pe' in finviz and pd.notna(finviz['pe']):
+                        pe_ratio = finviz['pe']
+                    else:
+                        # Calculate from price and EPS if available
+                        if not pd.isna(current_price) and not pd.isna(eps) and eps > 0:
+                            pe_ratio = current_price / eps
                 
-                # Try multiple sources for P/B
+                # Try multiple sources for P/B: yfinance -> Finviz -> calculated
                 pb_ratio = info.get("priceToBook", np.nan)
                 if pd.isna(pb_ratio) or pb_ratio <= 0 or pb_ratio > 100:
-                    # Calculate if we have market cap and equity
-                    if not pd.isna(market_cap) and not pd.isna(equity_latest) and equity_latest > 0:
-                        pb_ratio = market_cap / equity_latest
+                    # Try Finviz
+                    if 'pb' in finviz and pd.notna(finviz['pb']):
+                        pb_ratio = finviz['pb']
+                    else:
+                        # Calculate if we have market cap and equity
+                        if not pd.isna(market_cap) and not pd.isna(equity_latest) and equity_latest > 0:
+                            pb_ratio = market_cap / equity_latest
                 
-                # Try multiple sources for P/S
+                # Try multiple sources for P/S: yfinance -> Finviz -> calculated
                 ps_ratio = info.get("priceToSalesTrailing12Months", np.nan)
                 if pd.isna(ps_ratio) or ps_ratio <= 0 or ps_ratio > 100:
-                    if not pd.isna(market_cap) and not pd.isna(rev_latest) and rev_latest > 0:
-                        ps_ratio = market_cap / rev_latest
+                    # Try Finviz
+                    if 'ps' in finviz and pd.notna(finviz['ps']):
+                        ps_ratio = finviz['ps']
+                    else:
+                        if not pd.isna(market_cap) and not pd.isna(rev_latest) and rev_latest > 0:
+                            ps_ratio = market_cap / rev_latest
                 
                 # Calculate Price/FCF
                 price_to_fcf = np.nan
@@ -335,11 +472,19 @@ def render_fundamental_comparison(tickers: List[str] = None) -> None:
                 if not pd.isna(enterprise_value) and not pd.isna(rev_latest) and rev_latest > 0:
                     ev_to_revenue = enterprise_value / rev_latest
                 
-                # Try to get EV/EBITDA from info first
+                # Try to get EV/EBITDA from info first, then calculate
                 ev_to_ebitda = info.get("enterpriseToEbitda", np.nan)
                 if pd.isna(ev_to_ebitda) or ev_to_ebitda <= 0 or ev_to_ebitda > 100:
                     if not pd.isna(enterprise_value) and not pd.isna(ebitda_latest) and ebitda_latest > 0:
                         ev_to_ebitda = enterprise_value / ebitda_latest
+                
+                # PEG - try Finviz first
+                peg_ratio = np.nan
+                if 'peg' in finviz and pd.notna(finviz['peg']):
+                    peg_ratio = finviz['peg']
+                else:
+                    # Calculate PEG Ratio
+                    peg_ratio = safe_divide(pe_ratio, revenue_growth) if revenue_growth and revenue_growth > 0 else np.nan
                 
                 # Efficiency Metrics
                 asset_turnover = safe_divide(rev_latest, assets_latest)
@@ -356,9 +501,6 @@ def render_fundamental_comparison(tickers: List[str] = None) -> None:
                 ni_cagr = calculate_cagr(net_income)
                 fcf_growth = calculate_growth_rate(fcf_calc)
                 eps_growth = calculate_growth_rate(net_income / shares) if not shares.empty else np.nan
-                
-                # PEG Ratio
-                peg_ratio = safe_divide(pe_ratio, revenue_growth) if revenue_growth and revenue_growth > 0 else np.nan
                 
                 # Time series for trends
                 gross_margin_ts = (gross_profit / revenue * 100) if not revenue.empty else pd.Series()
@@ -1113,8 +1255,11 @@ def render_fundamental_comparison(tickers: List[str] = None) -> None:
                     - Stocks don't have market data (not publicly traded)
                     - Tickers are incorrect
                     - Companies have negative earnings (P/E not applicable)
-                    - Data is temporarily unavailable from yfinance
+                    - Data is temporarily unavailable from both yfinance and Finviz
                     """)
+                    
+                    if not FINVIZ_AVAILABLE:
+                        st.info("💡 **Tip**: Install `finviz` package for backup valuation data: `pip install finviz`")
                     
                     # Show what data we do have
                     st.markdown("**Available Data:**")
