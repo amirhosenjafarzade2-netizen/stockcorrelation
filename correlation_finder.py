@@ -742,7 +742,7 @@ def render_correlation_finder(
                     for j in range(i + 1, len(tickers)):
                         ticker_pairs.append(f"{tickers[i]} ↔ {tickers[j]}")
                 
-                # Default to top 5 by absolute correlation
+                # Default to top 5 by absolute correlation - FIXED VERSION
                 default_selections = []
                 pair_corrs = []
                 for pair in ticker_pairs:
@@ -855,7 +855,10 @@ def render_correlation_finder(
                         "Significant": "✓" if sig_test['p_value'] < 0.05 else "✗"
                     })
             
-            sig_df = pd.DataFrame(significance_data).sort_values("Correlation", key=abs, ascending=False)
+            # FIXED: Sort by absolute value without using key parameter
+            sig_df = pd.DataFrame(significance_data)
+            sig_df['abs_corr'] = sig_df['Correlation'].abs()
+            sig_df = sig_df.sort_values('abs_corr', ascending=False).drop('abs_corr', axis=1)
             
             # Display table
             st.dataframe(
@@ -911,8 +914,8 @@ def render_correlation_finder(
             st.markdown("---")
             st.markdown("### Confidence Intervals Visualization")
             
-            # Select top 15 by absolute correlation
-            top_pairs = sig_df.nlargest(min(15, len(sig_df)), 'Correlation', key=abs)
+            # FIXED: Select top 15 without key parameter
+            top_pairs = sig_df.head(min(15, len(sig_df)))
             
             fig_ci = go.Figure()
             
@@ -1411,10 +1414,10 @@ def render_correlation_finder(
                 height=400
             )
             
-            # Top correlations visualization
+            # Top correlations visualization - FIXED VERSION
             st.markdown("### Top 10 Strongest Correlations (by absolute value)")
             
-            top_10 = pairs_df.nlargest(min(10, len(pairs_df)), "Abs Corr")
+            top_10 = pairs_df.head(min(10, len(pairs_df)))
             
             fig_bar = px.bar(
                 top_10,
