@@ -502,6 +502,7 @@ def render_grapher():
                 can_calc_margins = (not revenue.empty and not gross_profit.empty and 
                                    not operating_income.empty and not net_income.empty)
                 
+                margins = None
                 if can_calc_margins:
                     try:
                         margins = pd.DataFrame({
@@ -510,21 +511,21 @@ def render_grapher():
                             "Net Margin": (net_income / revenue) * 100
                         })
                         plot_multi(margins, "Margins Over Time", "Margin (%)", ["#ff7f0e", "#d62728", "#9467bd"])
+                        
+                        col1, col2, col3 = st.columns(3)
+                        with col1:
+                            gm = float(margins['Gross Margin'].iloc[-1]) if not pd.isna(margins['Gross Margin'].iloc[-1]) else 0
+                            st.metric("Gross Margin", f"{gm:.1f}%")
+                        with col2:
+                            om = float(margins['Operating Margin'].iloc[-1]) if not pd.isna(margins['Operating Margin'].iloc[-1]) else 0
+                            st.metric("Operating Margin", f"{om:.1f}%")
+                        with col3:
+                            nm = float(margins['Net Margin'].iloc[-1]) if not pd.isna(margins['Net Margin'].iloc[-1]) else 0
+                            st.metric("Net Margin", f"{nm:.1f}%")
                     except Exception as e:
                         st.warning(f"Could not calculate margins: {str(e)}")
                 else:
                     st.info("📊 Margin data not available - missing required financial metrics")
-                    
-                    col1, col2, col3 = st.columns(3)
-                    with col1:
-                        gm = float(margins['Gross Margin'].iloc[-1]) if not pd.isna(margins['Gross Margin'].iloc[-1]) else 0
-                        st.metric("Gross Margin", f"{gm:.1f}%")
-                    with col2:
-                        om = float(margins['Operating Margin'].iloc[-1]) if not pd.isna(margins['Operating Margin'].iloc[-1]) else 0
-                        st.metric("Operating Margin", f"{om:.1f}%")
-                    with col3:
-                        nm = float(margins['Net Margin'].iloc[-1]) if not pd.isna(margins['Net Margin'].iloc[-1]) else 0
-                        st.metric("Net Margin", f"{nm:.1f}%")
                 
                 st.markdown("### Absolute Profitability")
                 if not operating_income.empty or not net_income.empty:
@@ -574,7 +575,7 @@ def render_grapher():
                 if not ocf.empty and not net_income.empty:
                     try:
                         eq_df = pd.DataFrame({"Operating Cash Flow": ocf, "Net Income": net_income})
-                        plot_multi(eq_df, "Cash Flow vs Earnings", ["#1f77b4", "#ff7f0e"])
+                        plot_multi(eq_df, "Cash Flow vs Earnings", "Amount (USD)", ["#1f77b4", "#ff7f0e"])
                         st.info("💡 High-quality earnings: OCF ≥ Net Income")
                     except Exception as e:
                         st.warning(f"Could not plot earnings quality: {str(e)}")
