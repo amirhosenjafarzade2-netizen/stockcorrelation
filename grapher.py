@@ -70,16 +70,28 @@ def fetch_edgar_data(ticker: str, num_years: int = 10):
 
 
 def process_edgar_df(df: pd.DataFrame) -> pd.DataFrame:
-    """Process Edgar dataframe"""
+    """Process Edgar dataframe to match yfinance format"""
     if df.empty:
         return df
-    if not isinstance(df.index, pd.DatetimeIndex):
+    
+    # Edgar data typically comes with dates as columns and metrics as rows
+    # We need dates as index (columns in our case since we use .loc[metric])
+    # So if dates are currently in index, transpose
+    if isinstance(df.index, pd.DatetimeIndex):
+        # Dates are in index, metrics are columns - transpose so metrics become index
         df = df.T
+    
+    # Now ensure columns (dates) are DatetimeIndex
     if not isinstance(df.columns, pd.DatetimeIndex):
         try:
             df.columns = pd.to_datetime(df.columns)
         except:
             pass
+    
+    # Sort columns by date
+    if isinstance(df.columns, pd.DatetimeIndex):
+        df = df.sort_index(axis=1)
+    
     return df
 
 
@@ -169,36 +181,54 @@ def fetch_finviz_data(ticker: str):
 # ══════════════════════════════════════════════════════════════════════════════
 
 def safe_get(df: pd.DataFrame, key: str, default=None) -> pd.Series:
-    """Get row from DataFrame with intelligent fallback"""
+    """Get row from DataFrame with intelligent fallback - handles both yfinance and Edgar"""
     if df.empty:
         return pd.Series(dtype=float)
     
+    # Try exact match first
     if key in df.index:
         return df.loc[key]
     
+    # Try case-insensitive exact match
+    for idx in df.index:
+        if isinstance(idx, str) and idx.lower() == key.lower():
+            return df.loc[idx]
+    
+    # Comprehensive alternatives for both yfinance and Edgar
     alternatives = {
-        "Total Revenue": ["TotalRevenue", "Total Revenues", "Revenue"],
-        "Gross Profit": ["GrossProfit", "Gross Income"],
-        "Operating Income": ["OperatingIncome", "EBIT", "Operating Revenue", "EBITDA"],
-        "Net Income": ["NetIncome", "Net Income Common Stockholders", "Net Income Available To Common Stockholders"],
-        "Operating Cash Flow": ["OperatingCashFlow", "Total Cash From Operating Activities", "Cash Flow From Operations"],
-        "Capital Expenditure": ["CapitalExpenditure", "Capital Expenditures", "Purchase Of PPE"],
-        "Stock Based Compensation": ["StockBasedCompensation", "Stock Based Compensation"],
-        "Basic Average Shares": ["BasicAverageShares", "Ordinary Shares Number", "Share Issued", "Basic Shares Outstanding"],
-        "Diluted Average Shares": ["DilutedAverageShares", "Diluted NI Available To Com Stockholders", "Diluted Shares Outstanding"],
-        "Total Assets": ["TotalAssets", "Total Assets"],
-        "Total Debt": ["TotalDebt", "Long Term Debt", "Total Debt", "Short Long Term Debt"],
-        "Cash And Cash Equivalents": ["CashAndCashEquivalents", "Cash", "Cash Cash Equivalents And Short Term Investments"],
-        "Tax Provision": ["TaxProvision", "Tax Effect Of Unusual Items", "Income Tax Expense"],
-        "Research Development": ["ResearchAndDevelopment", "Research Development", "R&D Expense"],
-        "Selling General Administrative": ["SellingGeneralAndAdministrative", "SG&A Expense", "Selling General Administrative"],
-        "Total Liabilities": ["TotalLiabilities", "Total Liabilities Net Minority Interest"],
-        "Stockholders Equity": ["StockholdersEquity", "Total Equity Gross Minority Interest", "Stockholder Equity"],
+        "Total Revenue": ["TotalRevenue", "Total Revenues", "Revenue", "Revenues", "RevenueFromContractWithCustomerExcludingAssessedTax"],
+        "Gross Profit": ["GrossProfit", "Gross Income", "GrossProfitLoss"],
+        "Operating Income": ["OperatingIncome", "EBIT", "Operating Revenue", "EBITDA", "OperatingIncomeLoss"],
+        "Net Income": ["NetIncome", "Net Income Common Stockholders", "Net Income Available To Common Stockholders", "NetIncomeLoss", "NetIncomeLossAvailableToCommonStockholdersBasic"],
+        "Operating Cash Flow": ["OperatingCashFlow", "Total Cash From Operating Activities", "Cash Flow From Operations", "NetCashProvidedByUsedInOperatingActivities"],
+        "Capital Expenditure": ["CapitalExpenditure", "Capital Expenditures", "Purchase Of PPE", "PaymentsToAcquirePropertyPlantAndEquipment"],
+        "Stock Based Compensation": ["StockBasedCompensation", "Stock Based Compensation", "ShareBasedCompensation", "AllocatedShareBasedCompensationExpense"],
+        "Basic Average Shares": ["BasicAverageShares", "Ordinary Shares Number", "Share Issued", "Basic Shares Outstanding", "WeightedAverageNumberOfSharesOutstandingBasic"],
+        "Diluted Average Shares": ["DilutedAverageShares", "Diluted NI Available To Com Stockholders", "Diluted Shares Outstanding", "WeightedAverageNumberOfDilutedSharesOutstanding"],
+        "Total Assets": ["TotalAssets", "Total Assets", "Assets"],
+        "Total Debt": ["TotalDebt", "Long Term Debt", "Total Debt", "Short Long Term Debt", "LongTermDebtNoncurrent", "DebtCurrent"],
+        "Cash And Cash Equivalents": ["CashAndCashEquivalents", "Cash", "Cash Cash Equivalents And Short Term Investments", "CashAndCashEquivalentsAtCarryingValue"],
+        "Tax Provision": ["TaxProvision", "Tax Effect Of Unusual Items", "Income Tax Expense", "IncomeTaxExpenseBenefit"],
+        "Research Development": ["ResearchAndDevelopment", "Research Development", "R&D Expense", "ResearchAndDevelopmentExpense"],
+        "Selling General Administrative": ["SellingGeneralAndAdministrative", "SG&A Expense", "Selling General Administrative", "SellingGeneralAndAdministrativeExpense"],
+        "Total Liabilities": ["TotalLiabilities", "Total Liabilities Net Minority Interest", "Liabilities", "LiabilitiesCurrent"],
+        "Stockholders Equity": ["StockholdersEquity", "Total Equity Gross Minority Interest", "Stockholder Equity", "StockholdersEquityIncludingPortionAttributableToNoncontrollingInterest"],
     }
     
+    # Try each alternative with exact match
     for alt in alternatives.get(key, []):
         if alt in df.index:
             return df.loc[alt]
+        # Try case-insensitive
+        for idx in df.index:
+            if isinstance(idx, str) and idx.lower() == alt.lower():
+                return df.loc[idx]
+    
+    # Last resort: partial substring matching (for Edgar's verbose names)
+    for alt in alternatives.get(key, [key]):
+        for idx in df.index:
+            if isinstance(idx, str) and alt.lower() in idx.lower():
+                return df.loc[idx]
     
     if default is not None:
         return pd.Series(default, index=df.columns if not df.empty else [])
@@ -449,6 +479,21 @@ def render_grapher():
             shares_basic = safe_get(income, "Basic Average Shares")
             shares_diluted = safe_get(income, "Diluted Average Shares")
             tax = safe_get(income, "Tax Provision", 0)
+            
+            # Debug section for Edgar data
+            if data_source == "SEC Edgar":
+                with st.expander("🔍 Debug: Edgar Data Structure"):
+                    st.write("**Income Statement:**")
+                    st.write(f"Shape: {income.shape}")
+                    st.write(f"Index type: {type(income.index)}")
+                    st.write(f"Columns type: {type(income.columns)}")
+                    st.write(f"First 10 index values: {income.index.tolist()[:10]}")
+                    st.write(f"Column values: {income.columns.tolist()}")
+                    st.write(f"\n**Extracted Metrics Status:**")
+                    st.write(f"Revenue: {len(revenue.dropna())} non-null values")
+                    st.write(f"Net Income: {len(net_income.dropna())} non-null values")
+                    st.write(f"OCF: {len(ocf.dropna())} non-null values")
+                    st.write(f"Total Assets: {len(total_assets.dropna())} non-null values")
 
             # ══════════════════════════════════════════════════════════════════
             # TABBED INTERFACE
@@ -642,6 +687,9 @@ def render_grapher():
                                 if value:
                                     has_analyst_data = True
                                     break
+                            else:
+                                has_analyst_data = True
+                                break
                 
                 if has_analyst_data:
                     
@@ -649,6 +697,7 @@ def render_grapher():
                     st.markdown("#### 🎯 Analyst Price Targets")
                     price_target = analyst_data.get('price_target')
                     
+                    # Check if price_target is a valid dict (not a DataFrame)
                     is_valid_target = False
                     if price_target is not None:
                         if isinstance(price_target, dict) and not isinstance(price_target, pd.DataFrame):
@@ -678,6 +727,7 @@ def render_grapher():
                     if recommendations is not None and not recommendations.empty:
                         recent = recommendations.tail(20)
                         
+                        # Count recommendation types
                         if 'To Grade' in recent.columns:
                             rec_counts = recent['To Grade'].value_counts()
                             
@@ -692,6 +742,7 @@ def render_grapher():
                                 sell_count = rec_counts.get('Sell', 0) + rec_counts.get('Strong Sell', 0) + rec_counts.get('Underperform', 0)
                                 st.metric("Sell Ratings", sell_count)
                             
+                            # Show recent upgrades/downgrades
                             st.markdown("##### Recent Analyst Actions")
                             st.dataframe(recent.tail(10), use_container_width=True)
                         else:
@@ -702,6 +753,28 @@ def render_grapher():
                     earnings_trend = analyst_data.get('earnings_trend')
                     if earnings_trend is not None and not earnings_trend.empty:
                         st.dataframe(earnings_trend, use_container_width=True)
+                        
+                        # Try to visualize EPS estimates if available
+                        if '7d' in earnings_trend.index or '30d' in earnings_trend.index:
+                            st.info("📊 Earnings estimates are being revised. Check the trend table above for details.")
+                    
+                    # Revenue Forecasts
+                    st.markdown("#### 💰 Revenue Forecasts")
+                    revenue_forecast = analyst_data.get('revenue_forecasts')
+                    if revenue_forecast is not None and not revenue_forecast.empty:
+                        st.dataframe(revenue_forecast, use_container_width=True)
+                    
+                    # Earnings Forecasts (additional)
+                    st.markdown("#### 📊 Earnings Forecasts")
+                    earnings_forecasts = analyst_data.get('earnings_forecasts')
+                    if earnings_forecasts is not None and not earnings_forecasts.empty:
+                        st.dataframe(earnings_forecasts, use_container_width=True)
+                    
+                    # Upgrades/Downgrades Summary
+                    st.markdown("#### ⬆️⬇️ Recent Upgrades & Downgrades")
+                    upgrades = analyst_data.get('upgrades_downgrades')
+                    if upgrades is not None and not upgrades.empty:
+                        st.dataframe(upgrades.tail(15), use_container_width=True)
                     
                     # Add interpretation guide
                     st.markdown("---")
@@ -710,11 +783,13 @@ def render_grapher():
                     - **Price Targets**: Mean target shows average analyst expectation
                     - **Recommendations**: More Buy ratings = bullish sentiment
                     - **Upgrades/Downgrades**: Recent changes indicate shifting sentiment
+                    - **Earnings Trend**: Upward revisions = improving outlook
                     - **Note**: Analysts can be wrong! Use as one data point among many.
                     """)
                     
                 else:
                     st.warning("⚠️ No analyst forecast data available for this ticker")
+                    st.info("Analyst data is typically available for larger, well-covered companies")
 
             # COMPLETION
             st.markdown("---")
