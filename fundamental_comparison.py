@@ -271,7 +271,11 @@ def render_fundamental_comparison(tickers: List[str] = None) -> None:
                 
                 # Market data
                 market_cap = info.get("marketCap", np.nan)
-                current_price = info.get("currentPrice", info.get("regularMarketPrice", np.nan))
+                enterprise_value = info.get("enterpriseValue", np.nan)
+                current_price = info.get("currentPrice", info.get("regularMarketPrice", info.get("previousClose", np.nan)))
+                
+                # Debug: Print what we're getting
+                # st.write(f"Debug {ticker}: Price={current_price}, MktCap={market_cap}, EPS={eps}")
                 
                 # Profitability Metrics
                 gross_margin = safe_divide(gp_latest, rev_latest) * 100
@@ -297,29 +301,45 @@ def render_fundamental_comparison(tickers: List[str] = None) -> None:
                 book_value_per_share = safe_divide(equity_latest, shares_latest)
                 
                 # Valuation Metrics
-                # Try to get P/E from info first, then calculate
+                # Try multiple sources for P/E
                 pe_ratio = info.get("trailingPE", info.get("forwardPE", np.nan))
                 if pd.isna(pe_ratio) or pe_ratio <= 0 or pe_ratio > 1000:
-                    pe_ratio = safe_divide(current_price, eps) if eps and eps > 0 else np.nan
+                    # Calculate from price and EPS if available
+                    if not pd.isna(current_price) and not pd.isna(eps) and eps > 0:
+                        pe_ratio = current_price / eps
                 
-                # Try to get P/B from info first, then calculate
+                # Try multiple sources for P/B
                 pb_ratio = info.get("priceToBook", np.nan)
-                if pd.isna(pb_ratio) or pb_ratio <= 0:
-                    pb_ratio = safe_divide(market_cap, equity_latest)
+                if pd.isna(pb_ratio) or pb_ratio <= 0 or pb_ratio > 100:
+                    # Calculate if we have market cap and equity
+                    if not pd.isna(market_cap) and not pd.isna(equity_latest) and equity_latest > 0:
+                        pb_ratio = market_cap / equity_latest
                 
+                # Try multiple sources for P/S
                 ps_ratio = info.get("priceToSalesTrailing12Months", np.nan)
-                if pd.isna(ps_ratio) or ps_ratio <= 0:
-                    ps_ratio = safe_divide(market_cap, rev_latest)
+                if pd.isna(ps_ratio) or ps_ratio <= 0 or ps_ratio > 100:
+                    if not pd.isna(market_cap) and not pd.isna(rev_latest) and rev_latest > 0:
+                        ps_ratio = market_cap / rev_latest
                 
-                ev = market_cap + debt_latest - cash_latest if not np.isnan(market_cap) else np.nan
-                ev_to_revenue = safe_divide(ev, rev_latest)
+                # Calculate Price/FCF
+                price_to_fcf = np.nan
+                if not pd.isna(market_cap) and not pd.isna(fcf_latest) and fcf_latest > 0:
+                    price_to_fcf = market_cap / fcf_latest
+                
+                # Calculate EV metrics
+                if pd.isna(enterprise_value) or enterprise_value <= 0:
+                    if not pd.isna(market_cap) and not pd.isna(debt_latest) and not pd.isna(cash_latest):
+                        enterprise_value = market_cap + debt_latest - cash_latest
+                
+                ev_to_revenue = np.nan
+                if not pd.isna(enterprise_value) and not pd.isna(rev_latest) and rev_latest > 0:
+                    ev_to_revenue = enterprise_value / rev_latest
                 
                 # Try to get EV/EBITDA from info first
                 ev_to_ebitda = info.get("enterpriseToEbitda", np.nan)
-                if pd.isna(ev_to_ebitda) or ev_to_ebitda <= 0:
-                    ev_to_ebitda = safe_divide(ev, ebitda_latest)
-                
-                price_to_fcf = safe_divide(market_cap, fcf_latest)
+                if pd.isna(ev_to_ebitda) or ev_to_ebitda <= 0 or ev_to_ebitda > 100:
+                    if not pd.isna(enterprise_value) and not pd.isna(ebitda_latest) and ebitda_latest > 0:
+                        ev_to_ebitda = enterprise_value / ebitda_latest
                 
                 # Efficiency Metrics
                 asset_turnover = safe_divide(rev_latest, assets_latest)
@@ -455,11 +475,30 @@ def render_fundamental_comparison(tickers: List[str] = None) -> None:
                     "Debt/Equity": {"weight": 0.08, "higher_better": False, "max_threshold": 5},
                     "FCF/NI": {"weight": 0.07, "higher_better": True, "min_threshold": 0},
                     
-                    # Valuation (15%)
-                    "P/E": {"weight": 0.05, "higher_better": False, "max_threshold": 100},
-                    "PEG": {"weight": 0.05, "higher_better": False, "max_threshold": 5},
-                    "EV/EBITDA": {"weight": 0.05, "higher_better": False, "max_threshold": 50},
+                    # Valuation (15%) - Made optional since they might be missing
+                    "P/E": {"weight": 0.05, "higher_better": False, "max_threshold": 100, "optional": True},
+                    "PEG": {"weight": 0.05, "higher_better": False, "max_threshold": 5, "optional": True},
+                    "EV/EBITDA": {"weight": 0.05, "higher_better": False, "max_threshold": 50, "optional": True},
                 }
+                
+                # Check which valuation metrics are available
+                valuation_available = {}
+                for metric in ["P/E", "PEG", "EV/EBITDA"]:
+                    if metric in df.columns:
+                        valid_count = df[metric].notna().sum()
+                        valuation_available[metric] = valid_count
+                
+                # If no valuation data, redistribute weights
+                if sum(valuation_available.values()) == 0:
+                    # Remove valuation criteria and redistribute weights
+                    for key in ["P/E", "PEG", "EV/EBITDA"]:
+                        if key in criteria:
+                            del criteria[key]
+                    
+                    # Recalculate weights (distribute evenly)
+                    total_remaining_weight = sum(c["weight"] for c in criteria.values())
+                    for key in criteria:
+                        criteria[key]["weight"] = criteria[key]["weight"] / total_remaining_weight
                 
                 # Normalize and score each metric
                 total_weight = sum(c["weight"] for c in criteria.values())
@@ -1062,6 +1101,40 @@ def render_fundamental_comparison(tickers: List[str] = None) -> None:
                     "PEG", "Market Cap", "Revenue Growth %"
                 ]
                 val_df = comparison_df[val_cols].copy()
+                
+                # Check if we have any valid valuation data
+                valuation_metrics = ["P/E", "P/B", "P/S", "EV/EBITDA"]
+                valid_count = val_df[valuation_metrics].notna().sum().sum()
+                total_possible = len(val_df) * len(valuation_metrics)
+                
+                if valid_count == 0:
+                    st.warning("⚠️ No valuation data available. This can happen if:")
+                    st.markdown("""
+                    - Stocks don't have market data (not publicly traded)
+                    - Tickers are incorrect
+                    - Companies have negative earnings (P/E not applicable)
+                    - Data is temporarily unavailable from yfinance
+                    """)
+                    
+                    # Show what data we do have
+                    st.markdown("**Available Data:**")
+                    available_data = pd.DataFrame({
+                        "Market Cap": comparison_df["Market Cap"],
+                        "Revenue": comparison_df["Revenue"],
+                        "Net Income": comparison_df["Net Income"],
+                        "EPS": comparison_df["EPS"]
+                    })
+                    st.dataframe(
+                        available_data.style.format({
+                            "Market Cap": "${:,.0f}",
+                            "Revenue": "${:,.0f}",
+                            "Net Income": "${:,.0f}",
+                            "EPS": "${:.2f}"
+                        }, na_rep="-"),
+                        use_container_width=True
+                    )
+                else:
+                    st.caption(f"📊 {valid_count}/{total_possible} valuation metrics available")
                 
                 st.dataframe(
                     val_df.style.format({
