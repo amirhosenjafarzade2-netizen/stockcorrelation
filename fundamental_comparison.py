@@ -297,13 +297,27 @@ def render_fundamental_comparison(tickers: List[str] = None) -> None:
                 book_value_per_share = safe_divide(equity_latest, shares_latest)
                 
                 # Valuation Metrics
-                pe_ratio = safe_divide(current_price, eps) if eps and eps > 0 else np.nan
-                pb_ratio = safe_divide(market_cap, equity_latest)
-                ps_ratio = safe_divide(market_cap, rev_latest)
+                # Try to get P/E from info first, then calculate
+                pe_ratio = info.get("trailingPE", info.get("forwardPE", np.nan))
+                if pd.isna(pe_ratio) or pe_ratio <= 0 or pe_ratio > 1000:
+                    pe_ratio = safe_divide(current_price, eps) if eps and eps > 0 else np.nan
+                
+                # Try to get P/B from info first, then calculate
+                pb_ratio = info.get("priceToBook", np.nan)
+                if pd.isna(pb_ratio) or pb_ratio <= 0:
+                    pb_ratio = safe_divide(market_cap, equity_latest)
+                
+                ps_ratio = info.get("priceToSalesTrailing12Months", np.nan)
+                if pd.isna(ps_ratio) or ps_ratio <= 0:
+                    ps_ratio = safe_divide(market_cap, rev_latest)
                 
                 ev = market_cap + debt_latest - cash_latest if not np.isnan(market_cap) else np.nan
                 ev_to_revenue = safe_divide(ev, rev_latest)
-                ev_to_ebitda = safe_divide(ev, ebitda_latest)
+                
+                # Try to get EV/EBITDA from info first
+                ev_to_ebitda = info.get("enterpriseToEbitda", np.nan)
+                if pd.isna(ev_to_ebitda) or ev_to_ebitda <= 0:
+                    ev_to_ebitda = safe_divide(ev, ebitda_latest)
                 
                 price_to_fcf = safe_divide(market_cap, fcf_latest)
                 
@@ -1060,12 +1074,50 @@ def render_fundamental_comparison(tickers: List[str] = None) -> None:
                         "PEG": "{:.2f}",
                         "Market Cap": "${:,.0f}",
                         "Revenue Growth %": "{:.2f}"
-                    }, na_rep="-")
-                    .background_gradient(cmap="RdYlGn_r", subset=["P/E", "P/B", "P/S", "EV/EBITDA", "PEG"]),
+                    }, na_rep="-"),
                     use_container_width=True
                 )
                 
                 st.caption("💡 Lower multiples generally indicate cheaper valuation (except for high-growth stocks)")
+                
+                # Add valuation interpretation
+                val_clean = val_df[["P/E", "P/B", "P/S", "EV/EBITDA", "PEG"]].copy()
+                
+                # Show table with conditional formatting
+                def color_valuation(val):
+                    """Color cells based on valuation levels"""
+                    if pd.isna(val):
+                        return ''
+                    try:
+                        val = float(val)
+                        if val < 0:
+                            return 'background-color: #ffcccc'  # Light red for negative
+                        elif val > 100:
+                            return 'background-color: #ffcccc'  # Light red for extreme
+                        elif val < 15:
+                            return 'background-color: #ccffcc'  # Light green for low
+                        elif val < 25:
+                            return 'background-color: #ffffcc'  # Light yellow for medium
+                        else:
+                            return 'background-color: #ffddcc'  # Light orange for high
+                    except:
+                        return ''
+                
+                st.dataframe(
+                    val_df.style.format({
+                        "P/E": "{:.2f}",
+                        "P/B": "{:.2f}",
+                        "P/S": "{:.2f}",
+                        "Price/FCF": "{:.2f}",
+                        "EV/Revenue": "{:.2f}",
+                        "EV/EBITDA": "{:.2f}",
+                        "PEG": "{:.2f}",
+                        "Market Cap": "${:,.0f}",
+                        "Revenue Growth %": "{:.2f}"
+                    }, na_rep="-")
+                    .applymap(color_valuation, subset=["P/E", "P/B", "P/S", "EV/EBITDA", "PEG"]),
+                    use_container_width=True
+                )
                 
                 col1, col2 = st.columns(2)
                 
