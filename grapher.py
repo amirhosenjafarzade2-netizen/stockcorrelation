@@ -498,13 +498,22 @@ def render_grapher():
             # TAB 2: PROFITABILITY
             with tab2:
                 st.markdown("### Profit Margins")
-                if not revenue.empty and all(not x.empty for x in [gross_profit, operating_income, net_income]):
-                    margins = pd.DataFrame({
-                        "Gross Margin": (gross_profit / revenue) * 100,
-                        "Operating Margin": (operating_income / revenue) * 100,
-                        "Net Margin": (net_income / revenue) * 100
-                    })
-                    plot_multi(margins, "Margins Over Time", "Margin (%)", ["#ff7f0e", "#d62728", "#9467bd"])
+                # Check all series exist and have data
+                can_calc_margins = (not revenue.empty and not gross_profit.empty and 
+                                   not operating_income.empty and not net_income.empty)
+                
+                if can_calc_margins:
+                    try:
+                        margins = pd.DataFrame({
+                            "Gross Margin": (gross_profit / revenue) * 100,
+                            "Operating Margin": (operating_income / revenue) * 100,
+                            "Net Margin": (net_income / revenue) * 100
+                        })
+                        plot_multi(margins, "Margins Over Time", "Margin (%)", ["#ff7f0e", "#d62728", "#9467bd"])
+                    except Exception as e:
+                        st.warning(f"Could not calculate margins: {str(e)}")
+                else:
+                    st.info("📊 Margin data not available - missing required financial metrics")
                     
                     col1, col2, col3 = st.columns(3)
                     with col1:
@@ -519,13 +528,19 @@ def render_grapher():
                 
                 st.markdown("### Absolute Profitability")
                 if not operating_income.empty or not net_income.empty:
-                    profit_df = pd.DataFrame({"Operating Income": operating_income, "Net Income": net_income})
-                    plot_multi(profit_df, "Operating vs Net Income", "Income (USD)", ["#17becf", "#bcbd22"])
+                    try:
+                        profit_df = pd.DataFrame({"Operating Income": operating_income, "Net Income": net_income})
+                        plot_multi(profit_df, "Operating vs Net Income", "Income (USD)", ["#17becf", "#bcbd22"])
+                    except Exception as e:
+                        st.warning(f"Could not plot profitability: {str(e)}")
                 
                 st.markdown("### Operating Expenses")
                 if not rd_expense.empty or not sga_expense.empty:
-                    opex_df = pd.DataFrame({"R&D": rd_expense, "SG&A": sga_expense})
-                    plot_multi(opex_df, "R&D and SG&A Expenses", "Expense (USD)", ["#e377c2", "#7f7f7f"])
+                    try:
+                        opex_df = pd.DataFrame({"R&D": rd_expense, "SG&A": sga_expense})
+                        plot_multi(opex_df, "R&D and SG&A Expenses", "Expense (USD)", ["#e377c2", "#7f7f7f"])
+                    except Exception as e:
+                        st.warning(f"Could not plot expenses: {str(e)}")
 
             # TAB 3: CASH FLOW
             with tab3:
@@ -557,9 +572,12 @@ def render_grapher():
                 
                 st.markdown("### Earnings Quality")
                 if not ocf.empty and not net_income.empty:
-                    eq_df = pd.DataFrame({"Operating Cash Flow": ocf, "Net Income": net_income})
-                    plot_multi(eq_df, "Cash Flow vs Earnings", ["#1f77b4", "#ff7f0e"])
-                    st.info("💡 High-quality earnings: OCF ≥ Net Income")
+                    try:
+                        eq_df = pd.DataFrame({"Operating Cash Flow": ocf, "Net Income": net_income})
+                        plot_multi(eq_df, "Cash Flow vs Earnings", ["#1f77b4", "#ff7f0e"])
+                        st.info("💡 High-quality earnings: OCF ≥ Net Income")
+                    except Exception as e:
+                        st.warning(f"Could not plot earnings quality: {str(e)}")
                 
                 st.markdown("### Stock-Based Compensation")
                 if not sbc.empty and sbc.abs().sum() > 0:
@@ -575,21 +593,27 @@ def render_grapher():
             with tab4:
                 st.markdown("### Assets & Liabilities")
                 if not total_assets.empty and not total_liabilities.empty:
-                    bal_df = pd.DataFrame({
-                        "Total Assets": total_assets,
-                        "Total Liabilities": total_liabilities,
-                        "Equity": stockholders_equity if not stockholders_equity.empty else total_assets - total_liabilities
-                    })
-                    plot_multi(bal_df, "Balance Sheet Components", "Amount (USD)", ["#2ca02c", "#d62728", "#1f77b4"])
+                    try:
+                        bal_df = pd.DataFrame({
+                            "Total Assets": total_assets,
+                            "Total Liabilities": total_liabilities,
+                            "Equity": stockholders_equity if not stockholders_equity.empty else total_assets - total_liabilities
+                        })
+                        plot_multi(bal_df, "Balance Sheet Components", "Amount (USD)", ["#2ca02c", "#d62728", "#1f77b4"])
+                    except Exception as e:
+                        st.warning(f"Could not plot balance sheet: {str(e)}")
                 
                 st.markdown("### Debt & Cash Position")
                 if not total_debt.empty or not cash.empty:
-                    debt_df = pd.DataFrame({
-                        "Total Debt": total_debt,
-                        "Cash": cash,
-                        "Net Debt": total_debt - cash
-                    })
-                    plot_multi(debt_df, "Debt vs Cash", "Amount (USD)", ["#d62728", "#2ca02c", "#ff7f0e"])
+                    try:
+                        debt_df = pd.DataFrame({
+                            "Total Debt": total_debt,
+                            "Cash": cash,
+                            "Net Debt": total_debt - cash
+                        })
+                        plot_multi(debt_df, "Debt vs Cash", "Amount (USD)", ["#d62728", "#2ca02c", "#ff7f0e"])
+                    except Exception as e:
+                        st.warning(f"Could not plot debt position: {str(e)}")
                     
                     col1, col2, col3 = st.columns(3)
                     with col1:
@@ -604,76 +628,120 @@ def render_grapher():
                 
                 st.markdown("### Share Count Evolution")
                 if not shares_basic.empty or not shares_diluted.empty:
-                    shares_df = pd.DataFrame({"Basic Shares": shares_basic, "Diluted Shares": shares_diluted})
-                    plot_multi(shares_df, "Outstanding Shares", "Shares", ["#1f77b4", "#ff7f0e"])
+                    try:
+                        shares_df = pd.DataFrame({"Basic Shares": shares_basic, "Diluted Shares": shares_diluted})
+                        plot_multi(shares_df, "Outstanding Shares", "Shares", ["#1f77b4", "#ff7f0e"])
+                    except Exception as e:
+                        st.warning(f"Could not plot shares: {str(e)}")
                     
                     if not shares_diluted.empty and len(shares_diluted.dropna()) > 1:
-                        share_change = shares_diluted.pct_change() * -100
-                        if not share_change.dropna().empty:
-                            st.markdown("### Share Count Change")
-                            plot_line(share_change.dropna(), "Share Change (+ = Buyback, - = Dilution)", "% Change", "#e377c2")
+                        try:
+                            share_change = shares_diluted.pct_change() * -100
+                            if not share_change.dropna().empty:
+                                st.markdown("### Share Count Change")
+                                plot_line(share_change.dropna(), "Share Change (+ = Buyback, - = Dilution)", "% Change", "#e377c2")
+                        except Exception as e:
+                            st.warning(f"Could not calculate share change: {str(e)}")
 
             # TAB 5: RATIOS
             with tab5:
                 st.markdown("### Return on Invested Capital (ROIC)")
                 if not net_income.empty and not total_assets.empty:
-                    nopat = net_income + tax.abs()
-                    inv_cap = total_assets - cash - total_debt
-                    inv_cap_lag = inv_cap.shift(1)
-                    roic = (nopat / inv_cap_lag) * 100
-                    roic = roic.replace([np.inf, -np.inf], np.nan)
-                    
-                    if not roic.dropna().empty:
-                        plot_line(roic.dropna(), "Return on Invested Capital", "ROIC (%)", "#7f7f7f")
-                        latest = float(roic.dropna().iloc[-1]) if len(roic.dropna()) > 0 else 0
-                        st.metric("Latest ROIC", f"{latest:.1f}%")
-                        st.info("💡 Benchmark: ROIC > 15% good, > 20% excellent")
+                    try:
+                        nopat = net_income + tax.abs()
+                        inv_cap = total_assets - cash - total_debt
+                        inv_cap_lag = inv_cap.shift(1)
+                        roic = (nopat / inv_cap_lag) * 100
+                        roic = roic.replace([np.inf, -np.inf], np.nan)
+                        
+                        if not roic.dropna().empty:
+                            plot_line(roic.dropna(), "Return on Invested Capital", "ROIC (%)", "#7f7f7f")
+                            latest = float(roic.dropna().iloc[-1]) if len(roic.dropna()) > 0 else 0
+                            st.metric("Latest ROIC", f"{latest:.1f}%")
+                            st.info("💡 Benchmark: ROIC > 15% good, > 20% excellent")
+                    except Exception as e:
+                        st.warning(f"Could not calculate ROIC: {str(e)}")
                 
                 st.markdown("### Return on Equity (ROE)")
                 if not net_income.empty and not stockholders_equity.empty:
-                    equity_lag = stockholders_equity.shift(1)
-                    roe = (net_income / equity_lag) * 100
-                    roe = roe.replace([np.inf, -np.inf], np.nan)
-                    
-                    if not roe.dropna().empty:
-                        plot_line(roe.dropna(), "Return on Equity", "ROE (%)", "#17becf")
-                        latest = float(roe.dropna().iloc[-1]) if len(roe.dropna()) > 0 else 0
-                        st.metric("Latest ROE", f"{latest:.1f}%")
+                    try:
+                        equity_lag = stockholders_equity.shift(1)
+                        roe = (net_income / equity_lag) * 100
+                        roe = roe.replace([np.inf, -np.inf], np.nan)
+                        
+                        if not roe.dropna().empty:
+                            plot_line(roe.dropna(), "Return on Equity", "ROE (%)", "#17becf")
+                            latest = float(roe.dropna().iloc[-1]) if len(roe.dropna()) > 0 else 0
+                            st.metric("Latest ROE", f"{latest:.1f}%")
+                    except Exception as e:
+                        st.warning(f"Could not calculate ROE: {str(e)}")
                 
                 st.markdown("### Debt-to-Equity Ratio")
                 if not total_debt.empty and not stockholders_equity.empty:
-                    de = total_debt / stockholders_equity
-                    de = de.replace([np.inf, -np.inf], np.nan)
-                    
-                    if not de.dropna().empty:
-                        plot_line(de.dropna(), "Debt-to-Equity Ratio", "Ratio", "#d62728")
-                        latest = float(de.dropna().iloc[-1]) if len(de.dropna()) > 0 else 0
-                        st.metric("Latest D/E", f"{latest:.2f}x")
-                        st.info("💡 Benchmark: < 1.0 conservative (varies by industry)")
+                    try:
+                        de = total_debt / stockholders_equity
+                        de = de.replace([np.inf, -np.inf], np.nan)
+                        
+                        if not de.dropna().empty:
+                            plot_line(de.dropna(), "Debt-to-Equity Ratio", "Ratio", "#d62728")
+                            latest = float(de.dropna().iloc[-1]) if len(de.dropna()) > 0 else 0
+                            st.metric("Latest D/E", f"{latest:.2f}x")
+                            st.info("💡 Benchmark: < 1.0 conservative (varies by industry)")
+                    except Exception as e:
+                        st.warning(f"Could not calculate D/E ratio: {str(e)}")
                 
                 st.markdown("### Per-Share Metrics")
                 if not net_income.empty and not shares_diluted.empty:
                     col1, col2 = st.columns(2)
                     with col1:
-                        eps = net_income / shares_diluted
-                        if not eps.dropna().empty:
-                            plot_line(eps.dropna(), "Earnings Per Share (EPS)", "EPS ($)", "#2ca02c", True)
+                        try:
+                            eps = net_income / shares_diluted
+                            if not eps.dropna().empty:
+                                plot_line(eps.dropna(), "Earnings Per Share (EPS)", "EPS ($)", "#2ca02c", True)
+                        except Exception as e:
+                            st.warning(f"Could not calculate EPS: {str(e)}")
                     with col2:
                         if not ocf.empty:
-                            cfps = ocf / shares_diluted
-                            if not cfps.dropna().empty:
-                                plot_line(cfps.dropna(), "Cash Flow Per Share", "CFPS ($)", "#1f77b4", True)
+                            try:
+                                cfps = ocf / shares_diluted
+                                if not cfps.dropna().empty:
+                                    plot_line(cfps.dropna(), "Cash Flow Per Share", "CFPS ($)", "#1f77b4", True)
+                            except Exception as e:
+                                st.warning(f"Could not calculate CFPS: {str(e)}")
 
             # TAB 6: ANALYST FORECASTS
             with tab6:
                 st.markdown("### 🔮 Analyst Forecasts & Predictions")
                 
-                if analyst_data and any(analyst_data.values()):
+                has_analyst_data = False
+                if analyst_data:
+                    for key, value in analyst_data.items():
+                        if value is not None:
+                            if isinstance(value, pd.DataFrame):
+                                if not value.empty:
+                                    has_analyst_data = True
+                                    break
+                            elif isinstance(value, dict):
+                                if value:
+                                    has_analyst_data = True
+                                    break
+                            else:
+                                has_analyst_data = True
+                                break
+                
+                if has_analyst_data:
                     
                     # Price Targets
                     st.markdown("#### 🎯 Analyst Price Targets")
                     price_target = analyst_data.get('price_target')
-                    if price_target and not isinstance(price_target, pd.DataFrame):
+                    
+                    # Check if price_target is a valid dict (not a DataFrame)
+                    is_valid_target = False
+                    if price_target is not None:
+                        if isinstance(price_target, dict) and not isinstance(price_target, pd.DataFrame):
+                            is_valid_target = True
+                    
+                    if is_valid_target:
                         col1, col2, col3, col4 = st.columns(4)
                         with col1:
                             current = price_target.get('current', 0)
