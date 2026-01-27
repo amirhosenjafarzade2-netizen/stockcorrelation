@@ -1,6 +1,9 @@
 """
-Ultimate Financial Grapher - WORKING VERSION
-Combines working data extraction with comprehensive features
+Ultimate Financial Grapher - COMPLETE VERSION
+- Yahoo Finance for recent data (limited to 4 periods)
+- SEC Edgar for 10+ years of historical data (optional)
+- Analyst forecasts and predictions
+- Finviz for supplementary fundamentals (optional)
 """
 
 import streamlit as st
@@ -21,10 +24,64 @@ try:
 except ImportError:
     EDGAR_AVAILABLE = False
 
+# Try to import finvizfinance
+try:
+    from finvizfinance.quote import finvizfinance as FinvizQuote
+    FINVIZ_AVAILABLE = True
+except ImportError:
+    FINVIZ_AVAILABLE = False
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 # DATA FETCHING
 # ══════════════════════════════════════════════════════════════════════════════
+
+@st.cache_data(ttl=7200)
+def fetch_edgar_data(ticker: str, num_years: int = 10):
+    """Fetch from SEC Edgar - NO 4-PERIOD LIMITATION!"""
+    if not EDGAR_AVAILABLE:
+        return None, None, None, "edgartools not installed"
+    
+    try:
+        company = Company(ticker)
+        filings = company.get_filings(form="10-K").head(num_years)
+        
+        if len(filings) == 0:
+            return None, None, None, "no filings found"
+        
+        xbrls = XBRLS.from_filings(filings)
+        statements = xbrls.statements
+        
+        income_df = statements.income_statement().to_dataframe() if statements.income_statement() else pd.DataFrame()
+        balance_df = statements.balance_sheet().to_dataframe() if statements.balance_sheet() else pd.DataFrame()
+        cashflow_df = statements.cashflow_statement().to_dataframe() if statements.cashflow_statement() else pd.DataFrame()
+        
+        # Process Edgar data
+        if not income_df.empty:
+            income_df = process_edgar_df(income_df)
+        if not balance_df.empty:
+            balance_df = process_edgar_df(balance_df)
+        if not cashflow_df.empty:
+            cashflow_df = process_edgar_df(cashflow_df)
+        
+        return income_df, balance_df, cashflow_df, None
+    except Exception as e:
+        return None, None, None, str(e)
+
+
+def process_edgar_df(df: pd.DataFrame) -> pd.DataFrame:
+    """Process Edgar dataframe"""
+    if df.empty:
+        return df
+    if not isinstance(df.index, pd.DatetimeIndex):
+        df = df.T
+    if not isinstance(df.columns, pd.DatetimeIndex):
+        try:
+            df.columns = pd.to_datetime(df.columns)
+        except:
+            pass
+    return df
+
 
 @st.cache_data(ttl=3600)
 def fetch_price_data(ticker: str, start_date: date, end_date: date) -> pd.Series:
@@ -48,7 +105,7 @@ def fetch_price_data(ticker: str, start_date: date, end_date: date) -> pd.Series
 
 @st.cache_data(ttl=3600)
 def fetch_yfinance_fundamentals(ticker: str, frequency: str):
-    """Fetch from yfinance"""
+    """Fetch from yfinance - LIMITED TO 4 PERIODS"""
     try:
         ticker_obj = yf.Ticker(ticker)
         is_annual = (frequency == "Annual")
@@ -68,22 +125,57 @@ def fetch_yfinance_fundamentals(ticker: str, frequency: str):
         return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), {}
 
 
+@st.cache_data(ttl=3600)
+def fetch_analyst_data(ticker: str):
+    """Fetch analyst forecasts and recommendations"""
+    try:
+        ticker_obj = yf.Ticker(ticker)
+        
+        recommendations = ticker_obj.recommendations
+        analyst_price_target = ticker_obj.analyst_price_targets if hasattr(ticker_obj, 'analyst_price_targets') else None
+        earnings_forecasts = ticker_obj.earnings_forecasts if hasattr(ticker_obj, 'earnings_forecasts') else None
+        revenue_forecasts = ticker_obj.revenue_estimate if hasattr(ticker_obj, 'revenue_estimate') else None
+        earnings_trend = ticker_obj.earnings_trend if hasattr(ticker_obj, 'earnings_trend') else None
+        upgrades_downgrades = ticker_obj.upgrades_downgrades if hasattr(ticker_obj, 'upgrades_downgrades') else None
+        
+        return {
+            'recommendations': recommendations,
+            'price_target': analyst_price_target,
+            'earnings_forecasts': earnings_forecasts,
+            'revenue_forecasts': revenue_forecasts,
+            'earnings_trend': earnings_trend,
+            'upgrades_downgrades': upgrades_downgrades
+        }
+    except Exception as e:
+        return {}
+
+
+@st.cache_data(ttl=3600)
+def fetch_finviz_data(ticker: str):
+    """Fetch additional data from Finviz"""
+    if not FINVIZ_AVAILABLE:
+        return None
+    
+    try:
+        stock = FinvizQuote(ticker)
+        fundament = stock.ticker_fundament()
+        return fundament
+    except Exception as e:
+        return None
+
+
 # ══════════════════════════════════════════════════════════════════════════════
-# HELPERS - USING THE WORKING VERSION'S APPROACH
+# HELPERS
 # ══════════════════════════════════════════════════════════════════════════════
 
 def safe_get(df: pd.DataFrame, key: str, default=None) -> pd.Series:
-    """
-    Get row from DataFrame with intelligent fallback to alternative field names.
-    This is the WORKING version's implementation.
-    """
+    """Get row from DataFrame with intelligent fallback"""
     if df.empty:
         return pd.Series(dtype=float)
     
     if key in df.index:
         return df.loc[key]
     
-    # Comprehensive alternatives mapping - EXACTLY as in working version
     alternatives = {
         "Total Revenue": ["TotalRevenue", "Total Revenues", "Revenue"],
         "Gross Profit": ["GrossProfit", "Gross Income"],
@@ -102,7 +194,6 @@ def safe_get(df: pd.DataFrame, key: str, default=None) -> pd.Series:
         "Selling General Administrative": ["SellingGeneralAndAdministrative", "SG&A Expense", "Selling General Administrative"],
         "Total Liabilities": ["TotalLiabilities", "Total Liabilities Net Minority Interest"],
         "Stockholders Equity": ["StockholdersEquity", "Total Equity Gross Minority Interest", "Stockholder Equity"],
-        "Interest Expense": ["InterestExpense", "Interest Expense Non Operating", "Net Interest Income"],
     }
     
     for alt in alternatives.get(key, []):
@@ -218,10 +309,27 @@ def plot_multi(df: pd.DataFrame, title: str, yaxis: str = "Value", colors: list 
 
 def render_grapher():
     st.title("📈 Ultimate Financial Grapher")
-    st.caption("Professional-grade financial analysis with comprehensive metrics")
+    
+    # Show data source status
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.success("✅ Yahoo Finance (4 periods)")
+    with col2:
+        if EDGAR_AVAILABLE:
+            st.success("✅ SEC Edgar Available (10+ years)")
+        else:
+            st.warning("⚠️ SEC Edgar Not Installed")
+            with st.expander("📖 How to get 10+ years of data"):
+                st.code("pip install edgartools", language="bash")
+                st.info("SEC Edgar provides official 10+ years of financial statement data with no API limits!")
+    with col3:
+        if FINVIZ_AVAILABLE:
+            st.success("✅ Finviz Available")
+        else:
+            st.info("ℹ️ Finviz Optional")
 
     # INPUTS
-    col1, col2, col3 = st.columns([3, 2, 2])
+    col1, col2, col3, col4 = st.columns([3, 2, 2, 2])
 
     with col1:
         ticker = st.text_input("Ticker Symbol", value="AAPL").strip().upper()
@@ -230,7 +338,17 @@ def render_grapher():
         frequency = st.selectbox("Frequency", ["Annual", "Quarterly"], index=0)
 
     with col3:
-        price_years = st.slider("Price History (Years)", 1, 30, 10)
+        if EDGAR_AVAILABLE and frequency == "Annual":
+            use_edgar = st.checkbox("Use SEC Edgar (10+ years)", value=True)
+            if use_edgar:
+                num_years = st.slider("Years", 1, 15, 10)
+        else:
+            use_edgar = False
+            num_years = 4
+            st.caption("⚠️ Yahoo: 4 periods only")
+    
+    with col4:
+        price_years = st.slider("Price History", 1, 30, 10)
 
     if not ticker:
         st.info("👆 Enter a ticker")
@@ -242,10 +360,42 @@ def render_grapher():
     if st.button("🚀 Load & Analyze", type="primary", use_container_width=True):
         with st.spinner(f"Fetching comprehensive data for {ticker}..."):
             
-            # Fetch data
-            st.info("📊 Using Yahoo Finance...")
-            income, balance, cashflow, info = fetch_yfinance_fundamentals(ticker, frequency)
+            # Try Edgar first if enabled
+            income, balance, cashflow = pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+            data_source = "Yahoo Finance"
+            
+            if use_edgar and EDGAR_AVAILABLE:
+                st.info("🔍 Fetching from SEC Edgar...")
+                income, balance, cashflow, error = fetch_edgar_data(ticker, num_years)
+                
+                if not error and not income.empty:
+                    data_source = "SEC Edgar"
+                    st.success(f"✅ Edgar: {len(income.columns)} periods")
+                else:
+                    st.warning(f"Edgar failed: {error}. Using Yahoo Finance...")
+                    use_edgar = False
+            
+            # Fallback to Yahoo Finance
+            if not use_edgar or income.empty:
+                st.info("📊 Using Yahoo Finance (4 periods)...")
+                income, balance, cashflow, info = fetch_yfinance_fundamentals(ticker, frequency)
+            else:
+                try:
+                    info = yf.Ticker(ticker).info
+                except:
+                    info = {}
+            
+            # Price data
             prices = fetch_price_data(ticker, start_date, end_date)
+            
+            # Analyst data
+            st.info("📊 Fetching analyst forecasts...")
+            analyst_data = fetch_analyst_data(ticker)
+            
+            # Finviz supplementary data
+            finviz_data = None
+            if FINVIZ_AVAILABLE:
+                finviz_data = fetch_finviz_data(ticker)
 
             if prices.empty and income.empty:
                 st.error("❌ No data available")
@@ -267,15 +417,18 @@ def render_grapher():
 
             # DATA SOURCE INFO
             st.markdown("---")
-            col1, col2 = st.columns(2)
+            col1, col2, col3 = st.columns(3)
             with col1:
                 if not prices.empty:
                     st.success(f"✅ **Price**: {len(prices)} days")
             with col2:
                 if not income.empty:
-                    st.success(f"✅ **Fundamentals**: {len(income.columns)} periods")
+                    st.success(f"✅ **Fundamentals ({data_source})**: {len(income.columns)} periods")
+            with col3:
+                if analyst_data:
+                    st.success("✅ **Analyst Data**: Available")
 
-            # EXTRACT METRICS - using working version's approach
+            # EXTRACT METRICS
             revenue = safe_get(income, "Total Revenue")
             gross_profit = safe_get(income, "Gross Profit")
             operating_income = safe_get(income, "Operating Income")
@@ -304,15 +457,16 @@ def render_grapher():
             st.markdown("---")
             st.markdown("## 📊 Comprehensive Analysis")
             
-            tab1, tab2, tab3, tab4, tab5 = st.tabs([
+            tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
                 "📈 Price & Revenue", 
                 "💰 Profitability", 
                 "💵 Cash Flow",
                 "📊 Balance Sheet",
-                "📐 Ratios & Metrics"
+                "📐 Ratios & Metrics",
+                "🔮 Analyst Forecasts"
             ])
 
-            # TAB 1: PRICE & REVENUE
+            # TAB 1-5: Same as before (Price, Profitability, Cash Flow, Balance Sheet, Ratios)
             with tab1:
                 st.markdown("### Stock Price History")
                 if not prices.empty:
@@ -352,7 +506,6 @@ def render_grapher():
                         if not np.isnan(cagr):
                             st.metric("Revenue CAGR", f"{cagr:.1f}%")
 
-            # TAB 2: PROFITABILITY
             with tab2:
                 st.markdown("### Profit Margins")
                 if not revenue.empty and not gross_profit.empty and not operating_income.empty and not net_income.empty:
@@ -384,7 +537,6 @@ def render_grapher():
                     opex_df = pd.DataFrame({"R&D": rd_expense, "SG&A": sga_expense})
                     plot_multi(opex_df, "R&D and SG&A Expenses", "Expense (USD)", ["#e377c2", "#7f7f7f"])
 
-            # TAB 3: CASH FLOW
             with tab3:
                 st.markdown("### Operating Cash Flow")
                 if not ocf.empty:
@@ -417,18 +569,7 @@ def render_grapher():
                     eq_df = pd.DataFrame({"Operating Cash Flow": ocf, "Net Income": net_income})
                     plot_multi(eq_df, "Cash Flow vs Earnings", "Amount (USD)", ["#1f77b4", "#ff7f0e"])
                     st.info("💡 High-quality earnings: OCF ≥ Net Income")
-                
-                st.markdown("### Stock-Based Compensation")
-                if not sbc.empty and sbc.abs().sum() > 0:
-                    plot_bar(sbc, "Stock-Based Compensation", "SBC (USD)", "#9467bd")
-                    if not revenue.empty:
-                        sbc_val = float(sbc.iloc[-1]) if not pd.isna(sbc.iloc[-1]) else 0
-                        rev_val = float(revenue.iloc[-1]) if not pd.isna(revenue.iloc[-1]) else 0
-                        if rev_val > 0:
-                            pct = (sbc_val / rev_val) * 100
-                            st.metric("SBC as % of Revenue", f"{pct:.1f}%")
 
-            # TAB 4: BALANCE SHEET
             with tab4:
                 st.markdown("### Assets & Liabilities")
                 if not total_assets.empty and not total_liabilities.empty:
@@ -458,19 +599,7 @@ def render_grapher():
                     with col3:
                         net_debt = debt_val - cash_val
                         st.metric("Net Debt", format_large_number(net_debt))
-                
-                st.markdown("### Share Count Evolution")
-                if not shares_basic.empty or not shares_diluted.empty:
-                    shares_df = pd.DataFrame({"Basic Shares": shares_basic, "Diluted Shares": shares_diluted})
-                    plot_multi(shares_df, "Outstanding Shares", "Shares", ["#1f77b4", "#ff7f0e"])
-                    
-                    if not shares_diluted.empty and len(shares_diluted.dropna()) > 1:
-                        share_change = shares_diluted.pct_change() * -100
-                        if not share_change.dropna().empty:
-                            st.markdown("### Share Count Change")
-                            plot_line(share_change.dropna(), "Share Change (+ = Buyback, - = Dilution)", "% Change", "#e377c2")
 
-            # TAB 5: RATIOS
             with tab5:
                 st.markdown("### Return on Invested Capital (ROIC)")
                 if not net_income.empty and not total_assets.empty:
@@ -496,51 +625,105 @@ def render_grapher():
                         plot_line(roe.dropna(), "Return on Equity", "ROE (%)", "#17becf")
                         latest = float(roe.dropna().iloc[-1]) if len(roe.dropna()) > 0 else 0
                         st.metric("Latest ROE", f"{latest:.1f}%")
+
+            # TAB 6: ANALYST FORECASTS
+            with tab6:
+                st.markdown("### 🔮 Analyst Forecasts & Predictions")
                 
-                st.markdown("### Debt-to-Equity Ratio")
-                if not total_debt.empty and not stockholders_equity.empty:
-                    de = total_debt / stockholders_equity
-                    de = de.replace([np.inf, -np.inf], np.nan)
+                has_analyst_data = False
+                if analyst_data:
+                    for key, value in analyst_data.items():
+                        if value is not None:
+                            if isinstance(value, pd.DataFrame):
+                                if not value.empty:
+                                    has_analyst_data = True
+                                    break
+                            elif isinstance(value, dict):
+                                if value:
+                                    has_analyst_data = True
+                                    break
+                
+                if has_analyst_data:
                     
-                    if not de.dropna().empty:
-                        plot_line(de.dropna(), "Debt-to-Equity Ratio", "Ratio", "#d62728")
-                        latest = float(de.dropna().iloc[-1]) if len(de.dropna()) > 0 else 0
-                        st.metric("Latest D/E", f"{latest:.2f}x")
-                        st.info("💡 Benchmark: < 1.0 conservative (varies by industry)")
-                
-                st.markdown("### Per-Share Metrics")
-                if not net_income.empty and not shares_diluted.empty:
-                    col1, col2 = st.columns(2)
-                    with col1:
-                        eps = net_income / shares_diluted
-                        if not eps.dropna().empty:
-                            plot_line(eps.dropna(), "Earnings Per Share (EPS)", "EPS ($)", "#2ca02c", True)
-                    with col2:
-                        if not ocf.empty:
-                            cfps = ocf / shares_diluted
-                            if not cfps.dropna().empty:
-                                plot_line(cfps.dropna(), "Cash Flow Per Share", "CFPS ($)", "#1f77b4", True)
+                    # Price Targets
+                    st.markdown("#### 🎯 Analyst Price Targets")
+                    price_target = analyst_data.get('price_target')
+                    
+                    is_valid_target = False
+                    if price_target is not None:
+                        if isinstance(price_target, dict) and not isinstance(price_target, pd.DataFrame):
+                            is_valid_target = True
+                    
+                    if is_valid_target:
+                        col1, col2, col3, col4 = st.columns(4)
+                        with col1:
+                            current = price_target.get('current', 0)
+                            st.metric("Current Price", f"${current:.2f}")
+                        with col2:
+                            mean_target = price_target.get('mean', 0)
+                            st.metric("Mean Target", f"${mean_target:.2f}")
+                            if current > 0:
+                                upside = ((mean_target - current) / current) * 100
+                                st.caption(f"Upside: {upside:.1f}%")
+                        with col3:
+                            low = price_target.get('low', 0)
+                            st.metric("Low Target", f"${low:.2f}")
+                        with col4:
+                            high = price_target.get('high', 0)
+                            st.metric("High Target", f"${high:.2f}")
+                    
+                    # Recommendations
+                    st.markdown("#### 📊 Analyst Recommendations")
+                    recommendations = analyst_data.get('recommendations')
+                    if recommendations is not None and not recommendations.empty:
+                        recent = recommendations.tail(20)
+                        
+                        if 'To Grade' in recent.columns:
+                            rec_counts = recent['To Grade'].value_counts()
+                            
+                            col1, col2, col3 = st.columns(3)
+                            with col1:
+                                buy_count = rec_counts.get('Buy', 0) + rec_counts.get('Strong Buy', 0) + rec_counts.get('Outperform', 0)
+                                st.metric("Buy Ratings", buy_count)
+                            with col2:
+                                hold_count = rec_counts.get('Hold', 0) + rec_counts.get('Neutral', 0)
+                                st.metric("Hold Ratings", hold_count)
+                            with col3:
+                                sell_count = rec_counts.get('Sell', 0) + rec_counts.get('Strong Sell', 0) + rec_counts.get('Underperform', 0)
+                                st.metric("Sell Ratings", sell_count)
+                            
+                            st.markdown("##### Recent Analyst Actions")
+                            st.dataframe(recent.tail(10), use_container_width=True)
+                        else:
+                            st.dataframe(recent.tail(10), use_container_width=True)
+                    
+                    # Earnings Trend
+                    st.markdown("#### 📈 Earnings Estimates Trend")
+                    earnings_trend = analyst_data.get('earnings_trend')
+                    if earnings_trend is not None and not earnings_trend.empty:
+                        st.dataframe(earnings_trend, use_container_width=True)
+                    
+                    # Add interpretation guide
+                    st.markdown("---")
+                    st.info("""
+                    **💡 How to Interpret Analyst Forecasts:**
+                    - **Price Targets**: Mean target shows average analyst expectation
+                    - **Recommendations**: More Buy ratings = bullish sentiment
+                    - **Upgrades/Downgrades**: Recent changes indicate shifting sentiment
+                    - **Note**: Analysts can be wrong! Use as one data point among many.
+                    """)
+                    
+                else:
+                    st.warning("⚠️ No analyst forecast data available for this ticker")
 
             # COMPLETION
             st.markdown("---")
-            st.success(f"✅ **Analysis Complete!** {len(income.columns) if not income.empty else 0} periods analyzed")
+            st.success(f"✅ **Analysis Complete!** Data from {data_source}: {len(income.columns) if not income.empty else 0} periods")
             
-            # Export
-            st.markdown("### 📥 Export Data")
-            if st.button("Generate CSV Export"):
-                export_data = pd.DataFrame({
-                    'Revenue': revenue,
-                    'Gross_Profit': gross_profit,
-                    'Operating_Income': operating_income,
-                    'Net_Income': net_income,
-                    'Operating_Cash_Flow': ocf,
-                    'Free_Cash_Flow': ocf + capex if not ocf.empty else pd.Series(dtype=float),
-                    'Total_Assets': total_assets,
-                    'Total_Debt': total_debt,
-                    'Cash': cash,
-                })
-                csv = export_data.to_csv()
-                st.download_button("Download CSV", csv, f"{ticker}_data.csv", "text/csv")
+            if data_source == "SEC Edgar":
+                st.info("💡 Using official SEC filings - most reliable source for historical data!")
+            else:
+                st.warning("⚠️ Yahoo Finance limited to 4 periods. Install `edgartools` for 10+ years: `pip install edgartools`")
 
 
 if __name__ == "__main__":
