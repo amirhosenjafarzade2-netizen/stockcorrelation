@@ -367,16 +367,25 @@ def render_fundamental_comparison(tickers: List[str] = None) -> None:
                 ni_growth = calculate_growth_rate(net_income)
                 ni_cagr = calculate_cagr(net_income)
                 fcf_growth = calculate_growth_rate(fcf_calc)
-                eps_growth = calculate_growth_rate(net_income / shares) if not shares.empty else np.nan
+                
+                # Calculate EPS growth separately to ensure it's available for PEG
+                if not shares.empty and not net_income.empty:
+                    eps_series = net_income / shares
+                    eps_growth = calculate_growth_rate(eps_series)
+                else:
+                    eps_growth = np.nan
                 
                 # PEG - Calculate AFTER growth metrics are defined
+                # PEG = P/E / Earnings Growth Rate
                 peg_ratio = np.nan
-                if False and pd.notna(info.get('peg')):
+                if pd.notna(info.get('peg')) and info.get('peg') > 0:
                     peg_ratio = info['peg']
                 else:
-                    # Calculate PEG Ratio (now that revenue_growth is defined)
-                    if not pd.isna(pe_ratio) and not pd.isna(revenue_growth) and revenue_growth > 0:
-                        peg_ratio = pe_ratio / revenue_growth
+                    # Calculate PEG Ratio using EPS growth (not revenue growth)
+                    # Use EPS growth if available, otherwise fall back to NI growth
+                    earnings_growth = eps_growth if not pd.isna(eps_growth) else ni_growth
+                    if not pd.isna(pe_ratio) and not pd.isna(earnings_growth) and earnings_growth > 0 and pe_ratio > 0:
+                        peg_ratio = pe_ratio / earnings_growth
                 
                 # Time series for trends
                 gross_margin_ts = (gross_profit / revenue * 100) if not revenue.empty else pd.Series()
