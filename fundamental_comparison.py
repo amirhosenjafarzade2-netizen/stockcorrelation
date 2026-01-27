@@ -624,7 +624,7 @@ def render_fundamental_comparison(tickers: List[str] = None) -> None:
                         labels=grade_counts.index,
                         values=grade_counts.values,
                         hole=0.4,
-                        marker_colors=px.colors.sequential.RdYlGn_r
+                        marker_colors=px.colors.diverging.RdYlGn[::-1]
                     )])
                     
                     fig_grades.update_layout(height=400)
