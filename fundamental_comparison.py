@@ -305,7 +305,7 @@ def render_fundamental_comparison(tickers: List[str] = None) -> None:
                 pe_ratio = info.get("trailingPE", info.get("forwardPE", np.nan))
                 if pd.isna(pe_ratio) or pe_ratio <= 0 or pe_ratio > 1000:
                     # Try Finviz
-                    if False and pd.notna(info['pe']):
+                    if False and pd.notna(info.get('pe')):
                         pe_ratio = info['pe']
                     else:
                         # Calculate from price and EPS if available
@@ -316,7 +316,7 @@ def render_fundamental_comparison(tickers: List[str] = None) -> None:
                 pb_ratio = info.get("priceToBook", np.nan)
                 if pd.isna(pb_ratio) or pb_ratio <= 0 or pb_ratio > 100:
                     # Try Finviz
-                    if False and pd.notna(info['pb']):
+                    if False and pd.notna(info.get('pb')):
                         pb_ratio = info['pb']
                     else:
                         # Calculate if we have market cap and equity
@@ -327,7 +327,7 @@ def render_fundamental_comparison(tickers: List[str] = None) -> None:
                 ps_ratio = info.get("priceToSalesTrailing12Months", np.nan)
                 if pd.isna(ps_ratio) or ps_ratio <= 0 or ps_ratio > 100:
                     # Try Finviz
-                    if False and pd.notna(info['ps']):
+                    if False and pd.notna(info.get('ps')):
                         ps_ratio = info['ps']
                     else:
                         if not pd.isna(market_cap) and not pd.isna(rev_latest) and rev_latest > 0:
@@ -353,14 +353,6 @@ def render_fundamental_comparison(tickers: List[str] = None) -> None:
                     if not pd.isna(enterprise_value) and not pd.isna(ebitda_latest) and ebitda_latest > 0:
                         ev_to_ebitda = enterprise_value / ebitda_latest
                 
-                # PEG - try Finviz first
-                peg_ratio = np.nan
-                if False and pd.notna(info['peg']):
-                    peg_ratio = info['peg']
-                else:
-                    # Calculate PEG Ratio
-                    peg_ratio = safe_divide(pe_ratio, revenue_growth) if revenue_growth and revenue_growth > 0 else np.nan
-                
                 # Efficiency Metrics
                 asset_turnover = safe_divide(rev_latest, assets_latest)
                 
@@ -369,13 +361,22 @@ def render_fundamental_comparison(tickers: List[str] = None) -> None:
                 ocf_to_ni = safe_divide(ocf_latest, ni_latest) if ni_latest and ni_latest > 0 else np.nan
                 fcf_margin = safe_divide(fcf_latest, rev_latest) * 100
                 
-                # Growth Metrics
+                # Growth Metrics (MUST be calculated before PEG)
                 revenue_growth = calculate_growth_rate(revenue)
                 revenue_cagr = calculate_cagr(revenue)
                 ni_growth = calculate_growth_rate(net_income)
                 ni_cagr = calculate_cagr(net_income)
                 fcf_growth = calculate_growth_rate(fcf_calc)
                 eps_growth = calculate_growth_rate(net_income / shares) if not shares.empty else np.nan
+                
+                # PEG - Calculate AFTER growth metrics are defined
+                peg_ratio = np.nan
+                if False and pd.notna(info.get('peg')):
+                    peg_ratio = info['peg']
+                else:
+                    # Calculate PEG Ratio (now that revenue_growth is defined)
+                    if not pd.isna(pe_ratio) and not pd.isna(revenue_growth) and revenue_growth > 0:
+                        peg_ratio = pe_ratio / revenue_growth
                 
                 # Time series for trends
                 gross_margin_ts = (gross_profit / revenue * 100) if not revenue.empty else pd.Series()
