@@ -399,30 +399,37 @@ def render_grapher() -> None:
                         plot_line(prices, f"{ticker} Adjusted Close Price", 
                                  yaxis="Price (USD)", color="#1f77b4", show_growth=False)
                         
-                        # Price statistics
+                        # Price statistics - extract scalar values
                         col1, col2, col3, col4 = st.columns(4)
                         with col1:
-                            st.metric("Current Price", f"${prices.iloc[-1]:.2f}")
+                            current_price = float(prices.iloc[-1])
+                            st.metric("Current Price", f"${current_price:.2f}")
                         with col2:
-                            st.metric("52W High", f"${prices.max():.2f}")
+                            max_price = float(prices.max())
+                            st.metric("52W High", f"${max_price:.2f}")
                         with col3:
-                            st.metric("52W Low", f"${prices.min():.2f}")
+                            min_price = float(prices.min())
+                            st.metric("52W Low", f"${min_price:.2f}")
                         with col4:
-                            ytd_return = ((prices.iloc[-1] / prices.iloc[0]) - 1) * 100
+                            ytd_return = ((float(prices.iloc[-1]) / float(prices.iloc[0])) - 1) * 100
                             st.metric("Period Return", f"{ytd_return:.1f}%")
                     
                     st.markdown("### Revenue Growth")
                     if not revenue.empty:
                         plot_bar(revenue, "Total Revenue", yaxis="Revenue (USD)", color="#2ca02c")
                         
-                        # Revenue metrics
+                        # Revenue metrics - extract scalar values
                         col1, col2, col3 = st.columns(3)
                         with col1:
-                            st.metric("Latest Revenue", format_large_number(revenue.iloc[-1]))
+                            latest_rev = float(revenue.iloc[-1]) if not pd.isna(revenue.iloc[-1]) else 0
+                            st.metric("Latest Revenue", format_large_number(latest_rev))
                         with col2:
                             if len(revenue) > 1:
-                                rev_growth = ((revenue.iloc[-1] / revenue.iloc[-2]) - 1) * 100
-                                st.metric("Last Period Growth", f"{rev_growth:.1f}%")
+                                rev_last = float(revenue.iloc[-1]) if not pd.isna(revenue.iloc[-1]) else 0
+                                rev_prev = float(revenue.iloc[-2]) if not pd.isna(revenue.iloc[-2]) else 0
+                                if rev_prev > 0:
+                                    rev_growth = ((rev_last / rev_prev) - 1) * 100
+                                    st.metric("Last Period Growth", f"{rev_growth:.1f}%")
                         with col3:
                             cagr = calculate_cagr(revenue)
                             if not np.isnan(cagr):
@@ -440,14 +447,17 @@ def render_grapher() -> None:
                         plot_multi(margins, "Profit Margins Over Time", yaxis="Margin (%)", 
                                   colors=["#ff7f0e", "#d62728", "#9467bd"])
                         
-                        # Latest margins
+                        # Latest margins - extract scalar values
                         col1, col2, col3 = st.columns(3)
                         with col1:
-                            st.metric("Gross Margin", f"{margins['Gross Margin'].iloc[-1]:.1f}%")
+                            gross_margin = float(margins['Gross Margin'].iloc[-1]) if not pd.isna(margins['Gross Margin'].iloc[-1]) else 0
+                            st.metric("Gross Margin", f"{gross_margin:.1f}%")
                         with col2:
-                            st.metric("Operating Margin", f"{margins['Operating Margin'].iloc[-1]:.1f}%")
+                            op_margin = float(margins['Operating Margin'].iloc[-1]) if not pd.isna(margins['Operating Margin'].iloc[-1]) else 0
+                            st.metric("Operating Margin", f"{op_margin:.1f}%")
                         with col3:
-                            st.metric("Net Margin", f"{margins['Net Margin'].iloc[-1]:.1f}%")
+                            net_margin = float(margins['Net Margin'].iloc[-1]) if not pd.isna(margins['Net Margin'].iloc[-1]) else 0
+                            st.metric("Net Margin", f"{net_margin:.1f}%")
                     
                     st.markdown("### Absolute Profitability")
                     if not operating_income.empty or not net_income.empty:
@@ -481,14 +491,18 @@ def render_grapher() -> None:
                             plot_line(fcf, "Free Cash Flow (OCF + CapEx)", 
                                      yaxis="FCF (USD)", color="#2ca02c", show_growth=True)
                             
-                            # FCF metrics
+                            # FCF metrics - extract scalar values
                             col1, col2, col3 = st.columns(3)
                             with col1:
-                                st.metric("Latest FCF", format_large_number(fcf.iloc[-1]))
+                                latest_fcf = float(fcf.iloc[-1]) if not pd.isna(fcf.iloc[-1]) else 0
+                                st.metric("Latest FCF", format_large_number(latest_fcf))
                             with col2:
                                 if not net_income.empty:
-                                    fcf_conversion = (fcf.iloc[-1] / net_income.iloc[-1]) * 100
-                                    st.metric("FCF Conversion", f"{fcf_conversion:.0f}%")
+                                    fcf_val = float(fcf.iloc[-1]) if not pd.isna(fcf.iloc[-1]) else 0
+                                    ni_val = float(net_income.iloc[-1]) if not pd.isna(net_income.iloc[-1]) else 0
+                                    if ni_val != 0:
+                                        fcf_conversion = (fcf_val / ni_val) * 100
+                                        st.metric("FCF Conversion", f"{fcf_conversion:.0f}%")
                             with col3:
                                 cagr = calculate_cagr(fcf)
                                 if not np.isnan(cagr):
@@ -511,8 +525,11 @@ def render_grapher() -> None:
                                 yaxis="SBC (USD)", color="#9467bd")
                         
                         if not revenue.empty:
-                            sbc_pct = (sbc / revenue) * 100
-                            st.metric("SBC as % of Revenue", f"{sbc_pct.iloc[-1]:.1f}%")
+                            sbc_val = float(sbc.iloc[-1]) if not pd.isna(sbc.iloc[-1]) else 0
+                            rev_val = float(revenue.iloc[-1]) if not pd.isna(revenue.iloc[-1]) else 0
+                            if rev_val > 0:
+                                sbc_pct = (sbc_val / rev_val) * 100
+                                st.metric("SBC as % of Revenue", f"{sbc_pct:.1f}%")
 
                 # ── TAB 4: Balance Sheet ──────────────────────────────────────
                 with tab4:
@@ -536,14 +553,16 @@ def render_grapher() -> None:
                         plot_multi(debt_df, "Debt vs Cash", 
                                   yaxis="Amount (USD)", colors=["#d62728", "#2ca02c", "#ff7f0e"])
                         
-                        # Debt metrics
+                        # Debt metrics - extract scalar values
                         col1, col2, col3 = st.columns(3)
                         with col1:
-                            st.metric("Total Debt", format_large_number(total_debt.iloc[-1]))
+                            debt_val = float(total_debt.iloc[-1]) if not pd.isna(total_debt.iloc[-1]) else 0
+                            st.metric("Total Debt", format_large_number(debt_val))
                         with col2:
-                            st.metric("Cash", format_large_number(cash.iloc[-1]))
+                            cash_val = float(cash.iloc[-1]) if not pd.isna(cash.iloc[-1]) else 0
+                            st.metric("Cash", format_large_number(cash_val))
                         with col3:
-                            net_debt = total_debt.iloc[-1] - cash.iloc[-1]
+                            net_debt = debt_val - cash_val
                             st.metric("Net Debt", format_large_number(net_debt))
                     
                     st.markdown("### Share Count Evolution")
@@ -580,7 +599,8 @@ def render_grapher() -> None:
                             plot_line(roic.dropna(), "Return on Invested Capital", 
                                      yaxis="ROIC (%)", color="#7f7f7f")
                             
-                            st.metric("Latest ROIC", f"{roic.dropna().iloc[-1]:.1f}%")
+                            latest_roic = float(roic.dropna().iloc[-1]) if len(roic.dropna()) > 0 else 0
+                            st.metric("Latest ROIC", f"{latest_roic:.1f}%")
                             st.info("💡 **Benchmark**: ROIC > 15% is generally considered good, > 20% is excellent")
                     
                     st.markdown("### Return on Equity (ROE)")
@@ -593,7 +613,8 @@ def render_grapher() -> None:
                             plot_line(roe.dropna(), "Return on Equity", 
                                      yaxis="ROE (%)", color="#17becf")
                             
-                            st.metric("Latest ROE", f"{roe.dropna().iloc[-1]:.1f}%")
+                            latest_roe = float(roe.dropna().iloc[-1]) if len(roe.dropna()) > 0 else 0
+                            st.metric("Latest ROE", f"{latest_roe:.1f}%")
                     
                     st.markdown("### Debt-to-Equity Ratio")
                     if not total_debt.empty and not stockholders_equity.empty:
@@ -604,7 +625,8 @@ def render_grapher() -> None:
                             plot_line(debt_to_equity.dropna(), "Debt-to-Equity Ratio", 
                                      yaxis="Ratio", color="#d62728")
                             
-                            st.metric("Latest D/E", f"{debt_to_equity.dropna().iloc[-1]:.2f}x")
+                            latest_de = float(debt_to_equity.dropna().iloc[-1]) if len(debt_to_equity.dropna()) > 0 else 0
+                            st.metric("Latest D/E", f"{latest_de:.2f}x")
                             st.info("💡 **Benchmark**: < 1.0 is generally conservative, varies by industry")
                     
                     st.markdown("### Per-Share Metrics")
