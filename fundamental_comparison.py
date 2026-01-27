@@ -378,14 +378,26 @@ def render_fundamental_comparison(tickers: List[str] = None) -> None:
                 # PEG - Calculate AFTER growth metrics are defined
                 # PEG = P/E / Earnings Growth Rate
                 peg_ratio = np.nan
-                if pd.notna(info.get('peg')) and info.get('peg') > 0:
+                
+                # Debug: Let's see what we have
+                st.write(f"DEBUG {ticker}: pe={pe_ratio}, eps_growth={eps_growth}, ni_growth={ni_growth}")
+                
+                # First try to get from yfinance
+                if pd.notna(info.get('peg')) and info.get('peg') > 0 and info.get('peg') < 100:
                     peg_ratio = info['peg']
+                    st.write(f"DEBUG {ticker}: Got PEG from yfinance: {peg_ratio}")
                 else:
                     # Calculate PEG Ratio using EPS growth (not revenue growth)
                     # Use EPS growth if available, otherwise fall back to NI growth
                     earnings_growth = eps_growth if not pd.isna(eps_growth) else ni_growth
+                    
+                    st.write(f"DEBUG {ticker}: earnings_growth={earnings_growth}, pe_ratio={pe_ratio}")
+                    
                     if not pd.isna(pe_ratio) and not pd.isna(earnings_growth) and earnings_growth > 0 and pe_ratio > 0:
                         peg_ratio = pe_ratio / earnings_growth
+                        st.write(f"DEBUG {ticker}: Calculated PEG: {peg_ratio}")
+                    else:
+                        st.write(f"DEBUG {ticker}: Cannot calculate PEG - missing data or invalid values")
                 
                 # Time series for trends
                 gross_margin_ts = (gross_profit / revenue * 100) if not revenue.empty else pd.Series()
