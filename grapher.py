@@ -166,45 +166,52 @@ def process_edgar_df(df: pd.DataFrame) -> pd.DataFrame:
 # ══════════════════════════════════════════════════════════════════════════════
 
 def safe_get(df: pd.DataFrame, key: str, default=None) -> pd.Series:
-    """Smart field extraction"""
+    """Smart field extraction - handles both row-based (yfinance) and column-based (edgar) data"""
     if df.empty:
         return pd.Series(dtype=float)
     
+    # Try exact match first
     if key in df.index:
         return df.loc[key]
     
-    # Case-insensitive partial
+    # Try case-insensitive partial match
     for idx in df.index:
-        if isinstance(idx, str) and key.lower() in idx.lower():
+        if isinstance(idx, str) and key.lower() == idx.lower():
             return df.loc[idx]
     
+    # Define alternatives with more yfinance-specific names
     alternatives = {
-        "Total Revenue": ["Revenue", "TotalRevenue", "Revenues", "Sales", "Net Sales"],
-        "Gross Profit": ["GrossProfit", "Gross Income"],
-        "Operating Income": ["OperatingIncome", "Operating Income Loss", "EBIT"],
-        "Net Income": ["NetIncome", "Net Income Loss", "Net Income Available To Common Stockholders"],
-        "Operating Cash Flow": ["OperatingCashFlow", "Net Cash From Operating Activities"],
-        "Capital Expenditure": ["CapitalExpenditure", "Capital Expenditures", "Payments To Acquire PPE"],
-        "Stock Based Compensation": ["StockBasedCompensation", "Share Based Compensation"],
-        "Basic Average Shares": ["BasicAverageShares", "Weighted Average Shares Outstanding Basic"],
-        "Diluted Average Shares": ["DilutedAverageShares", "Weighted Average Shares Outstanding Diluted"],
-        "Total Assets": ["TotalAssets", "Assets"],
-        "Total Debt": ["TotalDebt", "Long Term Debt", "Debt"],
-        "Cash And Cash Equivalents": ["CashAndCashEquivalents", "Cash"],
-        "Tax Provision": ["TaxProvision", "Income Tax Expense"],
-        "Research Development": ["ResearchAndDevelopment", "R&D"],
-        "Selling General Administrative": ["SellingGeneralAndAdministrative", "SG&A"],
-        "Total Liabilities": ["TotalLiabilities", "Liabilities"],
-        "Stockholders Equity": ["StockholdersEquity", "Total Equity"],
+        "Total Revenue": ["Total Revenue", "Revenue", "TotalRevenue", "Revenues", "Sales", "Net Sales"],
+        "Gross Profit": ["Gross Profit", "GrossProfit", "Gross Income"],
+        "Operating Income": ["Operating Income", "OperatingIncome", "Operating Income Loss", "EBIT"],
+        "Net Income": ["Net Income", "NetIncome", "Net Income Common Stockholders", "Net Income Available To Common Stockholders"],
+        "Operating Cash Flow": ["Operating Cash Flow", "OperatingCashFlow", "Cash Flow From Operating Activities", "Operating Cash Flow"],
+        "Capital Expenditure": ["Capital Expenditure", "CapitalExpenditure", "Capital Expenditures", "Purchase Of PPE"],
+        "Stock Based Compensation": ["Stock Based Compensation", "StockBasedCompensation", "Share Based Compensation"],
+        "Basic Average Shares": ["Basic Average Shares", "BasicAverageShares", "Ordinary Shares Number", "Share Issued"],
+        "Diluted Average Shares": ["Diluted Average Shares", "DilutedAverageShares", "Diluted Average Shares"],
+        "Total Assets": ["Total Assets", "TotalAssets", "Assets"],
+        "Total Debt": ["Total Debt", "TotalDebt", "Long Term Debt", "Debt"],
+        "Cash And Cash Equivalents": ["Cash And Cash Equivalents", "CashAndCashEquivalents", "Cash Cash Equivalents And Short Term Investments", "Cash"],
+        "Tax Provision": ["Tax Provision", "TaxProvision", "Tax Effect Of Unusual Items", "Income Tax Expense"],
+        "Research Development": ["Research And Development", "ResearchAndDevelopment", "Research Development"],
+        "Selling General Administrative": ["Selling General And Administrative", "SellingGeneralAndAdministrative", "Selling General Administrative"],
+        "Total Liabilities": ["Total Liabilities Net Minority Interest", "TotalLiabilities", "Liabilities"],
+        "Stockholders Equity": ["Stockholders Equity", "StockholdersEquity", "Total Equity Gross Minority Interest", "Total Equity"],
     }
     
-    for alt in alternatives.get(key, []):
+    # Try alternatives with exact match
+    for alt in alternatives.get(key, [key]):
         if alt in df.index:
             return df.loc[alt]
+    
+    # Try alternatives with partial match
+    for alt in alternatives.get(key, [key]):
         for idx in df.index:
             if isinstance(idx, str) and alt.lower() in idx.lower():
                 return df.loc[idx]
     
+    # If still not found, return default
     if default is not None:
         return pd.Series(default, index=df.columns if not df.empty else [])
     return pd.Series(dtype=float)
