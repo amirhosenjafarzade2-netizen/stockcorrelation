@@ -1214,28 +1214,28 @@ def render_sentiment_analysis(tickers: List[str] = None) -> None:
                 if has_short_data:
                     valid_short = analyst_df[analyst_df["Short %"].notna()]
                     if not valid_short.empty:
-                    fig_short = go.Figure()
-                    
-                    colors = ['red' if x > 10 else 'orange' if x > 5 else 'green' 
-                             for x in valid_short["Short %"]]
-                    
-                    fig_short.add_trace(go.Bar(
-                        x=valid_short["Ticker"],
-                        y=valid_short["Short %"],
-                        marker_color=colors,
-                        text=valid_short["Short %"],
-                        texttemplate='%{text:.1f}%',
-                        textposition='outside'
-                    ))
-                    
-                    fig_short.update_layout(
-                        title="Short Interest % of Float",
-                        yaxis_title="Short %",
-                        height=400
-                    )
-                    st.plotly_chart(fig_short, use_container_width=True)
-                    
-                    st.caption("**Note:** High short interest (>10%) can indicate bearish sentiment OR potential short squeeze opportunity")
+                        fig_short = go.Figure()
+                        
+                        colors = ['red' if x > 10 else 'orange' if x > 5 else 'green' 
+                                 for x in valid_short["Short %"]]
+                        
+                        fig_short.add_trace(go.Bar(
+                            x=valid_short["Ticker"],
+                            y=valid_short["Short %"],
+                            marker_color=colors,
+                            text=valid_short["Short %"],
+                            texttemplate='%{text:.1f}%',
+                            textposition='outside'
+                        ))
+                        
+                        fig_short.update_layout(
+                            title="Short Interest % of Float",
+                            yaxis_title="Short %",
+                            height=400
+                        )
+                        st.plotly_chart(fig_short, use_container_width=True)
+                        
+                        st.caption("**Note:** High short interest (>10%) can indicate bearish sentiment OR potential short squeeze opportunity")
                 else:
                     st.info("No short interest data available for these tickers")
                 
