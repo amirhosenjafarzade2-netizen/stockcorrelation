@@ -455,32 +455,62 @@ def detect_economic_cycle(data_dict: Dict[str, pd.DataFrame]) -> Tuple[pd.Series
     
     # Combine key indicators
     indicators = pd.DataFrame()
+    required_indicators = []
     
     # Growth indicators (positive = expansion)
     if 'GDP_Growth' in data_dict and not data_dict['GDP_Growth'].empty:
         indicators['GDP_Growth'] = data_dict['GDP_Growth'].iloc[:, 0]
+        required_indicators.append('GDP_Growth')
     elif 'GDP' in data_dict and not data_dict['GDP'].empty:
-        indicators['GDP_Growth'] = calculate_growth_rate(data_dict['GDP'].iloc[:, 0], periods=4)
+        gdp_growth = calculate_growth_rate(data_dict['GDP'].iloc[:, 0], periods=4)
+        if len(gdp_growth.dropna()) > 0:
+            indicators['GDP_Growth'] = gdp_growth
+            required_indicators.append('GDP_Growth')
     
     if 'Industrial_Production' in data_dict and not data_dict['Industrial_Production'].empty:
-        indicators['IP_Growth'] = calculate_growth_rate(data_dict['Industrial_Production'].iloc[:, 0], periods=12)
+        ip_growth = calculate_growth_rate(data_dict['Industrial_Production'].iloc[:, 0], periods=12)
+        if len(ip_growth.dropna()) > 0:
+            indicators['IP_Growth'] = ip_growth
+            required_indicators.append('IP_Growth')
     
     # Labor indicators (low unemployment = expansion, but inverted)
     if 'Unemployment' in data_dict and not data_dict['Unemployment'].empty:
-        indicators['Unemployment'] = -data_dict['Unemployment'].iloc[:, 0]  # Invert
+        indicators['Unemployment_Inverted'] = -data_dict['Unemployment'].iloc[:, 0]  # Invert
+        required_indicators.append('Unemployment_Inverted')
     
     # Confidence indicators
     if 'Consumer_Sentiment' in data_dict and not data_dict['Consumer_Sentiment'].empty:
         indicators['Sentiment'] = data_dict['Consumer_Sentiment'].iloc[:, 0]
+        required_indicators.append('Sentiment')
     
     if 'Leading_Index' in data_dict and not data_dict['Leading_Index'].empty:
-        indicators['LEI_Growth'] = calculate_growth_rate(data_dict['Leading_Index'].iloc[:, 0], periods=12)
+        lei_growth = calculate_growth_rate(data_dict['Leading_Index'].iloc[:, 0], periods=12)
+        if len(lei_growth.dropna()) > 0:
+            indicators['LEI_Growth'] = lei_growth
+            required_indicators.append('LEI_Growth')
+    
+    # Additional useful indicators
+    if 'Payrolls' in data_dict and not data_dict['Payrolls'].empty:
+        payrolls_growth = calculate_growth_rate(data_dict['Payrolls'].iloc[:, 0], periods=12)
+        if len(payrolls_growth.dropna()) > 0:
+            indicators['Payrolls_Growth'] = payrolls_growth
+            required_indicators.append('Payrolls_Growth')
+    
+    if 'Retail_Sales' in data_dict and not data_dict['Retail_Sales'].empty:
+        retail_growth = calculate_growth_rate(data_dict['Retail_Sales'].iloc[:, 0], periods=12)
+        if len(retail_growth.dropna()) > 0:
+            indicators['Retail_Growth'] = retail_growth
+            required_indicators.append('Retail_Growth')
+    
+    if 'Capacity_Utilization' in data_dict and not data_dict['Capacity_Utilization'].empty:
+        indicators['Capacity_Util'] = data_dict['Capacity_Utilization'].iloc[:, 0]
+        required_indicators.append('Capacity_Util')
     
     # Drop NaN and standardize
     indicators = indicators.dropna()
     
     if indicators.empty or len(indicators) < 50:
-        return pd.Series(), {}
+        return pd.Series(), {'error': 'insufficient_data', 'available_indicators': required_indicators, 'min_required': 2}
     
     # Standardize indicators
     scaler = StandardScaler()
@@ -816,6 +846,40 @@ def economics_module(analysis_context: Optional[Dict] = None):
     - **Recession Probability** based on multiple signals
     """)
     
+    # Quick start guide
+    with st.expander("🚀 Quick Start Guide", expanded=False):
+        st.markdown("""
+        ### Getting Started
+        
+        **1. Optional: Get a FREE FRED API Key** (Recommended)
+        - Visit [FRED API Key Registration](https://fred.stlouisfed.org/docs/api/api_key.html)
+        - Enter your email to receive an API key instantly
+        - Paste it in the sidebar for faster data fetching
+        - Without API key, the app still works but uses slower CSV downloads
+        
+        **2. Select Your Analysis Modules** (Sidebar)
+        - ✅ **Economic Indicators**: Core metrics like GDP, unemployment, inflation
+        - ✅ **Yield Curve Analysis**: Treasury rates and recession signals
+        - ✅ **Economic Cycle Detection**: Expansion/contraction phase identification
+        - ✅ **Recession Indicators**: Multi-factor probability assessment
+        
+        **3. Choose Your Indicators** (Sidebar)
+        The app has smart defaults pre-selected, but you can customize:
+        - **For Cycle Detection**: Need GDP/Industrial Production + Unemployment + Sentiment
+        - **For Yield Curve**: Automatically fetches all Treasury rates
+        - **For Recession Signals**: Uses unemployment, leading index, and yield curve
+        
+        **4. Set Date Range** (Sidebar)
+        - Default: 10 years (recommended for cycle detection)
+        - Minimum: 2-3 years for meaningful analysis
+        - Maximum: All available data (varies by indicator)
+        
+        **5. Explore the Results!**
+        - Current economic snapshot with metrics
+        - Interactive charts and dashboards
+        - Export data to CSV for further analysis
+        """)
+    
     # Sidebar configuration
     with st.sidebar:
         st.header("⚙️ Configuration")
@@ -858,13 +922,20 @@ def economics_module(analysis_context: Optional[Dict] = None):
         
         selected_metrics = []
         
+        # Default selections optimized for all features
+        default_selections = [
+            'GDP', 'GDP_Growth', 'Unemployment', 'Inflation_CPI', 
+            'Fed_Funds_Rate', '10Y_Treasury', '2Y_Treasury', 
+            'Consumer_Sentiment', 'Industrial_Production', 'Leading_Index'
+        ]
+        
         for cat_key, cat_name in categories.items():
             with st.expander(cat_name):
                 cat_metrics = [k for k, v in METRIC_MAPPING.items() if v.get('category') == cat_key]
                 for metric in cat_metrics:
                     if st.checkbox(
                         METRIC_MAPPING[metric]['description'],
-                        value=metric in ['GDP', 'Unemployment', 'Inflation_CPI', 'Fed_Funds_Rate', '10Y_Treasury'],
+                        value=metric in default_selections,
                         key=f"metric_{metric}"
                     ):
                         selected_metrics.append(metric)
@@ -1165,7 +1236,55 @@ def economics_module(analysis_context: Optional[Dict] = None):
         with st.spinner("Detecting economic cycle..."):
             phases, cycle_analysis = detect_economic_cycle(data_dict)
             
-            if not phases.empty and cycle_analysis:
+            if phases.empty or 'error' in cycle_analysis:
+                # Show helpful guidance
+                st.warning("⚠️ Insufficient data for cycle detection.")
+                
+                available = cycle_analysis.get('available_indicators', [])
+                min_required = cycle_analysis.get('min_required', 2)
+                
+                st.info(f"""
+                **Cycle detection requires at least {min_required} indicators with sufficient historical data.**
+                
+                Currently available: {len(available)} indicator(s)
+                - {', '.join(available) if available else 'None'}
+                
+                **Recommended indicators for best results:**
+                """)
+                
+                # Create recommendation table
+                recommendations = pd.DataFrame({
+                    'Category': ['Output & Production', 'Output & Production', 'Labor Market', 'Confidence', 'Composite'],
+                    'Indicator': ['GDP or GDP Growth', 'Industrial Production', 'Unemployment', 'Consumer Sentiment', 'Leading Economic Index'],
+                    'Why Important': [
+                        'Core measure of economic activity',
+                        'Leading indicator for manufacturing sector',
+                        'Key labor market health indicator',
+                        'Forward-looking consumer behavior',
+                        'Aggregates multiple leading indicators'
+                    ],
+                    'Currently Selected': [
+                        '✅' if any('GDP' in i for i in available) else '❌',
+                        '✅' if 'IP_Growth' in available else '❌',
+                        '✅' if 'Unemployment_Inverted' in available else '❌',
+                        '✅' if 'Sentiment' in available else '❌',
+                        '✅' if 'LEI_Growth' in available else '❌'
+                    ]
+                })
+                
+                st.dataframe(recommendations, use_container_width=True, hide_index=True)
+                
+                st.markdown("""
+                **Quick Start:** Select these indicators from the sidebar:
+                1. **Output & Production** → GDP or Industrial Production
+                2. **Labor Market** → Unemployment
+                3. **Confidence** → Consumer Sentiment
+                4. **Composite Indices** → Leading Economic Index (highly recommended)
+                
+                Then expand the date range to at least 5 years for better cycle detection.
+                """)
+                
+            elif not phases.empty and cycle_analysis:
                 # Current phase
                 current_phase = cycle_analysis['current_phase']
                 phase_duration = cycle_analysis['phase_duration_months']
@@ -1242,8 +1361,6 @@ def economics_module(analysis_context: Optional[Dict] = None):
                     )
                     
                     st.plotly_chart(fig, use_container_width=True)
-            else:
-                st.warning("⚠️ Insufficient data for cycle detection. Add more indicators (GDP Growth, Industrial Production, Unemployment, etc.)")
     
     # ==================== RECESSION INDICATORS ====================
     
