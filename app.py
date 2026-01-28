@@ -323,17 +323,6 @@ def get_available_modules() -> Dict[str, dict]:
     except ImportError:
         pass
 
-    # ── NEW MODULE: Forex Enhanced ───────────────────────────────────────────
-    try:
-        from forex_enhanced import forex_module
-        modules["💱 Forex Analysis"] = {
-            "func": forex_module,
-            "desc": "Advanced currency pair analysis with economic indicators, technical analysis, correlations, and ML predictions",
-            "uses_context": False
-        }
-    except ImportError:
-        pass
-  
     return modules
 # ────────────────────────────────────────────────
 # Session State Initialization
