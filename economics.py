@@ -765,30 +765,126 @@ def get_recession_indicators(data_dict: Dict[str, pd.DataFrame], spreads: pd.Dat
         indicators['Sahm_Rule'] = (sahm >= 0.5).astype(int)
     
     # Yield curve inversion (10Y-2Y)
-    if '10Y-2Y' in spreads.columns:
-        indicators['Yield_Curve_Inverted'] = (spreads['10Y-2Y'] < 0).astype(int)
+    if not spreads.empty and '10Y-2Y' in spreads.columns:
+        spread_data = spreads['10Y-2Y'].dropna()
+        if len(spread_data) > 0:
+            indicators['Yield_Curve_Inverted'] = (spread_data < 0).astype(int)
+    
+    # Alternative yield curve measures
+    if not spreads.empty and '10Y-3M' in spreads.columns:
+        spread_data = spreads['10Y-3M'].dropna()
+        if len(spread_data) > 0:
+            indicators['Yield_10Y3M_Inverted'] = (spread_data < 0).astype(int)
     
     # Leading Economic Index decline
     if 'Leading_Index' in data_dict and not data_dict['Leading_Index'].empty:
         lei = data_dict['Leading_Index'].iloc[:, 0]
         lei_6m_change = lei.pct_change(periods=6) * 100
         indicators['LEI_Declining'] = (lei_6m_change < -2).astype(int)
+        
+        # Also check 3-month decline (more sensitive)
+        lei_3m_change = lei.pct_change(periods=3) * 100
+        indicators['LEI_3M_Declining'] = (lei_3m_change < -1).astype(int)
     
     # Consumer sentiment collapse
     if 'Consumer_Sentiment' in data_dict and not data_dict['Consumer_Sentiment'].empty:
         sent = data_dict['Consumer_Sentiment'].iloc[:, 0]
         sent_change = sent.pct_change(periods=12) * 100
         indicators['Sentiment_Collapse'] = (sent_change < -15).astype(int)
+        
+        # Also check if below historical threshold
+        sent_mean = sent.rolling(window=60).mean()
+        indicators['Sentiment_Low'] = (sent < sent_mean * 0.85).astype(int)
     
     # Industrial production decline
     if 'Industrial_Production' in data_dict and not data_dict['Industrial_Production'].empty:
         ip = data_dict['Industrial_Production'].iloc[:, 0]
         ip_6m_change = ip.pct_change(periods=6) * 100
         indicators['IP_Declining'] = (ip_6m_change < -2).astype(int)
+        
+        # Also check 3-month decline
+        ip_3m_change = ip.pct_change(periods=3) * 100
+        indicators['IP_3M_Declining'] = (ip_3m_change < -1).astype(int)
+    
+    # Unemployment rate rising (simple but effective)
+    if 'Unemployment' in data_dict and not data_dict['Unemployment'].empty:
+        unemp = data_dict['Unemployment'].iloc[:, 0]
+        unemp_6m_change = unemp.diff(periods=6)
+        indicators['Unemployment_Rising'] = (unemp_6m_change > 0.5).astype(int)
+    
+    # Initial claims spike
+    if 'Initial_Claims' in data_dict and not data_dict['Initial_Claims'].empty:
+        claims = data_dict['Initial_Claims'].iloc[:, 0]
+        claims_ma = claims.rolling(window=4).mean()
+        claims_threshold = claims.rolling(window=52).quantile(0.75)
+        indicators['Claims_Elevated'] = (claims_ma > claims_threshold).astype(int)
+    
+    # Payrolls declining
+    if 'Payrolls' in data_dict and not data_dict['Payrolls'].empty:
+        payrolls = data_dict['Payrolls'].iloc[:, 0]
+        payrolls_6m_change = payrolls.pct_change(periods=6) * 100
+        indicators['Payrolls_Declining'] = (payrolls_6m_change < -1).astype(int)
+    
+    # GDP declining (if available)
+    if 'GDP' in data_dict and not data_dict['GDP'].empty:
+        gdp = data_dict['GDP'].iloc[:, 0]
+        gdp_change = gdp.pct_change(periods=2) * 100  # 2 quarters
+        indicators['GDP_Declining'] = (gdp_change < 0).astype(int)
+    
+    if 'GDP_Growth' in data_dict and not data_dict['GDP_Growth'].empty:
+        gdp_growth = data_dict['GDP_Growth'].iloc[:, 0]
+        indicators['GDP_Growth_Negative'] = (gdp_growth < 0).astype(int)
+    
+    # Retail sales declining
+    if 'Retail_Sales' in data_dict and not data_dict['Retail_Sales'].empty:
+        retail = data_dict['Retail_Sales'].iloc[:, 0]
+        retail_6m_change = retail.pct_change(periods=6) * 100
+        indicators['Retail_Declining'] = (retail_6m_change < -2).astype(int)
+    
+    # Housing starts declining
+    if 'Housing_Starts' in data_dict and not data_dict['Housing_Starts'].empty:
+        housing = data_dict['Housing_Starts'].iloc[:, 0]
+        housing_6m_change = housing.pct_change(periods=6) * 100
+        indicators['Housing_Declining'] = (housing_6m_change < -10).astype(int)
     
     # Calculate composite recession probability
     if not indicators.empty:
-        indicators['Recession_Probability'] = indicators.mean(axis=1) * 100
+        # Weight different indicators
+        weights = {}
+        
+        # High weight indicators (proven recession signals)
+        high_weight = ['Sahm_Rule', 'Yield_Curve_Inverted', 'GDP_Declining', 'GDP_Growth_Negative']
+        
+        # Medium weight indicators
+        medium_weight = ['LEI_Declining', 'IP_Declining', 'Unemployment_Rising', 'Payrolls_Declining']
+        
+        # Lower weight indicators (supporting signals)
+        low_weight = ['Sentiment_Collapse', 'Retail_Declining', 'Housing_Declining', 'Claims_Elevated',
+                      'LEI_3M_Declining', 'IP_3M_Declining', 'Sentiment_Low', 'Yield_10Y3M_Inverted']
+        
+        # Assign weights
+        for col in indicators.columns:
+            if col in high_weight:
+                weights[col] = 3.0
+            elif col in medium_weight:
+                weights[col] = 2.0
+            elif col in low_weight:
+                weights[col] = 1.0
+            else:
+                weights[col] = 1.0
+        
+        # Calculate weighted probability
+        weighted_sum = pd.Series(0, index=indicators.index)
+        total_weight = 0
+        
+        for col in indicators.columns:
+            weighted_sum += indicators[col] * weights.get(col, 1.0)
+            total_weight += weights.get(col, 1.0)
+        
+        if total_weight > 0:
+            indicators['Recession_Probability'] = (weighted_sum / total_weight) * 100
+        else:
+            indicators['Recession_Probability'] = 0
     
     return indicators
 
@@ -1462,6 +1558,11 @@ def economics_module(analysis_context: Optional[Dict] = None):
         recession_indicators = get_recession_indicators(data_dict, spreads_for_recession)
         
         if not recession_indicators.empty:
+            # Count active signals
+            indicator_cols = [c for c in recession_indicators.columns if c != 'Recession_Probability']
+            active_signals = sum(recession_indicators[col].iloc[-1] == 1 for col in indicator_cols)
+            total_indicators = len(indicator_cols)
+            
             # Current probability
             current_prob = recession_indicators['Recession_Probability'].iloc[-1]
             
@@ -1480,6 +1581,7 @@ def economics_module(analysis_context: Optional[Dict] = None):
                 risk_color = "red"
             
             st.subheader(f"Recession Risk: {risk_level}")
+            st.caption(f"Active Signals: {active_signals}/{total_indicators} indicators signaling recession risk")
             
             col1, col2 = st.columns([1, 2])
             
@@ -1563,20 +1665,93 @@ def economics_module(analysis_context: Optional[Dict] = None):
             st.plotly_chart(fig_prob, use_container_width=True)
             
             # Indicator details
-            with st.expander("📊 Indicator Details"):
+            with st.expander("📊 Indicator Details & Weights"):
                 st.markdown("""
-                **Sahm Rule**: Recession signal when unemployment rises 0.5pp above its 3-month low
+                **High Weight Indicators** (3x weight - proven recession signals):
+                - **Sahm Rule**: Recession signal when unemployment rises 0.5pp above its 3-month low
+                - **Yield Curve Inverted (10Y-2Y)**: Spread below zero (historically preceded recessions by 6-24 months)
+                - **GDP Declining**: Two consecutive quarters of negative GDP growth
+                - **GDP Growth Negative**: Real GDP growth rate below zero
                 
-                **Yield Curve Inversion**: 10Y-2Y spread below zero (historically preceded recessions by 6-24 months)
+                **Medium Weight Indicators** (2x weight - reliable signals):
+                - **LEI Declining**: Leading Economic Index falls more than 2% over 6 months
+                - **IP Declining**: Industrial production falls more than 2% over 6 months
+                - **Unemployment Rising**: Unemployment rate rises more than 0.5pp over 6 months
+                - **Payrolls Declining**: Nonfarm payrolls fall more than 1% over 6 months
                 
-                **LEI Declining**: Leading Economic Index falls more than 2% over 6 months
+                **Supporting Indicators** (1x weight - additional context):
+                - **Sentiment Collapse**: Consumer sentiment drops more than 15% year-over-year
+                - **Sentiment Low**: Consumer sentiment below 85% of 5-year average
+                - **Retail Declining**: Retail sales fall more than 2% over 6 months
+                - **Housing Declining**: Housing starts fall more than 10% over 6 months
+                - **Claims Elevated**: Initial jobless claims above 75th percentile
+                - **LEI 3M Declining**: Leading index down >1% in 3 months (early warning)
+                - **IP 3M Declining**: Industrial production down >1% in 3 months (early warning)
+                - **Yield 10Y-3M Inverted**: Alternative yield curve measure
                 
-                **Sentiment Collapse**: Consumer sentiment drops more than 15% year-over-year
+                **Current Indicators Available:**
+                """)
                 
-                **IP Declining**: Industrial production falls more than 2% over 6 months
+                # Show which indicators are actually being used
+                indicator_status = []
+                for col in indicator_cols:
+                    is_active = recession_indicators[col].iloc[-1] == 1
+                    status = "🔴 SIGNALING" if is_active else "🟢 Clear"
+                    
+                    # Determine weight
+                    high_weight = ['Sahm_Rule', 'Yield_Curve_Inverted', 'GDP_Declining', 'GDP_Growth_Negative']
+                    medium_weight = ['LEI_Declining', 'IP_Declining', 'Unemployment_Rising', 'Payrolls_Declining']
+                    
+                    if col in high_weight:
+                        weight = "High (3x)"
+                    elif col in medium_weight:
+                        weight = "Medium (2x)"
+                    else:
+                        weight = "Supporting (1x)"
+                    
+                    indicator_status.append({
+                        'Indicator': col.replace('_', ' '),
+                        'Status': status,
+                        'Weight': weight,
+                        'Current Value': int(recession_indicators[col].iloc[-1])
+                    })
+                
+                status_df = pd.DataFrame(indicator_status)
+                st.dataframe(status_df, use_container_width=True, hide_index=True)
+                
+                st.info(f"""
+                **Calculation Method:**
+                - Each indicator is weighted based on its historical reliability
+                - Weighted average determines overall recession probability
+                - Currently using {total_indicators} indicators
+                - {active_signals} are currently signaling recession risk
                 """)
         else:
-            st.info("💡 Add more indicators to calculate recession probability (Unemployment, Leading Index, Consumer Sentiment, etc.)")
+            st.warning("⚠️ No recession indicators could be calculated with current data.")
+            
+            st.info("""
+            **Recession probability requires at least one of these indicators:**
+            
+            **Essential Indicators:**
+            - Unemployment Rate (for Sahm Rule and unemployment trends)
+            - 10Y Treasury + 2Y Treasury (for yield curve inversion)
+            - GDP or GDP Growth (for output decline signals)
+            
+            **Recommended Additional Indicators:**
+            - Leading Economic Index (forward-looking composite)
+            - Consumer Sentiment (confidence tracking)
+            - Industrial Production (manufacturing weakness)
+            - Payrolls (labor market health)
+            - Initial Jobless Claims (high-frequency labor data)
+            
+            **Quick Fix:**
+            1. Select "Unemployment" from Labor Market category
+            2. Select "10Y Treasury" and "2Y Treasury" from Interest Rates
+            3. Enable "Yield Curve Analysis" in sidebar
+            4. Optionally add Leading Index from Composite Indices
+            
+            The recession probability will appear once you have at least one indicator selected.
+            """)
     
     # ==================== CORRELATIONS & STATISTICS ====================
     
