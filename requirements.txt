@@ -14,4 +14,3 @@ networkx
 openpyxl
 scikit-learn
 pytrends
-finvizfinance
