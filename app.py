@@ -20,10 +20,10 @@ def validate_tickers(ticker_list: list[str]) -> list[str]:
     """
     if not ticker_list:
         return []
-  
+ 
     cleaned = []
     seen = set()
-  
+ 
     for t in ticker_list:
         t = t.strip().upper()
         if not t or len(t) < 1 or t in seen:
@@ -31,7 +31,7 @@ def validate_tickers(ticker_list: list[str]) -> list[str]:
         if len(t) > 1 and not t.isdigit():
             cleaned.append(t)
             seen.add(t)
-  
+ 
     return cleaned
 # ────────────────────────────────────────────────
 # Configuration
@@ -42,7 +42,7 @@ class Config:
     DEFAULT_TICKERS = ["AAPL", "MSFT"]
     CACHE_TTL = 3600 # 1 hour
     MAX_TICKERS = 25
-  
+ 
     TICKER_PRESETS = {
         "Custom": "",
         "Tech Giants": "AAPL,MSFT,GOOGL,AMZN,META",
@@ -51,7 +51,7 @@ class Config:
         "Commodities": "GC=F,SI=F,CL=F,NG=F",
         "Forex Majors": "EURUSD=X,GBPUSD=X,USDJPY=X,AUDUSD=X"
     }
-  
+ 
     DATE_PRESETS = {
         "Custom": None,
         "1 Month": 30,
@@ -81,7 +81,7 @@ class AnalysisContext:
 # ────────────────────────────────────────────────
 class DataProvider:
     """Handles all data fetching with caching and error handling"""
-  
+ 
     @staticmethod
     @st.cache_data(ttl=Config.CACHE_TTL, show_spinner=False)
     def fetch_prices(tickers_list: List[str], s_date: date, e_date: date) -> Tuple[pd.DataFrame, List[str]]:
@@ -91,9 +91,9 @@ class DataProvider:
         """
         if not tickers_list:
             return pd.DataFrame(), []
-      
+     
         failed_tickers = []
-      
+     
         try:
             data = yf.download(
                 tickers_list,
@@ -103,7 +103,7 @@ class DataProvider:
                 progress=False,
                 threads=True
             )
-          
+         
             # Handle single ticker case
             if len(tickers_list) == 1:
                 if "Close" in data.columns:
@@ -112,7 +112,7 @@ class DataProvider:
                     return pd.DataFrame(), tickers_list
             else:
                 data = data["Close"] if "Close" in data.columns else data
-          
+         
             # Check which tickers failed
             if isinstance(data, pd.DataFrame):
                 for ticker in tickers_list:
@@ -120,30 +120,30 @@ class DataProvider:
                         failed_tickers.append(ticker)
                         if ticker in data.columns:
                             data = data.drop(columns=[ticker])
-          
+         
             return data.dropna(how="all"), failed_tickers
-          
+         
         except Exception as e:
             st.error(f"❌ Data fetch error: {str(e)}")
             return pd.DataFrame(), tickers_list
-  
+ 
     @staticmethod
     def validate_data_quality(df: pd.DataFrame) -> List[str]:
         """Check data quality and return list of issues"""
         issues = []
-      
+     
         if df.empty:
             return ["No data available"]
-      
+     
         # Check for missing data
         missing_pct = df.isna().sum() / len(df) * 100
         for col in missing_pct[missing_pct > 10].index:
             issues.append(f"⚠️ {col}: {missing_pct[col]:.1f}% missing data")
-      
+     
         # Check for very short time series
         if len(df) < 20:
             issues.append(f"⚠️ Only {len(df)} trading days available (may affect analysis)")
-      
+     
         return issues
 # ────────────────────────────────────────────────
 # Module Registry
@@ -151,7 +151,7 @@ class DataProvider:
 def get_available_modules() -> Dict[str, dict]:
     """Return available modules with metadata"""
     modules = {}
-  
+ 
     #── Existing modules ─────────────────────────────────────────────────────
     try:
         from additional_metrics import render_additional_metrics
@@ -162,7 +162,7 @@ def get_available_modules() -> Dict[str, dict]:
         }
     except ImportError:
         pass
-  
+ 
     try:
         from correlation_finder import render_correlation_finder
         modules["🔗 Correlation Finder"] = {
@@ -172,7 +172,7 @@ def get_available_modules() -> Dict[str, dict]:
         }
     except ImportError:
         pass
-  
+ 
     try:
         from grapher import render_grapher
         modules["📈 Grapher (Fundamentals)"] = {
@@ -182,7 +182,7 @@ def get_available_modules() -> Dict[str, dict]:
         }
     except ImportError:
         pass
-  
+ 
     try:
         from fundamental_comparison import render_fundamental_comparison
         modules["🔬 Fundamental Comparison"] = {
@@ -192,7 +192,7 @@ def get_available_modules() -> Dict[str, dict]:
         }
     except ImportError:
         pass
-  
+ 
     try:
         from screener import render_screener
         modules["🔍 Stock Screener"] = {
@@ -202,7 +202,7 @@ def get_available_modules() -> Dict[str, dict]:
         }
     except ImportError:
         pass
-  
+ 
     try:
         from excel_export import render_excel_export
         modules["📥 Excel Export"] = {
@@ -212,7 +212,7 @@ def get_available_modules() -> Dict[str, dict]:
         }
     except ImportError:
         pass
-  
+ 
     # ── New module: Advanced Valuation + S&P 500 Undervalued Screener ────────
     try:
         from advanced_valuation import render_advanced_valuation
@@ -223,7 +223,18 @@ def get_available_modules() -> Dict[str, dict]:
         }
     except ImportError as e:
         st.warning(f"Could not load Advanced Valuation module: {e}")
-  
+ 
+    # ── NEW: Intrinsic Value Calculator ──────────────────────────────────────
+    try:
+        from intrinsic_value import render_intrinsic_value
+        modules["💰 Intrinsic Value Calculator"] = {
+            "func": render_intrinsic_value,
+            "desc": "Calculate fair/intrinsic value (Graham, PEG, DCF, P/E) + screen overvalued stocks",
+            "uses_context": False
+        }
+    except ImportError:
+        pass
+ 
     # ── NEW MODULE: Portfolio Optimizer ──────────────────────────────────────
     try:
         from portfolio_optimizer import render_portfolio_optimizer
@@ -234,7 +245,7 @@ def get_available_modules() -> Dict[str, dict]:
         }
     except ImportError:
         pass
-  
+ 
     # ── NEW MODULES: Enhanced Financial Analysis Suite ──────────────────────
     try:
         from economics import economics_module
@@ -245,7 +256,7 @@ def get_available_modules() -> Dict[str, dict]:
         }
     except ImportError:
         pass
-  
+ 
     try:
         from fixed_income_improved import fixed_income_module
         modules["💰 Fixed Income / Bonds"] = {
@@ -255,7 +266,7 @@ def get_available_modules() -> Dict[str, dict]:
         }
     except ImportError:
         pass
-  
+ 
     try:
         from options_improved import options_module
         modules["📊 Options Pricing & Greeks"] = {
@@ -265,7 +276,7 @@ def get_available_modules() -> Dict[str, dict]:
         }
     except ImportError:
         pass
-  
+ 
     try:
         from advanced_risk_improved import advanced_risk_module
         modules["⚠️ Advanced Risk Analytics"] = {
@@ -275,7 +286,7 @@ def get_available_modules() -> Dict[str, dict]:
         }
     except ImportError:
         pass
-  
+ 
     try:
         from sector_valuation_improved import sector_valuation_module
         modules["🎯 Sector Valuation & SWOT"] = {
@@ -285,7 +296,7 @@ def get_available_modules() -> Dict[str, dict]:
         }
     except ImportError:
         pass
-  
+ 
     try:
         from advanced_models_improved import advanced_models_module
         modules["🔬 Advanced Financial Models"] = {
@@ -295,7 +306,7 @@ def get_available_modules() -> Dict[str, dict]:
         }
     except ImportError:
         pass
-  
+ 
     # ── NEW MODULE: Commodities ──────────────────────────────────────────────
     try:
         from commodities import commodities_module
@@ -311,7 +322,6 @@ def get_available_modules() -> Dict[str, dict]:
     except Exception as e:
         if 'st' in dir():
             st.sidebar.error(f"❌ Error loading Commodities: {str(e)}")
-
     # ── NEW MODULE: Sentiment Analysis ───────────────────────────────────────
     try:
         from sentiment_analysis import render_sentiment_analysis
@@ -322,7 +332,6 @@ def get_available_modules() -> Dict[str, dict]:
         }
     except ImportError:
         pass
-
     return modules
 # ────────────────────────────────────────────────
 # Session State Initialization
@@ -336,7 +345,7 @@ def init_session_state():
             'last_preset': 'Custom',
             'last_date_preset': 'Custom'
         }
-  
+ 
     if 'data_cache' not in st.session_state:
         st.session_state.data_cache = {
             'df_prices': None,
@@ -370,29 +379,29 @@ st.markdown("""
         padding-left: 1.5rem;
         padding-right: 1.5rem;
     }
-  
+ 
     section[data-testid="stSidebar"] {
         width: 340px !important;
         background-color: rgba(240, 242, 246, 0.05);
     }
-  
+ 
     h1, h2, h3 {
         margin-bottom: 1rem !important;
     }
-  
+ 
     .stExpander, .stTabs [data-baseweb="tab-panel"] {
         background: rgba(255, 255, 255, 0.03);
         border: 1px solid rgba(255, 255, 255, 0.08);
         border-radius: 12px;
         padding: 1.2rem;
     }
-  
+ 
     .stButton > button {
         border-radius: 8px;
         padding: 0.6rem 1.2rem;
         font-weight: 500;
     }
-  
+ 
     .metric-card {
         background: rgba(28, 131, 225, 0.1);
         padding: 1rem;
@@ -407,12 +416,12 @@ st.markdown("""
 with st.sidebar:
     st.title(f"📈 {Config.APP_TITLE}")
     st.caption(f"v{Config.APP_VERSION} • Istanbul, 2026")
-  
+ 
     st.markdown("---")
-  
+ 
     # ── Ticker Input ──
     st.subheader("🎯 Asset Selection")
-  
+ 
     # Preset selector
     preset_choice = st.selectbox(
         "Quick Presets",
@@ -420,41 +429,41 @@ with st.sidebar:
         index=0,
         help="Select a preset or choose Custom to enter your own tickers"
     )
-  
+ 
     # Ticker input (auto-fill from preset)
     default_value = Config.TICKER_PRESETS.get(preset_choice, ",".join(Config.DEFAULT_TICKERS))
     if not default_value:
         default_value = ",".join(st.session_state.preferences['last_tickers'])
-  
+ 
     tickers_input = st.text_input(
         "Tickers (comma-separated)",
         value=default_value,
         placeholder="AAPL,MSFT,GC=F,BTC-USD,EURUSD=X",
         help="Supports stocks, ETFs, commodities, forex, crypto, indices (^GSPC)"
     )
-  
+ 
     # Parse and validate tickers
     raw_tickers = [t.strip() for t in tickers_input.split(",") if t.strip()]
     tickers = validate_tickers(raw_tickers)
-  
+ 
     if tickers:
         st.caption(f"✅ {len(tickers)} valid ticker(s)")
         st.session_state.preferences['last_tickers'] = tickers
     else:
         if tickers_input.strip():
             st.warning("No valid tickers found. Please check your input.")
-  
+ 
     st.markdown("---")
-  
+ 
     # ── Date Range ──
     st.subheader("📅 Date Range")
-  
+ 
     date_preset = st.selectbox(
         "Date Preset",
         options=list(Config.DATE_PRESETS.keys()),
         index=0
     )
-  
+ 
     # Calculate dates based on preset
     if date_preset == "Custom":
         col1, col2 = st.columns(2)
@@ -475,29 +484,29 @@ with st.sidebar:
         end_date = date.today()
         start_date = end_date - timedelta(days=days_back)
         st.caption(f"📆 {start_date} → {end_date}")
-  
+ 
     st.markdown("---")
-  
+ 
     # ── Fetch Data Button ──
     fetch_button = st.button("🔄 Fetch Data", type="primary", use_container_width=True)
-  
+ 
     # Fetch data (on button or if cache is empty)
     df_prices = None
     failed_tickers = []
-  
+ 
     cache_key = f"{','.join(tickers)}_{start_date}_{end_date}" if tickers else ""
     cache_valid = st.session_state.data_cache.get('date_range') == cache_key
-  
+ 
     if fetch_button or (tickers and not cache_valid):
         if tickers:
             with st.spinner("📡 Fetching market data..."):
                 df_prices, failed_tickers = DataProvider.fetch_prices(tickers, start_date, end_date)
-              
+             
                 # Update cache
                 st.session_state.data_cache['df_prices'] = df_prices
                 st.session_state.data_cache['tickers'] = tickers
                 st.session_state.data_cache['date_range'] = cache_key
-              
+             
             if not df_prices.empty:
                 st.success(f"✅ Loaded {len(df_prices)} trading days")
             else:
@@ -507,13 +516,13 @@ with st.sidebar:
     else:
         # Use cached data
         df_prices = st.session_state.data_cache.get('df_prices', pd.DataFrame())
-  
+ 
     # Show failed tickers
     if failed_tickers:
         with st.expander("⚠️ Failed Tickers", expanded=True):
             st.error(f"Could not fetch: **{', '.join(failed_tickers)}**")
             st.caption("Check ticker symbols or try again later")
-  
+ 
     # Data quality check
     if df_prices is not None and not df_prices.empty:
         quality_issues = DataProvider.validate_data_quality(df_prices)
@@ -521,37 +530,37 @@ with st.sidebar:
             with st.expander("⚠️ Data Quality Issues"):
                 for issue in quality_issues:
                     st.warning(issue)
-  
+ 
     st.markdown("---")
-  
+ 
     # ── Module Selection ──
     st.subheader("🧭 Analysis Mode")
-  
+ 
     available_modules = get_available_modules()
-  
+ 
     if not available_modules:
         st.error("❌ No modules found. Please check module files.")
     else:
         module_names = list(available_modules.keys())
-      
+     
         selected_mode = st.radio(
             "Choose analysis",
             options=module_names,
             index=0,
             label_visibility="collapsed"
         )
-      
+     
         # Show module description
         if selected_mode in available_modules:
             st.info(available_modules[selected_mode]["desc"])
-  
+ 
     st.markdown("---")
-  
+ 
     # ── Footer ──
     st.caption("💾 **Data from Yahoo Finance**")
     st.caption("⚠️ Not financial advice")
     st.caption(f"🕒 Last updated: {date.today().strftime('%Y-%m-%d')}")
-  
+ 
     # Clear cache button
     if st.button("🗑️ Clear Cache", use_container_width=True):
         st.cache_data.clear()
@@ -571,13 +580,13 @@ if 'tickers' in locals() and tickers and 'df_prices' in locals() and df_prices i
         st.metric("Trading Days", len(df_prices), delta=None)
     with col3:
         st.metric("Date Range", f"{(end_date - start_date).days} days", delta=None)
-  
+ 
     st.caption(f"**Tickers:** {', '.join(df_prices.columns.tolist())} • **Period:** {start_date} → {end_date}")
     st.markdown("---")
 # Execute selected module
 if 'available_modules' in locals() and 'selected_mode' in locals() and selected_mode in available_modules:
     module_info = available_modules[selected_mode]
-  
+ 
     try:
         if 'df_prices' not in locals() or df_prices is None or df_prices.empty:
             st.info("👈 **Please fetch data from the sidebar to begin analysis**")
@@ -597,7 +606,7 @@ if 'available_modules' in locals() and 'selected_mode' in locals() and selected_
             else:
                 # Module has its own inputs
                 module_info["func"]()
-              
+             
     except Exception as e:
         st.error(f"❌ **Module Error:** {str(e)}")
         with st.expander("🔍 Error Details"):
