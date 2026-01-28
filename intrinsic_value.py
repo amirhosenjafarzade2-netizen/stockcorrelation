@@ -266,7 +266,7 @@ def render_intrinsic_value():
             discount_rate = st.number_input("Discount Rate (%)", value=DEFAULT_DISCOUNT_RATE * 100, min_value=0.0, max_value=20.0, step=0.5) / 100
             growth_rate = st.number_input("Perpetual Growth (%)", value=DEFAULT_GROWTH_RATE * 100, min_value=0.0, max_value=10.0, step=0.5) / 100
         with col2:
-            terminal_multiple = st.number_input("Terminal Multiple", value=DEFAULT_TERMINAL_MULTIPLE, min_value=5.0, max_value=30.0, step=1.0)
+            terminal_multiple = st.number_input("Terminal Multiple", value=float(DEFAULT_TERMINAL_MULTIPLE), min_value=5.0, max_value=30.0, step=1.0)
             risk_free_rate = st.number_input("Risk-Free Rate (%)", value=DEFAULT_RISK_FREE_RATE * 100, min_value=0.0, max_value=10.0, step=0.5) / 100
         with col3:
             growth_years = int(st.number_input("Growth Years (Lynch)", value=float(DEFAULT_EPS_GROWTH_YEARS), min_value=1.0, max_value=10.0, step=1.0))
