@@ -509,8 +509,15 @@ def detect_economic_cycle(data_dict: Dict[str, pd.DataFrame]) -> Tuple[pd.Series
     # Drop NaN and standardize
     indicators = indicators.dropna()
     
-    if indicators.empty or len(indicators) < 50:
+    # Check if we have minimum requirements
+    if indicators.empty:
         return pd.Series(), {'error': 'insufficient_data', 'available_indicators': required_indicators, 'min_required': 2}
+    
+    if len(indicators.columns) < 2:
+        return pd.Series(), {'error': 'insufficient_indicators', 'available_indicators': required_indicators, 'min_required': 2}
+    
+    if len(indicators) < 30:  # Reduced from 50 to 30 data points
+        return pd.Series(), {'error': 'insufficient_length', 'available_indicators': required_indicators, 'data_points': len(indicators), 'min_required': 30}
     
     # Standardize indicators
     scaler = StandardScaler()
@@ -523,20 +530,36 @@ def detect_economic_cycle(data_dict: Dict[str, pd.DataFrame]) -> Tuple[pd.Series
     # Create composite index (average of standardized indicators)
     composite = indicators_scaled.mean(axis=1)
     
-    # Smooth the composite index
-    composite_smooth = composite.rolling(window=6, center=True).mean()
+    # Smooth the composite index - use smaller window if limited data
+    window_size = min(6, max(3, len(composite) // 10))
+    composite_smooth = composite.rolling(window=window_size, center=True).mean()
     
-    # Detect peaks and troughs using scipy
-    peaks, _ = signal.find_peaks(composite_smooth.dropna(), distance=12, prominence=0.5)
-    troughs, _ = signal.find_peaks(-composite_smooth.dropna(), distance=12, prominence=0.5)
+    # Detect peaks and troughs using scipy with adaptive parameters
+    composite_clean = composite_smooth.dropna()
+    
+    if len(composite_clean) < 30:
+        # Not enough data even after alignment
+        return pd.Series(), {
+            'error': 'insufficient_length_after_alignment',
+            'available_indicators': required_indicators,
+            'data_points': len(composite_clean),
+            'min_required': 30,
+            'message': 'After aligning indicators and calculating growth rates, insufficient overlapping data remains.'
+        }
+    
+    # Adaptive peak detection parameters based on data length
+    min_distance = max(6, len(composite_clean) // 20)
+    min_prominence = max(0.3, composite_clean.std() * 0.5)
+    
+    peaks, _ = signal.find_peaks(composite_clean, distance=min_distance, prominence=min_prominence)
+    troughs, _ = signal.find_peaks(-composite_clean, distance=min_distance, prominence=min_prominence)
     
     # Classify phases
     phases = pd.Series(index=composite.index, dtype=str)
     phases[:] = 'Unknown'
     
-    composite_values = composite_smooth.dropna()
-    peak_dates = composite_values.index[peaks]
-    trough_dates = composite_values.index[troughs]
+    peak_dates = composite_clean.index[peaks]
+    trough_dates = composite_clean.index[troughs]
     
     # Combine and sort turning points
     all_turns = sorted(list(peak_dates) + list(trough_dates))
@@ -1238,19 +1261,69 @@ def economics_module(analysis_context: Optional[Dict] = None):
             
             if phases.empty or 'error' in cycle_analysis:
                 # Show helpful guidance
-                st.warning("⚠️ Insufficient data for cycle detection.")
-                
+                error_type = cycle_analysis.get('error', 'unknown')
                 available = cycle_analysis.get('available_indicators', [])
                 min_required = cycle_analysis.get('min_required', 2)
                 
-                st.info(f"""
-                **Cycle detection requires at least {min_required} indicators with sufficient historical data.**
+                if error_type == 'insufficient_indicators':
+                    st.warning(f"⚠️ Need at least {min_required} different indicators for cycle detection.")
+                    st.info(f"""
+                    Currently available: {len(available)} indicator(s)
+                    - {', '.join(available) if available else 'None'}
+                    
+                    Please select at least one more indicator from a different category.
+                    """)
                 
-                Currently available: {len(available)} indicator(s)
-                - {', '.join(available) if available else 'None'}
+                elif error_type == 'insufficient_length':
+                    data_points = cycle_analysis.get('data_points', 0)
+                    min_points = cycle_analysis.get('min_required', 30)
+                    st.warning(f"⚠️ Insufficient historical data for cycle detection.")
+                    st.info(f"""
+                    Current data points: {data_points}
+                    Required minimum: {min_points}
+                    
+                    Please extend your date range to at least 3-5 years to get enough data points for meaningful cycle analysis.
+                    
+                    **Tips:**
+                    - GDP is quarterly data (need ~2.5+ years for 30 points)
+                    - Monthly indicators need ~2.5+ years
+                    - Try extending start date back to {(datetime.now() - timedelta(days=365*5)).strftime('%Y-%m-%d')}
+                    """)
                 
-                **Recommended indicators for best results:**
-                """)
+                elif error_type == 'insufficient_length_after_alignment':
+                    data_points = cycle_analysis.get('data_points', 0)
+                    min_points = cycle_analysis.get('min_required', 30)
+                    message = cycle_analysis.get('message', '')
+                    st.warning(f"⚠️ Insufficient overlapping data after alignment.")
+                    st.info(f"""
+                    {message}
+                    
+                    Current overlapping data points: {data_points}
+                    Required minimum: {min_points}
+                    
+                    **What's happening:**
+                    When indicators are combined, they need overlapping dates. Growth rates also reduce available data.
+                    
+                    **Solutions:**
+                    1. **Extend date range** to 5-10 years (recommended)
+                    2. **Add more monthly indicators** (they have more frequent data points)
+                    3. **Use GDP Growth** instead of GDP if available (already calculated, no data loss)
+                    
+                    **Current date range:** {start_date} to {end_date}
+                    **Recommended start:** {(datetime.now() - timedelta(days=365*8)).strftime('%Y-%m-%d')}
+                    """)
+                
+                else:
+                    st.warning("⚠️ Insufficient data for cycle detection.")
+                
+                    st.info(f"""
+                    **Cycle detection requires at least {min_required} indicators with sufficient historical data.**
+                    
+                    Currently available: {len(available)} indicator(s)
+                    - {', '.join(available) if available else 'None'}
+                    
+                    **Recommended indicators for best results:**
+                    """)
                 
                 # Create recommendation table
                 recommendations = pd.DataFrame({
@@ -1273,6 +1346,20 @@ def economics_module(analysis_context: Optional[Dict] = None):
                 })
                 
                 st.dataframe(recommendations, use_container_width=True, hide_index=True)
+                
+                # Show debug info in expander
+                with st.expander("🔍 Debug Information"):
+                    st.write("**Error Type:**", error_type)
+                    st.write("**Available Indicators:**", available)
+                    if error_type == 'insufficient_length':
+                        st.write("**Data Points Available:**", cycle_analysis.get('data_points', 0))
+                        st.write("**Data Points Required:**", cycle_analysis.get('min_required', 30))
+                    
+                    # Show what data is actually loaded
+                    st.write("**Loaded Indicators from data_dict:**")
+                    for metric, df in data_dict.items():
+                        if not df.empty:
+                            st.write(f"  - {metric}: {len(df)} rows, date range: {df.index.min()} to {df.index.max()}")
                 
                 st.markdown("""
                 **Quick Start:** Select these indicators from the sidebar:
