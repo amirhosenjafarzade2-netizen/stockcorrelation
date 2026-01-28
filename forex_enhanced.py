@@ -1,6 +1,6 @@
-# forex_enhanced.py - Professional Forex Analysis Module
-# Advanced currency pair analysis with economic indicators, technical analysis, correlations, and ML predictions
-# Enhanced with comprehensive currency coverage, better data handling, and professional features
+# forex_professional.py - Professional Forex Analysis with Real Economic Forecasts
+# Uses Trading Economics API for forecasts, FinViz for economic calendar, and Yahoo Finance for price data
+# Shows ACTUAL vs EXPECTED vs FORECAST economic data for interest rates, inflation, GDP, etc.
 
 import streamlit as st
 import pandas as pd
@@ -11,89 +11,233 @@ from plotly.subplots import make_subplots
 import plotly.express as px
 from datetime import datetime, timedelta
 from typing import Dict, Optional, List, Tuple
-from scipy import stats
-from sklearn.linear_model import LinearRegression
-from sklearn.ensemble import RandomForestRegressor
 import yfinance as yf
 import warnings
 warnings.filterwarnings('ignore')
+
+# Try to import finvizfinance for economic calendar
+try:
+    from finvizfinance.calendar import Calendar
+    FINVIZ_AVAILABLE = True
+except ImportError:
+    FINVIZ_AVAILABLE = False
+    st.warning("⚠️ Install finvizfinance for economic calendar: pip install finvizfinance")
 
 # ============================================================================
 # CONFIGURATION & CONSTANTS
 # ============================================================================
 
-FRED_API_KEY = "your_fred_api_key_here"  # Get free from https://fred.stlouisfed.org/docs/api/api_key.html
+# API Keys
+TRADING_ECONOMICS_API_KEY = "your_trading_economics_key_here"  # Get from https://tradingeconomics.com/
+FRED_API_KEY = "your_fred_api_key_here"  # For historical data
+
+# API URLs
+TE_BASE_URL = "https://api.tradingeconomics.com"
 FRED_API_URL = "https://api.stlouisfed.org/fred/series/observations"
 
-# Expanded Currency Coverage - Yahoo Finance supports 150+ currency pairs
+# Currency Coverage
 MAJOR_CURRENCIES = ["USD", "EUR", "GBP", "JPY", "AUD", "CAD", "CHF", "NZD"]
 MINOR_CURRENCIES = ["SEK", "NOK", "DKK", "SGD", "HKD", "KRW", "MXN", "ZAR", "TRY", "BRL", "INR", "CNY"]
-EXOTIC_CURRENCIES = ["PLN", "THB", "IDR", "MYR", "PHP", "CZK", "HUF", "ILS", "CLP", "ARS"]
+ALL_CURRENCIES = MAJOR_CURRENCIES + MINOR_CURRENCIES
 
-ALL_CURRENCIES = MAJOR_CURRENCIES + MINOR_CURRENCIES + EXOTIC_CURRENCIES
-
-# Currency to Country/Region Mapping (expanded)
+# Currency to Country Mapping
 CURRENCY_COUNTRIES = {
-    # Major Currencies
-    "USD": "US", "EUR": "EU", "GBP": "UK", "JPY": "JP", "AUD": "AU", "CAD": "CA", "CHF": "CH", "NZD": "NZ",
-    # Minor Currencies
-    "SEK": "SE", "NOK": "NO", "DKK": "DK", "SGD": "SG", "HKD": "HK", "KRW": "KR", "MXN": "MX", 
-    "ZAR": "ZA", "TRY": "TR", "BRL": "BR", "INR": "IN", "CNY": "CN",
-    # Exotic Currencies
-    "PLN": "PL", "THB": "TH", "IDR": "ID", "MYR": "MY", "PHP": "PH", "CZK": "CZ", "HUF": "HU",
-    "ILS": "IL", "CLP": "CL", "ARS": "AR"
+    "USD": "United States", "EUR": "Euro Area", "GBP": "United Kingdom", "JPY": "Japan",
+    "AUD": "Australia", "CAD": "Canada", "CHF": "Switzerland", "NZD": "New Zealand",
+    "SEK": "Sweden", "NOK": "Norway", "DKK": "Denmark", "SGD": "Singapore",
+    "HKD": "Hong Kong", "KRW": "South Korea", "MXN": "Mexico", "ZAR": "South Africa",
+    "TRY": "Turkey", "BRL": "Brazil", "INR": "India", "CNY": "China"
 }
 
-# Economic Indicators - Extended Coverage
-ECON_INDICATORS = {
-    "Inflation": {
-        "US": "CPIAUCSL", "EU": "CPHPTT01EZM659N", "UK": "CPALTT01GBM659N", "JP": "CPALTT01JPM659N",
-        "AU": "CPALTT01AUM659N", "CA": "CPALTT01CAM659N", "CH": "CPALTT01CHM659N", "CN": "CPALTT01CNM659N",
-        "NZ": "CPALTT01NZM659N", "SE": "CPALTT01SEM659N", "NO": "CPALTT01NOM659N", "MX": "CPALTT01MXM659N",
-        "IN": "CPALTT01INM659N", "BR": "CPALTT01BRM659N", "ZA": "CPALTT01ZAM659N", "KR": "CPALTT01KRM659N"
-    },
-    "Interest Rate": {
-        "US": "FEDFUNDS", "EU": "ECBDFR", "UK": "BOERUKQ", "JP": "IRSTCI01JPM156N",
-        "AU": "IRLTLT01AUM156N", "CA": "IRSTCI01CAM156N", "CH": "IRLTLT01CHM156N", "CN": "IRLTLT01CNM156N",
-        "NZ": "IRLTLT01NZM156N", "SE": "IRLTLT01SEM156N", "NO": "IRLTLT01NOM156N", "MX": "IRLTLT01MXM156N",
-        "IN": "IRLTLT01INM156N", "BR": "IRLTLT01BRM156N", "ZA": "IRLTLT01ZAM156N", "KR": "IRLTLT01KRM156N"
-    },
-    "GDP": {
-        "US": "GDP", "EU": "CLVMNACSCAB1GQEA19", "UK": "GBRRGDPQDSNAQ", "JP": "JPNRGDPEXP",
-        "AU": "AUSGDPEXP", "CA": "NAEXKP01CAQ189S", "CH": "CHEGDP", "CN": "CHNGDPEXP",
-        "NZ": "NZLRGDPEXP", "SE": "SWERGDP", "NO": "NORGDP", "MX": "MXNRGDPEXP",
-        "IN": "INDNGDP", "BR": "BRAREXP", "ZA": "ZAFRGDPEXP", "KR": "KORRGDPEXP"
-    },
-    "Trade Balance": {
-        "US": "NETEXP", "EU": "XTNTVA01EZM664S", "UK": "XTNTVA01GBM664S", "JP": "XTNTVA01JPM664S",
-        "AU": "XTNTVA01AUM664S", "CA": "XTNTVA01CAM664S", "CH": "XTNTVA01CHM664S", "CN": "XTNTVA01CNM664S",
-        "NZ": "XTNTVA01NZM664S", "SE": "XTNTVA01SEM664S", "MX": "XTNTVA01MXM664S", "IN": "XTNTVA01INM664S"
-    },
-    "Unemployment": {
-        "US": "UNRATE", "EU": "LRHUTTTTEZM156S", "UK": "LMUNRRTTGBM156S", "JP": "LMUNRRTTJPM156S",
-        "AU": "LMUNRRTTAUM156S", "CA": "LMUNRRTTCAM156S", "CH": "LMUNRRTTCHM156S", "NZ": "LMUNRRTTNZM156S",
-        "SE": "LMUNRRTTSEM156S", "MX": "LMUNRRTTMXM156S", "KR": "LMUNRRTTKRM156S", "ZA": "LMUNRRTTZAM156S"
-    }
+# Economic Indicators to Track
+ECONOMIC_INDICATORS = {
+    "Interest Rate": "Interest Rate",
+    "Inflation Rate": "Inflation Rate",
+    "GDP Growth Rate": "GDP Growth Rate",
+    "Unemployment Rate": "Unemployment Rate",
+    "Trade Balance": "Balance of Trade",
+    "Current Account": "Current Account",
+    "Government Debt": "Government Debt to GDP",
+    "Consumer Confidence": "Consumer Confidence"
 }
 
-# Popular Currency Pairs by Category
+# Popular Currency Pairs
 POPULAR_PAIRS = {
     "Major Pairs": ["EURUSD", "GBPUSD", "USDJPY", "USDCHF", "AUDUSD", "USDCAD", "NZDUSD"],
-    "Minor Pairs": ["EURGBP", "EURJPY", "GBPJPY", "EURCHF", "EURAUD", "EURCAD", "AUDNZD", "AUDJPY"],
-    "Exotic Pairs": ["USDTRY", "USDZAR", "USDMXN", "USDBRL", "USDINR", "USDSGD", "USDHKD", "USDKRW"],
-    "Commodity Pairs": ["AUDUSD", "NZDUSD", "USDCAD"],  # Commodity-linked currencies
-    "Safe Haven": ["USDJPY", "USDCHF", "XAUUSD"]  # Safe haven currencies
+    "Minor Pairs": ["EURGBP", "EURJPY", "GBPJPY", "EURCHF", "EURAUD", "EURCAD", "AUDJPY"],
+    "Exotic Pairs": ["USDTRY", "USDZAR", "USDMXN", "USDBRL", "USDINR", "USDSGD"]
 }
 
 # ============================================================================
-# DATA FETCHING FUNCTIONS
+# TRADING ECONOMICS API FUNCTIONS
 # ============================================================================
 
 @st.cache_data(ttl=3600)
+def fetch_te_historical(country: str, indicator: str, api_key: str) -> pd.DataFrame:
+    """
+    Fetch historical economic data from Trading Economics.
+    """
+    if not api_key or api_key == "your_trading_economics_key_here":
+        return pd.DataFrame()
+    
+    try:
+        url = f"{TE_BASE_URL}/historical/country/{country}/indicator/{indicator}"
+        params = {'c': api_key, 'f': 'json'}
+        
+        response = requests.get(url, params=params, timeout=30)
+        response.raise_for_status()
+        data = response.json()
+        
+        if data:
+            df = pd.DataFrame(data)
+            if 'DateTime' in df.columns and 'Value' in df.columns:
+                df['DateTime'] = pd.to_datetime(df['DateTime'])
+                df = df.set_index('DateTime').sort_index()
+                return df[['Value', 'Country', 'Category']]
+        
+        return pd.DataFrame()
+    except Exception as e:
+        return pd.DataFrame()
+
+@st.cache_data(ttl=1800)
+def fetch_te_forecast(country: str, indicator: str, api_key: str) -> pd.DataFrame:
+    """
+    Fetch ACTUAL FORECAST data from Trading Economics.
+    This shows what economists predict for future economic indicators.
+    """
+    if not api_key or api_key == "your_trading_economics_key_here":
+        return pd.DataFrame()
+    
+    try:
+        url = f"{TE_BASE_URL}/forecast/country/{country}/indicator/{indicator}"
+        params = {'c': api_key, 'f': 'json'}
+        
+        response = requests.get(url, params=params, timeout=30)
+        response.raise_for_status()
+        data = response.json()
+        
+        if data:
+            df = pd.DataFrame(data)
+            # TE forecasts include: q1, q2, q3, q4 (quarterly forecasts) and years ahead
+            return df
+        
+        return pd.DataFrame()
+    except Exception as e:
+        return pd.DataFrame()
+
+@st.cache_data(ttl=900)  # Cache for 15 minutes
+def fetch_te_calendar(country: str, api_key: str) -> pd.DataFrame:
+    """
+    Fetch upcoming economic calendar events from Trading Economics.
+    Shows: Date, Event, Actual, Forecast, Previous, Importance
+    """
+    if not api_key or api_key == "your_trading_economics_key_here":
+        return pd.DataFrame()
+    
+    try:
+        # Get calendar for specific country
+        url = f"{TE_BASE_URL}/calendar/country/{country}"
+        params = {'c': api_key, 'f': 'json'}
+        
+        response = requests.get(url, params=params, timeout=30)
+        response.raise_for_status()
+        data = response.json()
+        
+        if data:
+            df = pd.DataFrame(data)
+            # Filter for key indicators
+            key_events = ['Interest Rate', 'Inflation', 'GDP', 'Employment', 'Trade']
+            if 'Event' in df.columns:
+                df = df[df['Event'].str.contains('|'.join(key_events), case=False, na=False)]
+            return df
+        
+        return pd.DataFrame()
+    except Exception as e:
+        return pd.DataFrame()
+
+@st.cache_data(ttl=3600)
+def fetch_te_indicators_snapshot(country: str, api_key: str) -> pd.DataFrame:
+    """
+    Get current snapshot of all economic indicators for a country.
+    Includes latest value, previous value, and forecasts.
+    """
+    if not api_key or api_key == "your_trading_economics_key_here":
+        return pd.DataFrame()
+    
+    try:
+        url = f"{TE_BASE_URL}/country/{country}"
+        params = {'c': api_key, 'f': 'json'}
+        
+        response = requests.get(url, params=params, timeout=30)
+        response.raise_for_status()
+        data = response.json()
+        
+        if data:
+            df = pd.DataFrame(data)
+            return df
+        
+        return pd.DataFrame()
+    except Exception as e:
+        return pd.DataFrame()
+
+# ============================================================================
+# FINVIZ ECONOMIC CALENDAR FUNCTIONS
+# ============================================================================
+
+@st.cache_data(ttl=900)
+def fetch_finviz_calendar() -> pd.DataFrame:
+    """
+    Fetch economic calendar from FinViz (free, no API key needed).
+    Shows upcoming economic releases with Expected, Actual, and Previous values.
+    """
+    if not FINVIZ_AVAILABLE:
+        return pd.DataFrame()
+    
+    try:
+        calendar = Calendar()
+        df = calendar.calendar()
+        
+        if df is not None and not df.empty:
+            # FinViz provides: Datetime, Release, Impact, For, Actual, Expected, Prior
+            return df
+        
+        return pd.DataFrame()
+    except Exception as e:
+        return pd.DataFrame()
+
+# ============================================================================
+# YAHOO FINANCE DATA FUNCTIONS
+# ============================================================================
+
+@st.cache_data(ttl=1800)
+def fetch_fx_data(pair: str, start_date, end_date, interval='1d') -> pd.DataFrame:
+    """Fetch FX rate data from Yahoo Finance."""
+    try:
+        ticker = f"{pair}=X"
+        data = yf.download(ticker, start=start_date, end=end_date, interval=interval, progress=False)
+        
+        if data.empty:
+            return pd.DataFrame()
+        
+        df = pd.DataFrame()
+        df['Rate'] = data['Close'] if 'Close' in data.columns else data['Adj Close']
+        
+        if 'Open' in data.columns:
+            df['Open'] = data['Open']
+        if 'High' in data.columns:
+            df['High'] = data['High']
+        if 'Low' in data.columns:
+            df['Low'] = data['Low']
+        if 'Volume' in data.columns:
+            df['Volume'] = data['Volume']
+            
+        return df.dropna()
+    except Exception:
+        return pd.DataFrame()
+
+@st.cache_data(ttl=3600)
 def fetch_fred_data(series_id: str, start_date: str, end_date: str, api_key: str) -> pd.DataFrame:
-    """
-    Fetch economic data from FRED API with improved error handling.
-    """
+    """Fetch historical economic data from FRED (backup source)."""
     if not api_key or api_key == "your_fred_api_key_here":
         return pd.DataFrame()
 
@@ -102,8 +246,7 @@ def fetch_fred_data(series_id: str, start_date: str, end_date: str, api_key: str
         'api_key': api_key,
         'file_type': 'json',
         'observation_start': start_date,
-        'observation_end': end_date,
-        'sort_order': 'desc'
+        'observation_end': end_date
     }
 
     try:
@@ -117,62 +260,17 @@ def fetch_fred_data(series_id: str, start_date: str, end_date: str, api_key: str
             df['value'] = pd.to_numeric(df['value'], errors='coerce')
             df = df.dropna(subset=['value']).sort_values('date').set_index('date')
             return df[['value']]
-        return pd.DataFrame()
-    except requests.exceptions.RequestException as e:
-        return pd.DataFrame()
-    except Exception as e:
-        return pd.DataFrame()
-
-@st.cache_data(ttl=1800)
-def fetch_fx_data(pair: str, start_date, end_date, interval='1d') -> pd.DataFrame:
-    """
-    Fetch FX rate data from yfinance with improved error handling and validation.
-    """
-    try:
-        ticker = f"{pair}=X"
-        data = yf.download(ticker, start=start_date, end=end_date, interval=interval, progress=False)
         
-        if data.empty:
-            return pd.DataFrame()
-        
-        # Get all available columns
-        df = pd.DataFrame()
-        df['Rate'] = data['Close'] if 'Close' in data.columns else data['Adj Close']
-        
-        # Add additional price data if available
-        if 'Open' in data.columns:
-            df['Open'] = data['Open']
-        if 'High' in data.columns:
-            df['High'] = data['High']
-        if 'Low' in data.columns:
-            df['Low'] = data['Low']
-        if 'Volume' in data.columns:
-            df['Volume'] = data['Volume']
-            
-        return df.dropna()
-    except Exception as e:
         return pd.DataFrame()
-
-@st.cache_data(ttl=3600)
-def fetch_multiple_fx_pairs(pairs: List[str], start_date, end_date) -> Dict[str, pd.DataFrame]:
-    """
-    Batch fetch multiple FX pairs efficiently.
-    """
-    result = {}
-    for pair in pairs:
-        df = fetch_fx_data(pair, start_date, end_date)
-        if not df.empty:
-            result[pair] = df
-    return result
+    except Exception:
+        return pd.DataFrame()
 
 # ============================================================================
 # TECHNICAL ANALYSIS FUNCTIONS
 # ============================================================================
 
 def calculate_technical_indicators(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Calculate comprehensive technical indicators.
-    """
+    """Calculate technical indicators for FX data."""
     if df.empty or 'Rate' not in df.columns:
         return df
     
@@ -183,16 +281,7 @@ def calculate_technical_indicators(df: pd.DataFrame) -> pd.DataFrame:
     result['SMA_50'] = result['Rate'].rolling(window=50).mean()
     result['SMA_200'] = result['Rate'].rolling(window=200).mean()
     
-    # Exponential Moving Averages
-    result['EMA_12'] = result['Rate'].ewm(span=12, adjust=False).mean()
-    result['EMA_26'] = result['Rate'].ewm(span=26, adjust=False).mean()
-    
-    # MACD
-    result['MACD'] = result['EMA_12'] - result['EMA_26']
-    result['Signal_Line'] = result['MACD'].ewm(span=9, adjust=False).mean()
-    result['MACD_Histogram'] = result['MACD'] - result['Signal_Line']
-    
-    # RSI (Relative Strength Index)
+    # RSI
     delta = result['Rate'].diff()
     gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
     loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
@@ -204,310 +293,39 @@ def calculate_technical_indicators(df: pd.DataFrame) -> pd.DataFrame:
     bb_std = result['Rate'].rolling(window=20).std()
     result['BB_Upper'] = result['BB_Middle'] + (bb_std * 2)
     result['BB_Lower'] = result['BB_Middle'] - (bb_std * 2)
-    result['BB_Width'] = (result['BB_Upper'] - result['BB_Lower']) / result['BB_Middle']
     
     # Volatility
     result['Returns'] = result['Rate'].pct_change()
-    result['Volatility_20'] = result['Returns'].rolling(window=20).std() * np.sqrt(252)
-    
-    # Average True Range (ATR) - if OHLC data available
-    if all(col in result.columns for col in ['High', 'Low', 'Open']):
-        high_low = result['High'] - result['Low']
-        high_close = np.abs(result['High'] - result['Rate'].shift())
-        low_close = np.abs(result['Low'] - result['Rate'].shift())
-        true_range = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
-        result['ATR'] = true_range.rolling(window=14).mean()
+    result['Volatility'] = result['Returns'].rolling(window=20).std() * np.sqrt(252) * 100
     
     return result
-
-def calculate_momentum_indicators(df: pd.DataFrame) -> Dict[str, float]:
-    """
-    Calculate momentum and trend indicators for current market conditions.
-    """
-    if df.empty or len(df) < 50:
-        return {}
-    
-    indicators = {}
-    
-    # Current vs Moving Averages
-    current_price = df['Rate'].iloc[-1]
-    sma_20 = df['SMA_20'].iloc[-1] if 'SMA_20' in df.columns else None
-    sma_50 = df['SMA_50'].iloc[-1] if 'SMA_50' in df.columns else None
-    
-    if sma_20:
-        indicators['Price vs SMA20'] = ((current_price / sma_20) - 1) * 100
-    if sma_50:
-        indicators['Price vs SMA50'] = ((current_price / sma_50) - 1) * 100
-    
-    # RSI
-    if 'RSI' in df.columns:
-        indicators['RSI'] = df['RSI'].iloc[-1]
-    
-    # MACD Signal
-    if 'MACD' in df.columns and 'Signal_Line' in df.columns:
-        indicators['MACD'] = df['MACD'].iloc[-1]
-        indicators['MACD Signal'] = df['Signal_Line'].iloc[-1]
-    
-    # Volatility
-    if 'Volatility_20' in df.columns:
-        indicators['Volatility (20d)'] = df['Volatility_20'].iloc[-1] * 100
-    
-    # Recent Performance
-    if len(df) >= 5:
-        indicators['5-Day Change %'] = ((df['Rate'].iloc[-1] / df['Rate'].iloc[-5]) - 1) * 100
-    if len(df) >= 20:
-        indicators['20-Day Change %'] = ((df['Rate'].iloc[-1] / df['Rate'].iloc[-20]) - 1) * 100
-    
-    return indicators
-
-# ============================================================================
-# STATISTICAL & CORRELATION ANALYSIS
-# ============================================================================
-
-def calculate_correlation_matrix(fx_data: Dict[str, pd.DataFrame]) -> pd.DataFrame:
-    """
-    Calculate correlation matrix for multiple currency pairs.
-    """
-    if not fx_data:
-        return pd.DataFrame()
-    
-    # Align all data to common dates and calculate returns
-    returns_dict = {}
-    for pair, df in fx_data.items():
-        if not df.empty and 'Rate' in df.columns:
-            returns = df['Rate'].pct_change().dropna()
-            returns_dict[pair] = returns
-    
-    if not returns_dict:
-        return pd.DataFrame()
-    
-    # Create aligned dataframe
-    returns_df = pd.DataFrame(returns_dict)
-    correlation_matrix = returns_df.corr()
-    
-    return correlation_matrix
-
-def calculate_pair_statistics(df: pd.DataFrame) -> Dict[str, float]:
-    """
-    Calculate comprehensive statistics for a currency pair.
-    """
-    if df.empty or 'Rate' not in df.columns:
-        return {}
-    
-    stats_dict = {}
-    
-    # Price Statistics
-    stats_dict['Current Price'] = df['Rate'].iloc[-1]
-    stats_dict['Mean'] = df['Rate'].mean()
-    stats_dict['Std Dev'] = df['Rate'].std()
-    stats_dict['Min'] = df['Rate'].min()
-    stats_dict['Max'] = df['Rate'].max()
-    
-    # Returns Statistics
-    if 'Returns' in df.columns:
-        returns = df['Returns'].dropna()
-        stats_dict['Avg Daily Return %'] = returns.mean() * 100
-        stats_dict['Return Volatility %'] = returns.std() * 100
-        stats_dict['Sharpe Ratio (annualized)'] = (returns.mean() / returns.std()) * np.sqrt(252) if returns.std() > 0 else 0
-        
-        # Skewness and Kurtosis
-        stats_dict['Skewness'] = returns.skew()
-        stats_dict['Kurtosis'] = returns.kurtosis()
-    
-    # Drawdown
-    cumulative = (1 + df['Returns']).cumprod() if 'Returns' in df.columns else df['Rate'] / df['Rate'].iloc[0]
-    running_max = cumulative.expanding().max()
-    drawdown = (cumulative - running_max) / running_max
-    stats_dict['Max Drawdown %'] = drawdown.min() * 100
-    
-    return stats_dict
-
-# ============================================================================
-# FORECASTING & PREDICTIONS
-# ============================================================================
-
-def advanced_forecast(series: pd.Series, periods: int = 30, method: str = 'ensemble') -> Tuple[pd.Series, pd.Series, pd.Series]:
-    """
-    Advanced forecasting with confidence intervals using ensemble methods.
-    Returns: (forecast, lower_bound, upper_bound)
-    """
-    if len(series) < 30:
-        return pd.Series(), pd.Series(), pd.Series()
-    
-    # Prepare data
-    x = np.arange(len(series)).reshape(-1, 1)
-    y = series.values
-    
-    # Remove NaN values
-    valid_idx = ~np.isnan(y)
-    x = x[valid_idx]
-    y = y[valid_idx]
-    
-    if len(y) < 10:
-        return pd.Series(), pd.Series(), pd.Series()
-    
-    try:
-        if method == 'linear':
-            model = LinearRegression()
-        elif method == 'rf':
-            model = RandomForestRegressor(n_estimators=100, random_state=42)
-        else:  # ensemble
-            # Use weighted average of linear and RF
-            lr_model = LinearRegression()
-            rf_model = RandomForestRegressor(n_estimators=50, random_state=42)
-            lr_model.fit(x, y)
-            rf_model.fit(x, y)
-            
-            future_x = np.arange(len(series), len(series) + periods).reshape(-1, 1)
-            lr_pred = lr_model.predict(future_x)
-            rf_pred = rf_model.predict(future_x)
-            forecast_values = 0.5 * lr_pred + 0.5 * rf_pred
-            
-            # Calculate confidence intervals based on historical volatility
-            residuals = y - 0.5 * lr_model.predict(x) - 0.5 * rf_model.predict(x)
-            std_error = np.std(residuals)
-            
-            last_date = series.index[-1]
-            future_dates = [last_date + timedelta(days=i) for i in range(1, periods + 1)]
-            
-            forecast = pd.Series(forecast_values, index=future_dates)
-            lower = pd.Series(forecast_values - 1.96 * std_error, index=future_dates)
-            upper = pd.Series(forecast_values + 1.96 * std_error, index=future_dates)
-            
-            return forecast, lower, upper
-    except Exception as e:
-        return pd.Series(), pd.Series(), pd.Series()
-    
-    # Default return for non-ensemble methods
-    model.fit(x, y)
-    future_x = np.arange(len(series), len(series) + periods).reshape(-1, 1)
-    forecast_values = model.predict(future_x)
-    
-    residuals = y - model.predict(x)
-    std_error = np.std(residuals)
-    
-    last_date = series.index[-1]
-    future_dates = [last_date + timedelta(days=i) for i in range(1, periods + 1)]
-    
-    forecast = pd.Series(forecast_values, index=future_dates)
-    lower = pd.Series(forecast_values - 1.96 * std_error, index=future_dates)
-    upper = pd.Series(forecast_values + 1.96 * std_error, index=future_dates)
-    
-    return forecast, lower, upper
-
-# ============================================================================
-# ECONOMIC ANALYSIS FUNCTIONS
-# ============================================================================
-
-def calculate_real_rate(nominal_df: pd.DataFrame, inflation_df: pd.DataFrame) -> pd.DataFrame:
-    """Calculate real interest rate: Nominal - Inflation."""
-    if nominal_df.empty or inflation_df.empty:
-        return pd.DataFrame()
-    
-    # Align data by index
-    combined = pd.concat([
-        nominal_df.rename(columns={'value': 'Nominal'}), 
-        inflation_df.rename(columns={'value': 'Inflation'})
-    ], axis=1).dropna()
-    
-    if combined.empty:
-        return pd.DataFrame()
-    
-    combined['Real Rate'] = combined['Nominal'] - combined['Inflation']
-    return combined[['Real Rate']]
-
-def calculate_interest_rate_differential(data_dict: Dict, pair: str) -> Optional[float]:
-    """Calculate interest rate differential between two currencies."""
-    base_curr, quote_curr = pair[:3], pair[3:]
-    
-    rate_base_key = f"Interest Rate ({base_curr})"
-    rate_quote_key = f"Interest Rate ({quote_curr})"
-    
-    if rate_base_key in data_dict and rate_quote_key in data_dict:
-        base_df = data_dict[rate_base_key]
-        quote_df = data_dict[quote_quote_key]
-        
-        if not base_df.empty and not quote_df.empty:
-            return base_df.iloc[-1, 0] - quote_df.iloc[-1, 0]
-    
-    return None
 
 # ============================================================================
 # VISUALIZATION FUNCTIONS
 # ============================================================================
 
-def create_candlestick_chart(df: pd.DataFrame, pair: str) -> go.Figure:
-    """Create candlestick chart with volume if available."""
-    if df.empty:
-        return go.Figure()
+def create_price_chart(df: pd.DataFrame, pair: str) -> go.Figure:
+    """Create price chart with technical indicators."""
+    fig = make_subplots(rows=2, cols=1, shared_xaxes=True, 
+                        vertical_spacing=0.05, row_heights=[0.7, 0.3])
     
-    has_ohlc = all(col in df.columns for col in ['Open', 'High', 'Low', 'Rate'])
+    # Price
+    fig.add_trace(go.Scatter(x=df.index, y=df['Rate'], name='Price', line=dict(color='blue')), row=1, col=1)
     
-    if has_ohlc and len(df) < 500:  # Only show candlesticks for reasonable data sizes
-        fig = make_subplots(
-            rows=2, cols=1,
-            shared_xaxes=True,
-            vertical_spacing=0.03,
-            row_heights=[0.7, 0.3]
-        )
-        
-        fig.add_trace(
-            go.Candlestick(
-                x=df.index,
-                open=df['Open'],
-                high=df['High'],
-                low=df['Low'],
-                close=df['Rate'],
-                name=pair
-            ),
-            row=1, col=1
-        )
-        
-        if 'Volume' in df.columns:
-            fig.add_trace(
-                go.Bar(x=df.index, y=df['Volume'], name='Volume', marker_color='lightblue'),
-                row=2, col=1
-            )
-    else:
-        fig = go.Figure()
-        fig.add_trace(go.Scatter(x=df.index, y=df['Rate'], mode='lines', name=pair))
-    
-    fig.update_layout(
-        title=f"{pair} Exchange Rate",
-        xaxis_title="Date",
-        yaxis_title="Rate",
-        height=600,
-        template='plotly_white',
-        hovermode='x unified'
-    )
-    
-    return fig
-
-def create_technical_chart(df: pd.DataFrame, pair: str) -> go.Figure:
-    """Create comprehensive technical analysis chart."""
-    if df.empty:
-        return go.Figure()
-    
-    fig = make_subplots(
-        rows=3, cols=1,
-        shared_xaxes=True,
-        vertical_spacing=0.05,
-        row_heights=[0.5, 0.25, 0.25],
-        subplot_titles=(f'{pair} Price & Moving Averages', 'RSI', 'MACD')
-    )
-    
-    # Price and Moving Averages
-    fig.add_trace(go.Scatter(x=df.index, y=df['Rate'], name='Price', line=dict(color='black')), row=1, col=1)
-    
+    # Moving Averages
     if 'SMA_20' in df.columns:
-        fig.add_trace(go.Scatter(x=df.index, y=df['SMA_20'], name='SMA 20', line=dict(dash='dash')), row=1, col=1)
+        fig.add_trace(go.Scatter(x=df.index, y=df['SMA_20'], name='SMA 20', 
+                                line=dict(dash='dash', color='orange')), row=1, col=1)
     if 'SMA_50' in df.columns:
-        fig.add_trace(go.Scatter(x=df.index, y=df['SMA_50'], name='SMA 50', line=dict(dash='dash')), row=1, col=1)
+        fig.add_trace(go.Scatter(x=df.index, y=df['SMA_50'], name='SMA 50', 
+                                line=dict(dash='dash', color='red')), row=1, col=1)
     
     # Bollinger Bands
-    if all(col in df.columns for col in ['BB_Upper', 'BB_Lower', 'BB_Middle']):
-        fig.add_trace(go.Scatter(x=df.index, y=df['BB_Upper'], name='BB Upper', line=dict(color='gray', dash='dot')), row=1, col=1)
-        fig.add_trace(go.Scatter(x=df.index, y=df['BB_Lower'], name='BB Lower', line=dict(color='gray', dash='dot'), fill='tonexty', fillcolor='rgba(128,128,128,0.1)'), row=1, col=1)
+    if all(col in df.columns for col in ['BB_Upper', 'BB_Lower']):
+        fig.add_trace(go.Scatter(x=df.index, y=df['BB_Upper'], name='BB Upper', 
+                                line=dict(color='gray', dash='dot')), row=1, col=1)
+        fig.add_trace(go.Scatter(x=df.index, y=df['BB_Lower'], name='BB Lower', 
+                                line=dict(color='gray', dash='dot'), fill='tonexty'), row=1, col=1)
     
     # RSI
     if 'RSI' in df.columns:
@@ -515,112 +333,57 @@ def create_technical_chart(df: pd.DataFrame, pair: str) -> go.Figure:
         fig.add_hline(y=70, line_dash="dash", line_color="red", row=2, col=1)
         fig.add_hline(y=30, line_dash="dash", line_color="green", row=2, col=1)
     
-    # MACD
-    if 'MACD' in df.columns:
-        fig.add_trace(go.Scatter(x=df.index, y=df['MACD'], name='MACD', line=dict(color='blue')), row=3, col=1)
-    if 'Signal_Line' in df.columns:
-        fig.add_trace(go.Scatter(x=df.index, y=df['Signal_Line'], name='Signal', line=dict(color='red')), row=3, col=1)
-    if 'MACD_Histogram' in df.columns:
-        colors = ['green' if val >= 0 else 'red' for val in df['MACD_Histogram']]
-        fig.add_trace(go.Bar(x=df.index, y=df['MACD_Histogram'], name='Histogram', marker_color=colors), row=3, col=1)
-    
-    fig.update_layout(height=900, showlegend=True, template='plotly_white')
+    fig.update_layout(title=f"{pair} Technical Analysis", height=700, template='plotly_white')
     fig.update_yaxes(title_text="Price", row=1, col=1)
     fig.update_yaxes(title_text="RSI", row=2, col=1)
-    fig.update_yaxes(title_text="MACD", row=3, col=1)
     
     return fig
 
-def create_correlation_heatmap(corr_matrix: pd.DataFrame) -> go.Figure:
-    """Create correlation heatmap for currency pairs."""
-    if corr_matrix.empty:
-        return go.Figure()
-    
-    fig = go.Figure(data=go.Heatmap(
-        z=corr_matrix.values,
-        x=corr_matrix.columns,
-        y=corr_matrix.index,
-        colorscale='RdBu',
-        zmid=0,
-        text=corr_matrix.values.round(2),
-        texttemplate='%{text}',
-        textfont={"size": 10},
-        colorbar=dict(title="Correlation")
-    ))
-    
-    fig.update_layout(
-        title="Currency Pair Correlation Matrix (Daily Returns)",
-        height=600,
-        template='plotly_white'
-    )
-    
-    return fig
-
-def create_indicator_comparison(df1: pd.DataFrame, df2: pd.DataFrame, label1: str, label2: str, title: str) -> go.Figure:
-    """Create dual-axis comparison chart for economic indicators."""
-    fig = make_subplots(specs=[[{"secondary_y": True}]])
-    
-    if not df1.empty:
-        fig.add_trace(
-            go.Scatter(x=df1.index, y=df1.iloc[:, 0], name=label1, line=dict(color='blue')),
-            secondary_y=False
-        )
-    
-    if not df2.empty:
-        fig.add_trace(
-            go.Scatter(x=df2.index, y=df2.iloc[:, 0], name=label2, line=dict(color='red')),
-            secondary_y=True
-        )
-    
-    fig.update_layout(
-        title=title,
-        template='plotly_white',
-        height=400,
-        hovermode='x unified'
-    )
-    
-    fig.update_yaxes(title_text=label1, secondary_y=False)
-    fig.update_yaxes(title_text=label2, secondary_y=True)
-    
-    return fig
-
-def create_forecast_chart(historical: pd.Series, forecast: pd.Series, lower: pd.Series, upper: pd.Series, title: str) -> go.Figure:
-    """Create forecast chart with confidence intervals."""
+def create_forecast_comparison_chart(historical: pd.DataFrame, forecast: pd.DataFrame, 
+                                     indicator: str, country: str) -> go.Figure:
+    """
+    Create chart comparing historical data with actual economist forecasts.
+    """
     fig = go.Figure()
     
     # Historical data
-    fig.add_trace(go.Scatter(
-        x=historical.index,
-        y=historical.values,
-        name='Historical',
-        line=dict(color='blue')
-    ))
-    
-    # Forecast
-    if not forecast.empty:
+    if not historical.empty and 'Value' in historical.columns:
         fig.add_trace(go.Scatter(
-            x=forecast.index,
-            y=forecast.values,
-            name='Forecast',
-            line=dict(color='red', dash='dash')
+            x=historical.index,
+            y=historical['Value'],
+            name='Historical',
+            line=dict(color='blue', width=2)
         ))
+    
+    # Forecast data (quarterly projections)
+    if not forecast.empty:
+        # Trading Economics provides quarterly forecasts (q1, q2, q3, q4)
+        quarters = ['q1', 'q2', 'q3', 'q4']
+        forecast_dates = []
+        forecast_values = []
         
-        # Confidence interval
-        if not lower.empty and not upper.empty:
+        if 'q1' in forecast.columns:
+            # Create future dates for quarterly forecasts
+            last_date = historical.index[-1] if not historical.empty else datetime.now()
+            for i, q in enumerate(quarters):
+                if q in forecast.columns:
+                    forecast_dates.append(last_date + timedelta(days=90*(i+1)))
+                    forecast_values.append(forecast[q].iloc[0])
+        
+        if forecast_dates and forecast_values:
             fig.add_trace(go.Scatter(
-                x=list(upper.index) + list(upper.index[::-1]),
-                y=list(upper.values) + list(lower.values[::-1]),
-                fill='toself',
-                fillcolor='rgba(255,0,0,0.2)',
-                line=dict(color='rgba(255,255,255,0)'),
-                name='95% Confidence',
-                showlegend=True
+                x=forecast_dates,
+                y=forecast_values,
+                name='Economist Forecast',
+                line=dict(color='red', width=2, dash='dash'),
+                mode='lines+markers',
+                marker=dict(size=10)
             ))
     
     fig.update_layout(
-        title=title,
+        title=f"{indicator} - {country}: Historical vs Forecast",
         xaxis_title="Date",
-        yaxis_title="Value",
+        yaxis_title=indicator,
         height=500,
         template='plotly_white',
         hovermode='x unified'
@@ -628,719 +391,528 @@ def create_forecast_chart(historical: pd.Series, forecast: pd.Series, lower: pd.
     
     return fig
 
+def create_calendar_table(calendar_df: pd.DataFrame) -> go.Figure:
+    """Create interactive table of upcoming economic events."""
+    if calendar_df.empty:
+        return go.Figure()
+    
+    # Select key columns
+    display_cols = []
+    for col in ['Date', 'Event', 'Actual', 'Forecast', 'Previous', 'Importance', 'Expected', 'Prior']:
+        if col in calendar_df.columns:
+            display_cols.append(col)
+    
+    if not display_cols:
+        return go.Figure()
+    
+    df_display = calendar_df[display_cols].head(20)  # Show top 20 events
+    
+    fig = go.Figure(data=[go.Table(
+        header=dict(
+            values=list(df_display.columns),
+            fill_color='paleturquoise',
+            align='left',
+            font=dict(size=12, color='black')
+        ),
+        cells=dict(
+            values=[df_display[col] for col in df_display.columns],
+            fill_color='lavender',
+            align='left',
+            font=dict(size=11)
+        )
+    )])
+    
+    fig.update_layout(title="Upcoming Economic Releases", height=600)
+    
+    return fig
+
 # ============================================================================
-# MAIN STREAMLIT APPLICATION
+# MAIN APPLICATION
 # ============================================================================
 
 def forex_module(analysis_context=None):
-    """
-    Main Forex Analysis Module - Professional Edition
-    """
+    """Main Forex Analysis Module with Real Economic Forecasts."""
     
-    # Page Configuration
     st.set_page_config(page_title="Forex Analysis Pro", page_icon="📈", layout="wide")
     
     # Header
-    st.markdown("# 📈 Professional Forex Analysis Platform")
-    st.markdown("### Advanced Currency Analysis with Economic Indicators, Technical Analysis & Predictions")
+    st.markdown("# 📈 Professional Forex Analysis")
+    st.markdown("### Real Economic Forecasts & Technical Analysis")
     st.markdown("---")
     
-    # Sidebar Configuration
+    # Sidebar
     with st.sidebar:
         st.header("⚙️ Configuration")
         
-        # API Key
-        api_key = st.text_input(
-            "FRED API Key",
+        # API Keys
+        te_api_key = st.text_input(
+            "Trading Economics API Key",
+            value=TRADING_ECONOMICS_API_KEY,
+            type="password",
+            help="Get free trial at https://tradingeconomics.com/"
+        )
+        
+        fred_api_key = st.text_input(
+            "FRED API Key (Optional)",
             value=FRED_API_KEY,
             type="password",
-            help="Get your free API key from https://fred.stlouisfed.org/docs/api/api_key.html"
+            help="For additional historical data"
         )
         
         st.markdown("---")
         
-        # Currency Selection Mode
+        # Currency Pair Selection
         selection_mode = st.radio(
             "Selection Mode",
-            ["Quick Select (Popular Pairs)", "Custom Pairs", "Build Your Own"],
+            ["Quick Select", "Build Your Own"],
             help="Choose how to select currency pairs"
         )
         
         selected_pairs = []
         
-        if selection_mode == "Quick Select (Popular Pairs)":
+        if selection_mode == "Quick Select":
             category = st.selectbox("Category", list(POPULAR_PAIRS.keys()))
             selected_pairs = st.multiselect(
                 "Select Pairs",
                 POPULAR_PAIRS[category],
-                default=POPULAR_PAIRS[category][:3]
+                default=POPULAR_PAIRS[category][:2]
             )
-        
-        elif selection_mode == "Custom Pairs":
-            # Pre-formatted pair selection
-            selected_pairs = st.multiselect(
-                "Select Currency Pairs",
-                [pair for category in POPULAR_PAIRS.values() for pair in category],
-                default=["EURUSD", "GBPUSD"]
-            )
-        
-        else:  # Build Your Own
-            st.markdown("##### Build Custom Pairs")
-            num_pairs = st.number_input("Number of pairs", 1, 10, 2)
-            
+        else:
+            num_pairs = st.number_input("Number of pairs", 1, 5, 2)
             for i in range(num_pairs):
                 col1, col2 = st.columns(2)
                 with col1:
                     base = st.selectbox(f"Base {i+1}", ALL_CURRENCIES, key=f"base_{i}")
                 with col2:
                     quote = st.selectbox(f"Quote {i+1}", ALL_CURRENCIES, key=f"quote_{i}", index=1)
-                
                 if base != quote:
                     selected_pairs.append(f"{base}{quote}")
         
         st.markdown("---")
         
         # Date Range
-        st.subheader("📅 Date Range")
-        period_preset = st.selectbox(
-            "Quick Period",
-            ["Custom", "1 Month", "3 Months", "6 Months", "1 Year", "2 Years", "5 Years"],
-            index=4
-        )
+        period = st.selectbox("Period", ["3 Months", "6 Months", "1 Year", "2 Years"], index=2)
+        period_map = {"3 Months": 90, "6 Months": 180, "1 Year": 365, "2 Years": 730}
         
         end_date = datetime.today().date()
-        
-        if period_preset == "Custom":
-            start_date = st.date_input("Start Date", value=end_date - timedelta(days=365))
-            end_date = st.date_input("End Date", value=end_date)
-        else:
-            period_map = {
-                "1 Month": 30, "3 Months": 90, "6 Months": 180,
-                "1 Year": 365, "2 Years": 730, "5 Years": 1825
-            }
-            start_date = end_date - timedelta(days=period_map[period_preset])
+        start_date = end_date - timedelta(days=period_map[period])
         
         st.markdown("---")
         
         # Analysis Options
-        st.subheader("🔧 Analysis Options")
+        st.subheader("Analysis Options")
         show_technical = st.checkbox("Technical Analysis", value=True)
-        show_economic = st.checkbox("Economic Indicators", value=True)
-        show_correlation = st.checkbox("Correlation Analysis", value=True)
-        show_forecast = st.checkbox("Forecasting", value=True)
-        
-        forecast_days = 30
-        if show_forecast:
-            forecast_days = st.slider("Forecast Days", 7, 90, 30)
+        show_economic = st.checkbox("Economic Indicators & Forecasts", value=True)
+        show_calendar = st.checkbox("Economic Calendar", value=True)
     
-    # Main Content Area
+    # Main Content
     if not selected_pairs:
-        st.info("👈 Please select at least one currency pair from the sidebar to begin analysis")
-        st.markdown("### 💡 Quick Start Guide")
-        st.markdown("""
-        1. **Select Mode**: Choose how you want to pick currency pairs
-        2. **Choose Pairs**: Select one or more currency pairs to analyze
-        3. **Set Date Range**: Pick your analysis timeframe
-        4. **Configure Analysis**: Enable the analyses you need
-        5. **Click Analyze**: Start the comprehensive analysis
-        """)
+        st.info("👈 Select currency pairs from the sidebar to begin")
         
-        # Show available currencies
-        with st.expander("📚 Available Currencies"):
-            col1, col2, col3 = st.columns(3)
-            with col1:
-                st.markdown("**Major Currencies**")
-                for curr in MAJOR_CURRENCIES:
-                    st.markdown(f"- {curr}")
-            with col2:
-                st.markdown("**Minor Currencies**")
-                for curr in MINOR_CURRENCIES:
-                    st.markdown(f"- {curr}")
-            with col3:
-                st.markdown("**Exotic Currencies**")
-                for curr in EXOTIC_CURRENCIES:
-                    st.markdown(f"- {curr}")
+        # Show info about forecasts
+        with st.expander("ℹ️ About Economic Forecasts"):
+            st.markdown("""
+            This module displays **REAL ECONOMIC FORECASTS** from professional economists and institutions:
+            
+            **Data Sources:**
+            - 📊 **Trading Economics**: Quarterly forecasts for interest rates, inflation, GDP, unemployment
+            - 📅 **FinViz Economic Calendar**: Upcoming releases with consensus forecasts
+            - 📈 **Yahoo Finance**: Historical FX price data
+            - 🏦 **FRED**: Backup historical economic data
+            
+            **What You'll See:**
+            - **Historical Data**: Actual economic indicators over time
+            - **Economist Forecasts**: Projected values from consensus estimates
+            - **Economic Calendar**: Upcoming releases with expected vs actual values
+            - **Interest Rate Decisions**: Central bank forecasts and market expectations
+            - **Consensus Estimates**: What the market expects for key indicators
+            
+            **Not ML Predictions:**
+            This is NOT machine learning or algorithmic forecasting - these are actual predictions
+            from economists, analysts, and institutions used by professional traders.
+            """)
         
         return
     
     # Analysis Button
-    st.markdown("---")
-    analyze_button = st.button("🚀 Run Comprehensive Analysis", type="primary", use_container_width=True)
+    analyze_button = st.button("🚀 Run Analysis", type="primary", use_container_width=True)
     
     if not analyze_button:
-        st.info("👆 Click the button above to start the analysis")
+        st.info("👆 Click 'Run Analysis' to start")
         return
     
     # ========================================================================
-    # DATA LOADING & PROCESSING
+    # DATA LOADING
     # ========================================================================
     
     st.markdown("---")
-    st.header("📊 Loading Data...")
-    
+    st.header("Loading Data...")
     progress_bar = st.progress(0)
     status_text = st.empty()
     
     # Fetch FX Data
-    status_text.text("Fetching currency pair data...")
-    fx_data = fetch_multiple_fx_pairs(selected_pairs, start_date, end_date)
+    status_text.text("Fetching currency price data...")
+    fx_data = {}
+    for pair in selected_pairs:
+        df = fetch_fx_data(pair, start_date, end_date)
+        if not df.empty:
+            fx_data[pair] = calculate_technical_indicators(df)
     progress_bar.progress(0.3)
     
-    if not fx_data:
-        st.error("❌ Failed to fetch FX data. Please check your currency pairs and try again.")
-        return
-    
-    # Calculate Technical Indicators
-    if show_technical:
-        status_text.text("Calculating technical indicators...")
-        for pair in fx_data:
-            fx_data[pair] = calculate_technical_indicators(fx_data[pair])
-        progress_bar.progress(0.5)
-    
-    # Fetch Economic Data
+    # Fetch Economic Data & Forecasts
     econ_data = {}
-    if show_economic and api_key and api_key != "your_fred_api_key_here":
-        status_text.text("Fetching economic indicators...")
+    forecast_data = {}
+    calendar_data = {}
+    
+    if show_economic and te_api_key and te_api_key != "your_trading_economics_key_here":
+        status_text.text("Fetching economic indicators and forecasts...")
         
-        for i, pair in enumerate(selected_pairs):
+        for pair in selected_pairs:
             base_curr, quote_curr = pair[:3], pair[3:]
-            base_country = CURRENCY_COUNTRIES.get(base_curr)
-            quote_country = CURRENCY_COUNTRIES.get(quote_curr)
-            
-            if not base_country or not quote_country:
-                continue
+            base_country = CURRENCY_COUNTRIES.get(base_curr, "")
+            quote_country = CURRENCY_COUNTRIES.get(quote_curr, "")
             
             econ_data[pair] = {}
+            forecast_data[pair] = {}
             
-            for ind_name, codes in ECON_INDICATORS.items():
-                base_code = codes.get(base_country)
-                quote_code = codes.get(quote_country)
+            for country, curr in [(base_country, base_curr), (quote_country, quote_curr)]:
+                if country:
+                    # Fetch current indicators snapshot
+                    snapshot = fetch_te_indicators_snapshot(country, te_api_key)
+                    if not snapshot.empty:
+                        econ_data[pair][f"snapshot_{curr}"] = snapshot
+                    
+                    # Fetch historical and forecast for key indicators
+                    for indicator_name, indicator_te in ECONOMIC_INDICATORS.items():
+                        # Historical
+                        hist = fetch_te_historical(country, indicator_te, te_api_key)
+                        if not hist.empty:
+                            econ_data[pair][f"{indicator_name}_{curr}_hist"] = hist
+                        
+                        # FORECAST (this is the key part!)
+                        fcst = fetch_te_forecast(country, indicator_te, te_api_key)
+                        if not fcst.empty:
+                            forecast_data[pair][f"{indicator_name}_{curr}_forecast"] = fcst
+        
+        progress_bar.progress(0.6)
+    
+    # Fetch Economic Calendar
+    if show_calendar:
+        status_text.text("Fetching economic calendar...")
+        
+        # Try FinViz calendar (free)
+        finviz_cal = fetch_finviz_calendar()
+        if not finviz_cal.empty:
+            calendar_data['finviz'] = finviz_cal
+        
+        # Try Trading Economics calendar (if API key available)
+        if te_api_key and te_api_key != "your_trading_economics_key_here":
+            for pair in selected_pairs:
+                base_curr, quote_curr = pair[:3], pair[3:]
+                base_country = CURRENCY_COUNTRIES.get(base_curr, "")
+                quote_country = CURRENCY_COUNTRIES.get(quote_curr, "")
                 
-                if base_code:
-                    df = fetch_fred_data(base_code, start_date.strftime('%Y-%m-%d'), 
-                                        end_date.strftime('%Y-%m-%d'), api_key)
-                    if not df.empty:
-                        econ_data[pair][f"{ind_name} ({base_curr})"] = df
-                
-                if quote_code:
-                    df = fetch_fred_data(quote_code, start_date.strftime('%Y-%m-%d'), 
-                                        end_date.strftime('%Y-%m-%d'), api_key)
-                    if not df.empty:
-                        econ_data[pair][f"{ind_name} ({quote_curr})"] = df
-            
-            # Calculate Real Interest Rates
-            if f"Interest Rate ({base_curr})" in econ_data[pair] and f"Inflation ({base_curr})" in econ_data[pair]:
-                real_rate = calculate_real_rate(
-                    econ_data[pair][f"Interest Rate ({base_curr})"],
-                    econ_data[pair][f"Inflation ({base_curr})"]
-                )
-                if not real_rate.empty:
-                    econ_data[pair][f"Real Interest Rate ({base_curr})"] = real_rate
-            
-            if f"Interest Rate ({quote_curr})" in econ_data[pair] and f"Inflation ({quote_curr})" in econ_data[pair]:
-                real_rate = calculate_real_rate(
-                    econ_data[pair][f"Interest Rate ({quote_curr})"],
-                    econ_data[pair][f"Inflation ({quote_curr})"]
-                )
-                if not real_rate.empty:
-                    econ_data[pair][f"Real Interest Rate ({quote_curr})"] = real_rate
-            
-            progress_bar.progress(0.5 + (0.3 * (i + 1) / len(selected_pairs)))
+                for country, curr in [(base_country, base_curr), (quote_country, quote_curr)]:
+                    if country:
+                        cal = fetch_te_calendar(country, te_api_key)
+                        if not cal.empty:
+                            calendar_data[f"{curr}_calendar"] = cal
+        
+        progress_bar.progress(0.9)
     
     progress_bar.progress(1.0)
     status_text.text("✅ Data loading complete!")
     
     # ========================================================================
-    # ANALYSIS TABS
+    # DISPLAY RESULTS
     # ========================================================================
     
     st.markdown("---")
     
-    tabs = ["📊 Overview", "📈 Technical Analysis", "🌍 Economic Indicators", 
-            "🔮 Forecasting", "📊 Statistics", "🔗 Correlations", "💾 Export"]
-    
+    tabs = ["📊 Price Analysis", "🌍 Economic Indicators & Forecasts", "📅 Economic Calendar", "💾 Export"]
     tab_objects = st.tabs(tabs)
     
     # ========================================================================
-    # TAB 1: OVERVIEW
+    # TAB 1: PRICE ANALYSIS
     # ========================================================================
     
     with tab_objects[0]:
-        st.header("📊 Market Overview")
+        st.header("📊 FX Price Analysis")
         
-        # Summary Cards
-        cols = st.columns(min(len(selected_pairs), 4))
-        for idx, pair in enumerate(selected_pairs):
+        for pair in selected_pairs:
             if pair not in fx_data:
                 continue
             
+            st.subheader(f"{pair}")
+            
             df = fx_data[pair]
-            current_price = df['Rate'].iloc[-1]
-            prev_price = df['Rate'].iloc[0]
-            change_pct = ((current_price / prev_price) - 1) * 100
             
-            with cols[idx % 4]:
-                delta_color = "normal" if change_pct >= 0 else "inverse"
-                st.metric(
-                    label=pair,
-                    value=f"{current_price:.4f}",
-                    delta=f"{change_pct:+.2f}%"
-                )
-        
-        st.markdown("---")
-        
-        # Price Charts
-        st.subheader("Exchange Rate Charts")
-        
-        for pair in selected_pairs:
-            if pair in fx_data:
-                with st.expander(f"📈 {pair}", expanded=True):
-                    fig = create_candlestick_chart(fx_data[pair], pair)
-                    st.plotly_chart(fig, use_container_width=True)
-                    
-                    # Quick Stats
-                    col1, col2, col3, col4 = st.columns(4)
-                    df = fx_data[pair]
-                    
-                    with col1:
-                        st.metric("Current", f"{df['Rate'].iloc[-1]:.4f}")
-                    with col2:
-                        change = df['Rate'].iloc[-1] - df['Rate'].iloc[-20] if len(df) >= 20 else 0
-                        st.metric("20D Change", f"{change:.4f}")
-                    with col3:
-                        vol = df['Volatility_20'].iloc[-1] * 100 if 'Volatility_20' in df.columns else 0
-                        st.metric("Volatility", f"{vol:.2f}%")
-                    with col4:
-                        rsi = df['RSI'].iloc[-1] if 'RSI' in df.columns else 0
-                        st.metric("RSI", f"{rsi:.1f}")
-    
-    # ========================================================================
-    # TAB 2: TECHNICAL ANALYSIS
-    # ========================================================================
-    
-    with tab_objects[1]:
-        if show_technical:
-            st.header("📈 Technical Analysis")
+            # Current metrics
+            col1, col2, col3, col4 = st.columns(4)
             
-            for pair in selected_pairs:
-                if pair not in fx_data:
-                    continue
-                
-                st.subheader(f"{pair} Technical Indicators")
-                
-                df = fx_data[pair]
-                
-                # Technical Chart
-                fig = create_technical_chart(df, pair)
+            with col1:
+                current = df['Rate'].iloc[-1]
+                st.metric("Current Rate", f"{current:.5f}")
+            
+            with col2:
+                change_20d = ((df['Rate'].iloc[-1] / df['Rate'].iloc[-20]) - 1) * 100 if len(df) >= 20 else 0
+                st.metric("20D Change", f"{change_20d:+.2f}%")
+            
+            with col3:
+                vol = df['Volatility'].iloc[-1] if 'Volatility' in df.columns else 0
+                st.metric("Volatility", f"{vol:.2f}%")
+            
+            with col4:
+                rsi = df['RSI'].iloc[-1] if 'RSI' in df.columns else 50
+                st.metric("RSI", f"{rsi:.1f}")
+            
+            # Price chart
+            if show_technical:
+                fig = create_price_chart(df, pair)
                 st.plotly_chart(fig, use_container_width=True)
-                
-                # Momentum Indicators
-                st.markdown("#### Current Momentum & Trend Indicators")
-                momentum = calculate_momentum_indicators(df)
-                
-                if momentum:
-                    col1, col2, col3 = st.columns(3)
-                    items = list(momentum.items())
-                    third = len(items) // 3 + 1
-                    
-                    with col1:
-                        for key, value in items[:third]:
-                            st.metric(key, f"{value:.2f}")
-                    with col2:
-                        for key, value in items[third:2*third]:
-                            st.metric(key, f"{value:.2f}")
-                    with col3:
-                        for key, value in items[2*third:]:
-                            st.metric(key, f"{value:.2f}")
-                
-                # Trading Signals
-                st.markdown("#### Trading Signals")
-                signals = []
-                
-                if 'RSI' in df.columns:
-                    rsi = df['RSI'].iloc[-1]
-                    if rsi > 70:
-                        signals.append("🔴 RSI Overbought (>70) - Potential reversal signal")
-                    elif rsi < 30:
-                        signals.append("🟢 RSI Oversold (<30) - Potential buying opportunity")
-                    else:
-                        signals.append("🟡 RSI Neutral (30-70) - No strong signal")
-                
-                if all(col in df.columns for col in ['MACD', 'Signal_Line']):
-                    if df['MACD'].iloc[-1] > df['Signal_Line'].iloc[-1] and df['MACD'].iloc[-2] <= df['Signal_Line'].iloc[-2]:
-                        signals.append("🟢 MACD Bullish Crossover - Buy signal")
-                    elif df['MACD'].iloc[-1] < df['Signal_Line'].iloc[-1] and df['MACD'].iloc[-2] >= df['Signal_Line'].iloc[-2]:
-                        signals.append("🔴 MACD Bearish Crossover - Sell signal")
-                
-                if signals:
-                    for signal in signals:
-                        st.markdown(signal)
-                else:
-                    st.info("No strong trading signals at this time")
-                
-                st.markdown("---")
-        else:
-            st.info("Technical analysis is disabled. Enable it in the sidebar to view charts and indicators.")
-    
-    # ========================================================================
-    # TAB 3: ECONOMIC INDICATORS
-    # ========================================================================
-    
-    with tab_objects[2]:
-        if show_economic and econ_data:
-            st.header("🌍 Economic Indicators Analysis")
-            
-            for pair in selected_pairs:
-                if pair not in econ_data or not econ_data[pair]:
-                    continue
-                
-                st.subheader(f"{pair} Economic Comparison")
-                
-                base_curr, quote_curr = pair[:3], pair[3:]
-                
-                # Create comparison charts for each indicator
-                for indicator in ["Inflation", "Interest Rate", "Real Interest Rate", "GDP", "Trade Balance", "Unemployment"]:
-                    base_key = f"{indicator} ({base_curr})"
-                    quote_key = f"{indicator} ({quote_curr})"
-                    
-                    if base_key in econ_data[pair] and quote_key in econ_data[pair]:
-                        with st.expander(f"📊 {indicator} Comparison", expanded=False):
-                            fig = create_indicator_comparison(
-                                econ_data[pair][base_key],
-                                econ_data[pair][quote_key],
-                                base_curr,
-                                quote_curr,
-                                f"{indicator}: {base_curr} vs {quote_curr}"
-                            )
-                            st.plotly_chart(fig, use_container_width=True)
-                            
-                            # Latest values
-                            col1, col2 = st.columns(2)
-                            with col1:
-                                latest = econ_data[pair][base_key].iloc[-1, 0]
-                                st.metric(f"{base_curr} Latest", f"{latest:.2f}")
-                            with col2:
-                                latest = econ_data[pair][quote_key].iloc[-1, 0]
-                                st.metric(f"{quote_curr} Latest", f"{latest:.2f}")
-                
-                # Key Economic Insights
-                st.markdown("#### 💡 Key Economic Insights")
-                
-                insights = []
-                
-                # Interest Rate Differential
-                if f"Interest Rate ({base_curr})" in econ_data[pair] and f"Interest Rate ({quote_curr})" in econ_data[pair]:
-                    base_rate = econ_data[pair][f"Interest Rate ({base_curr})"].iloc[-1, 0]
-                    quote_rate = econ_data[pair][f"Interest Rate ({quote_curr})"].iloc[-1, 0]
-                    diff = base_rate - quote_rate
-                    insights.append(f"**Interest Rate Differential**: {diff:+.2f}% ({base_curr}: {base_rate:.2f}% | {quote_curr}: {quote_rate:.2f}%)")
-                    
-                    if abs(diff) > 1:
-                        if diff > 0:
-                            insights.append(f"→ Higher rates in {base_curr} may support currency strength")
-                        else:
-                            insights.append(f"→ Higher rates in {quote_curr} may support currency strength")
-                
-                # Real Rate Differential
-                if f"Real Interest Rate ({base_curr})" in econ_data[pair] and f"Real Interest Rate ({quote_curr})" in econ_data[pair]:
-                    base_real = econ_data[pair][f"Real Interest Rate ({base_curr})"].iloc[-1, 0]
-                    quote_real = econ_data[pair][f"Real Interest Rate ({quote_curr})"].iloc[-1, 0]
-                    real_diff = base_real - quote_real
-                    insights.append(f"**Real Interest Rate Differential**: {real_diff:+.2f}% (Inflation-adjusted)")
-                
-                # Inflation Comparison
-                if f"Inflation ({base_curr})" in econ_data[pair] and f"Inflation ({quote_curr})" in econ_data[pair]:
-                    base_inf = econ_data[pair][f"Inflation ({base_curr})"].iloc[-1, 0]
-                    quote_inf = econ_data[pair][f"Inflation ({quote_curr})"].iloc[-1, 0]
-                    insights.append(f"**Inflation**: {base_curr} {base_inf:.2f}% | {quote_curr} {quote_inf:.2f}%")
-                
-                for insight in insights:
-                    st.markdown(insight)
-                
-                st.markdown("---")
-        else:
-            if not show_economic:
-                st.info("Economic indicators analysis is disabled. Enable it in the sidebar.")
-            else:
-                st.warning("⚠️ Economic data requires a valid FRED API key. Please enter your API key in the sidebar.")
-                st.markdown("Get your free API key at: https://fred.stlouisfed.org/docs/api/api_key.html")
-    
-    # ========================================================================
-    # TAB 4: FORECASTING
-    # ========================================================================
-    
-    with tab_objects[3]:
-        if show_forecast:
-            st.header("🔮 Price Forecasting & Predictions")
-            
-            forecast_method = st.selectbox(
-                "Forecasting Method",
-                ["ensemble", "linear", "rf"],
-                format_func=lambda x: {"ensemble": "Ensemble (Linear + Random Forest)", 
-                                      "linear": "Linear Regression", 
-                                      "rf": "Random Forest"}[x]
-            )
-            
-            for pair in selected_pairs:
-                if pair not in fx_data:
-                    continue
-                
-                st.subheader(f"{pair} Forecast")
-                
-                df = fx_data[pair]
-                
-                # Generate forecast
-                with st.spinner(f"Generating {forecast_days}-day forecast for {pair}..."):
-                    forecast, lower, upper = advanced_forecast(
-                        df['Rate'], 
-                        periods=forecast_days, 
-                        method=forecast_method
-                    )
-                
-                if not forecast.empty:
-                    # Create forecast chart
-                    fig = create_forecast_chart(df['Rate'], forecast, lower, upper, f"{pair} Price Forecast")
-                    st.plotly_chart(fig, use_container_width=True)
-                    
-                    # Forecast summary
-                    col1, col2, col3, col4 = st.columns(4)
-                    
-                    current = df['Rate'].iloc[-1]
-                    forecast_end = forecast.iloc[-1]
-                    change = ((forecast_end / current) - 1) * 100
-                    
-                    with col1:
-                        st.metric("Current Price", f"{current:.4f}")
-                    with col2:
-                        st.metric(f"{forecast_days}D Forecast", f"{forecast_end:.4f}")
-                    with col3:
-                        st.metric("Expected Change", f"{change:+.2f}%")
-                    with col4:
-                        trend = "Bullish 📈" if change > 0 else "Bearish 📉" if change < 0 else "Neutral →"
-                        st.metric("Trend", trend)
-                    
-                    # Confidence interval info
-                    st.info(f"📊 95% Confidence Interval: [{lower.iloc[-1]:.4f}, {upper.iloc[-1]:.4f}]")
-                else:
-                    st.warning(f"Unable to generate forecast for {pair} - insufficient data")
-                
-                st.markdown("---")
-            
-            st.markdown("""
-            **Disclaimer**: Forecasts are based on historical data and statistical models. 
-            They should not be used as the sole basis for trading decisions. 
-            Past performance does not guarantee future results.
-            """)
-        else:
-            st.info("Forecasting is disabled. Enable it in the sidebar to view predictions.")
-    
-    # ========================================================================
-    # TAB 5: STATISTICS
-    # ========================================================================
-    
-    with tab_objects[4]:
-        st.header("📊 Statistical Analysis")
-        
-        for pair in selected_pairs:
-            if pair not in fx_data:
-                continue
-            
-            st.subheader(f"{pair} Statistics")
-            
-            df = fx_data[pair]
-            stats = calculate_pair_statistics(df)
-            
-            if stats:
-                # Display statistics in columns
-                col1, col2, col3 = st.columns(3)
-                
-                stats_items = list(stats.items())
-                third = len(stats_items) // 3 + 1
-                
-                with col1:
-                    st.markdown("##### Price Statistics")
-                    for key, value in [item for item in stats_items if any(x in key for x in ['Price', 'Mean', 'Std', 'Min', 'Max'])]:
-                        st.metric(key, f"{value:.4f}")
-                
-                with col2:
-                    st.markdown("##### Return Statistics")
-                    for key, value in [item for item in stats_items if any(x in key for x in ['Return', 'Volatility', 'Sharpe'])]:
-                        st.metric(key, f"{value:.4f}")
-                
-                with col3:
-                    st.markdown("##### Risk Metrics")
-                    for key, value in [item for item in stats_items if any(x in key for x in ['Drawdown', 'Skewness', 'Kurtosis'])]:
-                        st.metric(key, f"{value:.4f}")
-                
-                # Distribution chart
-                if 'Returns' in df.columns:
-                    st.markdown("##### Return Distribution")
-                    returns = df['Returns'].dropna() * 100
-                    
-                    fig = go.Figure()
-                    fig.add_trace(go.Histogram(x=returns, nbinsx=50, name='Returns'))
-                    fig.update_layout(
-                        title=f"{pair} Daily Return Distribution (%)",
-                        xaxis_title="Daily Return (%)",
-                        yaxis_title="Frequency",
-                        template='plotly_white',
-                        height=400
-                    )
-                    st.plotly_chart(fig, use_container_width=True)
             
             st.markdown("---")
     
     # ========================================================================
-    # TAB 6: CORRELATIONS
+    # TAB 2: ECONOMIC INDICATORS & FORECASTS
     # ========================================================================
     
-    with tab_objects[5]:
-        if show_correlation and len(selected_pairs) > 1:
-            st.header("🔗 Correlation Analysis")
-            
+    with tab_objects[1]:
+        st.header("🌍 Economic Indicators & Real Forecasts")
+        
+        if not show_economic:
+            st.info("Enable 'Economic Indicators & Forecasts' in the sidebar")
+        elif not te_api_key or te_api_key == "your_trading_economics_key_here":
+            st.warning("⚠️ Trading Economics API key required for economic forecasts")
+            st.markdown("Get a free trial at: https://tradingeconomics.com/")
+        elif not econ_data and not forecast_data:
+            st.warning("No economic data available. Check your API key and try again.")
+        else:
+            for pair in selected_pairs:
+                if pair not in econ_data and pair not in forecast_data:
+                    continue
+                
+                st.subheader(f"{pair} Economic Analysis")
+                
+                base_curr, quote_curr = pair[:3], pair[3:]
+                
+                # Display economic snapshots
+                if pair in econ_data:
+                    col1, col2 = st.columns(2)
+                    
+                    with col1:
+                        st.markdown(f"#### {base_curr} Economic Snapshot")
+                        snapshot_key = f"snapshot_{base_curr}"
+                        if snapshot_key in econ_data[pair]:
+                            snapshot = econ_data[pair][snapshot_key]
+                            if not snapshot.empty and 'Category' in snapshot.columns:
+                                # Display key indicators
+                                for idx, row in snapshot.head(10).iterrows():
+                                    if 'Category' in row and 'LatestValue' in row:
+                                        st.metric(
+                                            row['Category'],
+                                            f"{row['LatestValue']}" + (f" {row.get('Unit', '')}" if 'Unit' in row else "")
+                                        )
+                    
+                    with col2:
+                        st.markdown(f"#### {quote_curr} Economic Snapshot")
+                        snapshot_key = f"snapshot_{quote_curr}"
+                        if snapshot_key in econ_data[pair]:
+                            snapshot = econ_data[pair][snapshot_key]
+                            if not snapshot.empty and 'Category' in snapshot.columns:
+                                for idx, row in snapshot.head(10).iterrows():
+                                    if 'Category' in row and 'LatestValue' in row:
+                                        st.metric(
+                                            row['Category'],
+                                            f"{row['LatestValue']}" + (f" {row.get('Unit', '')}" if 'Unit' in row else "")
+                                        )
+                
+                st.markdown("---")
+                
+                # Display forecasts for key indicators
+                if pair in forecast_data:
+                    st.markdown(f"#### Economist Forecasts for {pair}")
+                    
+                    for indicator_name in ECONOMIC_INDICATORS.keys():
+                        # Check if we have historical and forecast data
+                        hist_key_base = f"{indicator_name}_{base_curr}_hist"
+                        fcst_key_base = f"{indicator_name}_{base_curr}_forecast"
+                        
+                        hist_key_quote = f"{indicator_name}_{quote_curr}_hist"
+                        fcst_key_quote = f"{indicator_name}_{quote_curr}_forecast"
+                        
+                        # Base currency
+                        if hist_key_base in econ_data.get(pair, {}) or fcst_key_base in forecast_data.get(pair, {}):
+                            with st.expander(f"📊 {indicator_name} ({base_curr})"):
+                                hist_df = econ_data.get(pair, {}).get(hist_key_base, pd.DataFrame())
+                                fcst_df = forecast_data.get(pair, {}).get(fcst_key_base, pd.DataFrame())
+                                
+                                if not hist_df.empty or not fcst_df.empty:
+                                    fig = create_forecast_comparison_chart(
+                                        hist_df, fcst_df, indicator_name, base_curr
+                                    )
+                                    st.plotly_chart(fig, use_container_width=True)
+                                    
+                                    # Show forecast values
+                                    if not fcst_df.empty:
+                                        st.markdown("**Quarterly Forecasts:**")
+                                        quarters = ['q1', 'q2', 'q3', 'q4']
+                                        cols = st.columns(4)
+                                        for i, q in enumerate(quarters):
+                                            if q in fcst_df.columns:
+                                                with cols[i]:
+                                                    st.metric(q.upper(), f"{fcst_df[q].iloc[0]:.2f}")
+                        
+                        # Quote currency
+                        if hist_key_quote in econ_data.get(pair, {}) or fcst_key_quote in forecast_data.get(pair, {}):
+                            with st.expander(f"📊 {indicator_name} ({quote_curr})"):
+                                hist_df = econ_data.get(pair, {}).get(hist_key_quote, pd.DataFrame())
+                                fcst_df = forecast_data.get(pair, {}).get(fcst_key_quote, pd.DataFrame())
+                                
+                                if not hist_df.empty or not fcst_df.empty:
+                                    fig = create_forecast_comparison_chart(
+                                        hist_df, fcst_df, indicator_name, quote_curr
+                                    )
+                                    st.plotly_chart(fig, use_container_width=True)
+                                    
+                                    if not fcst_df.empty:
+                                        st.markdown("**Quarterly Forecasts:**")
+                                        quarters = ['q1', 'q2', 'q3', 'q4']
+                                        cols = st.columns(4)
+                                        for i, q in enumerate(quarters):
+                                            if q in fcst_df.columns:
+                                                with cols[i]:
+                                                    st.metric(q.upper(), f"{fcst_df[q].iloc[0]:.2f}")
+                
+                st.markdown("---")
+    
+    # ========================================================================
+    # TAB 3: ECONOMIC CALENDAR
+    # ========================================================================
+    
+    with tab_objects[2]:
+        st.header("📅 Economic Calendar - Upcoming Releases")
+        
+        if not show_calendar:
+            st.info("Enable 'Economic Calendar' in the sidebar")
+        elif not calendar_data:
+            st.warning("No calendar data available")
+        else:
             st.markdown("""
-            Correlation analysis shows how currency pairs move relative to each other.
-            - **High positive correlation (>0.7)**: Pairs tend to move together
-            - **High negative correlation (<-0.7)**: Pairs tend to move in opposite directions
-            - **Low correlation (around 0)**: Pairs move independently
+            **Economic Calendar** shows upcoming economic data releases with:
+            - 📅 **Date & Time** of release
+            - 📊 **Expected Value** (consensus forecast)
+            - 📈 **Previous Value** (last release)
+            - 🎯 **Actual Value** (after release)
+            - ⚠️ **Importance** (impact on markets)
             """)
             
-            # Calculate correlation matrix
-            corr_matrix = calculate_correlation_matrix(fx_data)
+            st.markdown("---")
             
-            if not corr_matrix.empty:
-                # Heatmap
-                st.subheader("Correlation Heatmap")
-                fig = create_correlation_heatmap(corr_matrix)
-                st.plotly_chart(fig, use_container_width=True)
+            # Display FinViz calendar if available
+            if 'finviz' in calendar_data:
+                st.subheader("📊 FinViz Economic Calendar (All Countries)")
+                finviz_cal = calendar_data['finviz']
                 
-                # Top correlations
-                st.subheader("Notable Correlations")
+                # Filter for high impact events
+                if 'Impact' in finviz_cal.columns:
+                    high_impact = finviz_cal[finviz_cal['Impact'].isin(['high', 'High', '3'])]
+                    if not high_impact.empty:
+                        st.markdown("**High Impact Events:**")
+                        st.dataframe(high_impact, use_container_width=True)
                 
-                # Get upper triangle of correlation matrix
-                mask = np.triu(np.ones_like(corr_matrix, dtype=bool), k=1)
-                corr_pairs = []
-                
-                for i in range(len(corr_matrix)):
-                    for j in range(i+1, len(corr_matrix)):
-                        corr_pairs.append((
-                            corr_matrix.index[i],
-                            corr_matrix.columns[j],
-                            corr_matrix.iloc[i, j]
-                        ))
-                
-                # Sort by absolute correlation
-                corr_pairs.sort(key=lambda x: abs(x[2]), reverse=True)
-                
-                col1, col2 = st.columns(2)
-                
-                with col1:
-                    st.markdown("**Strongest Positive Correlations**")
-                    for pair1, pair2, corr in corr_pairs[:5]:
-                        if corr > 0:
-                            st.markdown(f"- {pair1} ↔ {pair2}: **{corr:.3f}**")
-                
-                with col2:
-                    st.markdown("**Strongest Negative Correlations**")
-                    negative_corrs = [x for x in corr_pairs if x[2] < 0]
-                    for pair1, pair2, corr in negative_corrs[:5]:
-                        st.markdown(f"- {pair1} ↔ {pair2}: **{corr:.3f}**")
-                
-                # Correlation over time
-                st.subheader("Rolling Correlation (30-Day)")
-                
-                if len(selected_pairs) >= 2:
-                    pair1, pair2 = selected_pairs[0], selected_pairs[1]
+                st.markdown("**All Upcoming Events:**")
+                st.dataframe(finviz_cal, use_container_width=True)
+            
+            # Display Trading Economics calendars by currency
+            for key, cal_df in calendar_data.items():
+                if key != 'finviz' and not cal_df.empty:
+                    currency = key.replace('_calendar', '')
+                    st.subheader(f"📅 {currency} Economic Calendar")
                     
-                    if pair1 in fx_data and pair2 in fx_data:
-                        df1 = fx_data[pair1]['Rate'].pct_change()
-                        df2 = fx_data[pair2]['Rate'].pct_change()
-                        
-                        # Align data
-                        combined = pd.concat([df1, df2], axis=1).dropna()
-                        rolling_corr = combined.iloc[:, 0].rolling(window=30).corr(combined.iloc[:, 1])
-                        
-                        fig = go.Figure()
-                        fig.add_trace(go.Scatter(x=rolling_corr.index, y=rolling_corr, name='Rolling Correlation'))
-                        fig.add_hline(y=0, line_dash="dash", line_color="gray")
-                        fig.update_layout(
-                            title=f"30-Day Rolling Correlation: {pair1} vs {pair2}",
-                            xaxis_title="Date",
-                            yaxis_title="Correlation",
-                            template='plotly_white',
-                            height=400
-                        )
-                        st.plotly_chart(fig, use_container_width=True)
-            else:
-                st.warning("Unable to calculate correlations - insufficient data")
-        else:
-            if not show_correlation:
-                st.info("Correlation analysis is disabled. Enable it in the sidebar.")
-            else:
-                st.info("Please select at least 2 currency pairs to perform correlation analysis.")
+                    # Create interactive table
+                    fig = create_calendar_table(cal_df)
+                    st.plotly_chart(fig, use_container_width=True)
+                    
+                    # Show raw data
+                    with st.expander("View Raw Calendar Data"):
+                        st.dataframe(cal_df, use_container_width=True)
     
     # ========================================================================
-    # TAB 7: EXPORT
+    # TAB 4: EXPORT
     # ========================================================================
     
-    with tab_objects[6]:
+    with tab_objects[3]:
         st.header("💾 Export Data")
         
-        st.markdown("""
-        Download the analysis data in CSV format for further analysis in Excel, Python, or other tools.
-        """)
+        st.markdown("Download analysis data for further processing")
         
         # Export FX Data
-        st.subheader("📈 Currency Pair Data")
-        for pair in selected_pairs:
-            if pair in fx_data:
-                df = fx_data[pair]
-                csv = df.to_csv()
-                st.download_button(
-                    label=f"📥 Download {pair} Data",
-                    data=csv,
-                    file_name=f"{pair}_fx_data_{start_date}_{end_date}.csv",
-                    mime="text/csv"
-                )
+        st.subheader("💱 Currency Price Data")
+        for pair, df in fx_data.items():
+            csv = df.to_csv()
+            st.download_button(
+                label=f"📥 Download {pair} Price Data",
+                data=csv,
+                file_name=f"{pair}_prices_{start_date}_{end_date}.csv",
+                mime="text/csv",
+                key=f"fx_{pair}"
+            )
         
         # Export Economic Data
         if econ_data:
             st.subheader("🌍 Economic Indicators")
             for pair, indicators in econ_data.items():
-                if indicators:
-                    with st.expander(f"{pair} Economic Data"):
-                        for ind_name, df in indicators.items():
-                            if not df.empty:
-                                csv = df.to_csv()
-                                safe_name = ind_name.replace(" ", "_").replace("(", "").replace(")", "")
-                                st.download_button(
-                                    label=f"📥 {ind_name}",
-                                    data=csv,
-                                    file_name=f"{pair}_{safe_name}_{start_date}_{end_date}.csv",
-                                    mime="text/csv",
-                                    key=f"{pair}_{safe_name}"
-                                )
+                with st.expander(f"{pair} Economic Data"):
+                    for ind_name, df in indicators.items():
+                        if isinstance(df, pd.DataFrame) and not df.empty:
+                            csv = df.to_csv()
+                            safe_name = ind_name.replace(" ", "_").replace("(", "").replace(")", "")
+                            st.download_button(
+                                label=f"📥 {ind_name}",
+                                data=csv,
+                                file_name=f"{pair}_{safe_name}.csv",
+                                mime="text/csv",
+                                key=f"econ_{pair}_{safe_name}"
+                            )
         
-        # Export Correlation Matrix
-        if show_correlation and len(selected_pairs) > 1:
-            st.subheader("🔗 Correlation Matrix")
-            corr_matrix = calculate_correlation_matrix(fx_data)
-            if not corr_matrix.empty:
-                csv = corr_matrix.to_csv()
-                st.download_button(
-                    label="📥 Download Correlation Matrix",
-                    data=csv,
-                    file_name=f"correlation_matrix_{start_date}_{end_date}.csv",
-                    mime="text/csv"
-                )
+        # Export Forecasts
+        if forecast_data:
+            st.subheader("🔮 Economic Forecasts")
+            for pair, forecasts in forecast_data.items():
+                with st.expander(f"{pair} Forecasts"):
+                    for fcst_name, df in forecasts.items():
+                        if isinstance(df, pd.DataFrame) and not df.empty:
+                            csv = df.to_csv()
+                            safe_name = fcst_name.replace(" ", "_").replace("(", "").replace(")", "")
+                            st.download_button(
+                                label=f"📥 {fcst_name}",
+                                data=csv,
+                                file_name=f"{pair}_{safe_name}_forecast.csv",
+                                mime="text/csv",
+                                key=f"fcst_{pair}_{safe_name}"
+                            )
+        
+        # Export Calendar Data
+        if calendar_data:
+            st.subheader("📅 Economic Calendar")
+            for cal_name, df in calendar_data.items():
+                if isinstance(df, pd.DataFrame) and not df.empty:
+                    csv = df.to_csv()
+                    st.download_button(
+                        label=f"📥 {cal_name} Calendar",
+                        data=csv,
+                        file_name=f"{cal_name}_calendar.csv",
+                        mime="text/csv",
+                        key=f"cal_{cal_name}"
+                    )
     
     # Footer
     st.markdown("---")
     st.markdown("""
-    <div style='text-align: center; color: gray; padding: 20px;'>
-        <p>📈 Professional Forex Analysis Platform | Data sources: Yahoo Finance, FRED</p>
-        <p style='font-size: 0.8em;'>Disclaimer: This tool is for informational purposes only. 
-        Always conduct your own research and consult with financial professionals before making trading decisions.</p>
+    <div style='text-align: center; color: gray;'>
+        <p>📈 Professional Forex Analysis | Data: Trading Economics, FinViz, Yahoo Finance</p>
+        <p style='font-size: 0.8em;'>Forecasts are consensus estimates from professional economists.</p>
     </div>
     """, unsafe_allow_html=True)
 
