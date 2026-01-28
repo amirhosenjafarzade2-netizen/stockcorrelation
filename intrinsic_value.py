@@ -269,7 +269,7 @@ def render_intrinsic_value():
             terminal_multiple = st.number_input("Terminal Multiple", value=DEFAULT_TERMINAL_MULTIPLE, min_value=5.0, max_value=30.0, step=1.0)
             risk_free_rate = st.number_input("Risk-Free Rate (%)", value=DEFAULT_RISK_FREE_RATE * 100, min_value=0.0, max_value=10.0, step=0.5) / 100
         with col3:
-            growth_years = st.number_input("Growth Years (Lynch)", value=DEFAULT_EPS_GROWTH_YEARS, min_value=1, max_value=10, step=1)
+            growth_years = int(st.number_input("Growth Years (Lynch)", value=float(DEFAULT_EPS_GROWTH_YEARS), min_value=1.0, max_value=10.0, step=1.0))
 
     methods = st.multiselect(
         "Valuation Methods",
