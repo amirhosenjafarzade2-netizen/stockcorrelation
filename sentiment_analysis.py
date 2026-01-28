@@ -387,53 +387,56 @@ def render_sentiment_analysis(tickers: List[str] = None) -> None:
                 # ═══════════════════════════════════════════════════════════
                 # 3. ANALYST SENTIMENT
                 # ═══════════════════════════════════════════════════════════
-                if not recommendations.empty and 'To Grade' in recommendations.columns:
-                    recent_recs = recommendations.tail(20)  # Last 20 recommendations
+                buys = holds = sells = 0
+                buy_pct = hold_pct = sell_pct = analyst_score = np.nan
+                
+                if not recommendations.empty:
+                    # Try different column names (yfinance API changes)
+                    grade_col = None
+                    for col in ['To Grade', 'toGrade', 'grade', 'Grade']:
+                        if col in recommendations.columns:
+                            grade_col = col
+                            break
                     
-                    # Count by grade
-                    grade_counts = recent_recs['To Grade'].value_counts()
-                    
-                    buy_terms = ['buy', 'strong buy', 'outperform', 'overweight']
-                    hold_terms = ['hold', 'neutral', 'equal-weight', 'market perform']
-                    sell_terms = ['sell', 'strong sell', 'underperform', 'underweight']
-                    
-                    buys = sum(grade_counts.get(term, 0) for term in grade_counts.index 
-                              if any(buy_term in term.lower() for buy_term in buy_terms))
-                    holds = sum(grade_counts.get(term, 0) for term in grade_counts.index 
-                               if any(hold_term in term.lower() for hold_term in hold_terms))
-                    sells = sum(grade_counts.get(term, 0) for term in grade_counts.index 
-                               if any(sell_term in term.lower() for sell_term in sell_terms))
-                    
-                    total_recs = buys + holds + sells
-                    if total_recs > 0:
-                        buy_pct = (buys / total_recs) * 100
-                        hold_pct = (holds / total_recs) * 100
-                        sell_pct = (sells / total_recs) * 100
+                    if grade_col:
+                        recent_recs = recommendations.tail(20)  # Last 20 recommendations
                         
-                        # Analyst sentiment score
-                        analyst_score = (buys * 100 + holds * 50) / total_recs if total_recs > 0 else 50
-                    else:
-                        buy_pct = hold_pct = sell_pct = analyst_score = np.nan
-                    
-                    metrics.update({
-                        "analyst_buys": buys,
-                        "analyst_holds": holds,
-                        "analyst_sells": sells,
-                        "analyst_buy_pct": buy_pct,
-                        "analyst_hold_pct": hold_pct,
-                        "analyst_sell_pct": sell_pct,
-                        "analyst_score": analyst_score
-                    })
-                else:
-                    metrics.update({
-                        "analyst_buys": 0,
-                        "analyst_holds": 0,
-                        "analyst_sells": 0,
-                        "analyst_buy_pct": np.nan,
-                        "analyst_hold_pct": np.nan,
-                        "analyst_sell_pct": np.nan,
-                        "analyst_score": np.nan
-                    })
+                        # Count by grade
+                        grade_counts = recent_recs[grade_col].value_counts()
+                        
+                        buy_terms = ['buy', 'strong buy', 'outperform', 'overweight', 'positive']
+                        hold_terms = ['hold', 'neutral', 'equal-weight', 'equal weight', 'market perform', 'sector perform']
+                        sell_terms = ['sell', 'strong sell', 'underperform', 'underweight', 'negative', 'reduce']
+                        
+                        for grade in grade_counts.index:
+                            grade_lower = str(grade).lower()
+                            count = grade_counts[grade]
+                            
+                            if any(term in grade_lower for term in buy_terms):
+                                buys += count
+                            elif any(term in grade_lower for term in sell_terms):
+                                sells += count
+                            elif any(term in grade_lower for term in hold_terms):
+                                holds += count
+                        
+                        total_recs = buys + holds + sells
+                        if total_recs > 0:
+                            buy_pct = (buys / total_recs) * 100
+                            hold_pct = (holds / total_recs) * 100
+                            sell_pct = (sells / total_recs) * 100
+                            
+                            # Analyst sentiment score
+                            analyst_score = (buys * 100 + holds * 50) / total_recs
+                
+                metrics.update({
+                    "analyst_buys": buys,
+                    "analyst_holds": holds,
+                    "analyst_sells": sells,
+                    "analyst_buy_pct": buy_pct,
+                    "analyst_hold_pct": hold_pct,
+                    "analyst_sell_pct": sell_pct,
+                    "analyst_score": analyst_score
+                })
                 
                 # ═══════════════════════════════════════════════════════════
                 # 4. INSTITUTIONAL & INSIDER SENTIMENT
@@ -859,6 +862,112 @@ def render_sentiment_analysis(tickers: List[str] = None) -> None:
                     height=400
                 )
                 st.plotly_chart(fig_oi, use_container_width=True)
+                
+                # IV Smile/Skew Visualization
+                st.markdown("### 📉 Implied Volatility Smile/Skew")
+                st.markdown("Shows how implied volatility varies by strike price. A 'smile' indicates higher IV at extreme strikes, while a 'skew' shows directional bias.")
+                
+                selected_ticker_iv = st.selectbox("Select ticker for IV analysis:", tickers, key="iv_ticker")
+                
+                if selected_ticker_iv:
+                    ticker_calls = all_data[selected_ticker_iv]["calls"]
+                    ticker_puts = all_data[selected_ticker_iv]["puts"]
+                    current_price = sentiment_data[selected_ticker_iv]["current_price"]
+                    
+                    if not ticker_calls.empty and not ticker_puts.empty and not pd.isna(current_price):
+                        fig_iv_smile = go.Figure()
+                        
+                        # Prepare call data
+                        calls_plot = ticker_calls[ticker_calls['impliedVolatility'].notna()].copy()
+                        calls_plot['moneyness'] = (calls_plot['strike'] / current_price - 1) * 100
+                        calls_plot = calls_plot.sort_values('strike')
+                        
+                        # Prepare put data
+                        puts_plot = ticker_puts[ticker_puts['impliedVolatility'].notna()].copy()
+                        puts_plot['moneyness'] = (puts_plot['strike'] / current_price - 1) * 100
+                        puts_plot = puts_plot.sort_values('strike')
+                        
+                        # Plot calls
+                        fig_iv_smile.add_trace(go.Scatter(
+                            x=calls_plot['strike'],
+                            y=calls_plot['impliedVolatility'] * 100,
+                            mode='lines+markers',
+                            name='Calls',
+                            line=dict(color='green', width=2),
+                            marker=dict(size=8),
+                            hovertemplate='Strike: $%{x:.2f}<br>IV: %{y:.1f}%<br>Moneyness: %{customdata:.1f}%<extra></extra>',
+                            customdata=calls_plot['moneyness']
+                        ))
+                        
+                        # Plot puts
+                        fig_iv_smile.add_trace(go.Scatter(
+                            x=puts_plot['strike'],
+                            y=puts_plot['impliedVolatility'] * 100,
+                            mode='lines+markers',
+                            name='Puts',
+                            line=dict(color='red', width=2),
+                            marker=dict(size=8),
+                            hovertemplate='Strike: $%{x:.2f}<br>IV: %{y:.1f}%<br>Moneyness: %{customdata:.1f}%<extra></extra>',
+                            customdata=puts_plot['moneyness']
+                        ))
+                        
+                        # Add current price line
+                        fig_iv_smile.add_vline(
+                            x=current_price,
+                            line_dash="dash",
+                            line_color="blue",
+                            annotation_text=f"Current: ${current_price:.2f}",
+                            annotation_position="top"
+                        )
+                        
+                        fig_iv_smile.update_layout(
+                            title=f"{selected_ticker_iv} - Implied Volatility by Strike Price",
+                            xaxis_title="Strike Price ($)",
+                            yaxis_title="Implied Volatility (%)",
+                            height=500,
+                            hovermode='closest',
+                            showlegend=True
+                        )
+                        
+                        st.plotly_chart(fig_iv_smile, use_container_width=True)
+                        
+                        # Interpretation guide
+                        col1, col2 = st.columns(2)
+                        with col1:
+                            st.markdown("**🔍 Pattern Interpretation:**")
+                            st.markdown("""
+                            - **Smile** (U-shape): Higher IV at OTM strikes → Market expects large moves
+                            - **Skew** (sloped): Higher IV for puts → Downside protection demand (bearish)
+                            - **Reverse Skew**: Higher IV for calls → Upside speculation (bullish)
+                            - **Flat**: Consistent IV → Neutral expectations
+                            """)
+                        
+                        with col2:
+                            # Calculate skew metrics
+                            if len(calls_plot) > 0 and len(puts_plot) > 0:
+                                # ATM IV (closest to current price)
+                                atm_call_iv = calls_plot.iloc[(calls_plot['strike'] - current_price).abs().argsort()[:1]]['impliedVolatility'].values[0] * 100
+                                atm_put_iv = puts_plot.iloc[(puts_plot['strike'] - current_price).abs().argsort()[:1]]['impliedVolatility'].values[0] * 100
+                                
+                                # OTM IV (25% OTM)
+                                otm_call_strike = current_price * 1.25
+                                otm_put_strike = current_price * 0.75
+                                
+                                otm_call_iv = calls_plot.iloc[(calls_plot['strike'] - otm_call_strike).abs().argsort()[:1]]['impliedVolatility'].values[0] * 100 if len(calls_plot) > 0 else np.nan
+                                otm_put_iv = puts_plot.iloc[(puts_plot['strike'] - otm_put_strike).abs().argsort()[:1]]['impliedVolatility'].values[0] * 100 if len(puts_plot) > 0 else np.nan
+                                
+                                st.markdown("**📊 Skew Metrics:**")
+                                st.metric("ATM Call IV", f"{atm_call_iv:.1f}%")
+                                st.metric("ATM Put IV", f"{atm_put_iv:.1f}%")
+                                st.metric("Put-Call Skew", f"{(atm_put_iv - atm_call_iv):.1f}%", 
+                                         help="Positive = puts more expensive (bearish bias)")
+                                
+                                if not pd.isna(otm_put_iv) and not pd.isna(atm_put_iv):
+                                    put_skew = otm_put_iv - atm_put_iv
+                                    st.metric("25Δ Put Skew", f"{put_skew:.1f}%",
+                                             help="OTM put premium relative to ATM")
+                    else:
+                        st.info(f"No options data available for {selected_ticker_iv} or unable to determine current price")
             
             # ══════════════════════════════════════════════════════════════════
             # TAB 3: TECHNICAL SENTIMENT
@@ -1012,6 +1121,10 @@ def render_sentiment_analysis(tickers: List[str] = None) -> None:
                 
                 analyst_df = pd.DataFrame(analyst_data)
                 
+                # Check if we have any analyst data
+                has_analyst_data = (analyst_df["Buy"] + analyst_df["Hold"] + analyst_df["Sell"]).sum() > 0
+                has_short_data = analyst_df["Short %"].notna().any()
+                
                 st.dataframe(
                     analyst_df.style.format({
                         "Buy": "{:.0f}",
@@ -1026,41 +1139,47 @@ def render_sentiment_analysis(tickers: List[str] = None) -> None:
                     use_container_width=True
                 )
                 
+                if not has_analyst_data:
+                    st.warning("⚠️ No analyst recommendation data available for these tickers. This is common for ETFs, indices, and some smaller stocks.")
+                
                 # Analyst ratings visualization
                 col1, col2 = st.columns(2)
                 
                 with col1:
                     st.markdown("### 📊 Analyst Recommendations")
                     
-                    fig_analyst = go.Figure()
-                    
-                    fig_analyst.add_trace(go.Bar(
-                        name="Buy",
-                        x=analyst_df["Ticker"],
-                        y=analyst_df["Buy"],
-                        marker_color='green'
-                    ))
-                    
-                    fig_analyst.add_trace(go.Bar(
-                        name="Hold",
-                        x=analyst_df["Ticker"],
-                        y=analyst_df["Hold"],
-                        marker_color='gray'
-                    ))
-                    
-                    fig_analyst.add_trace(go.Bar(
-                        name="Sell",
-                        x=analyst_df["Ticker"],
-                        y=analyst_df["Sell"],
-                        marker_color='red'
-                    ))
-                    
-                    fig_analyst.update_layout(
-                        barmode='stack',
-                        yaxis_title="Count",
-                        height=400
-                    )
-                    st.plotly_chart(fig_analyst, use_container_width=True)
+                    if has_analyst_data:
+                        fig_analyst = go.Figure()
+                        
+                        fig_analyst.add_trace(go.Bar(
+                            name="Buy",
+                            x=analyst_df["Ticker"],
+                            y=analyst_df["Buy"],
+                            marker_color='green'
+                        ))
+                        
+                        fig_analyst.add_trace(go.Bar(
+                            name="Hold",
+                            x=analyst_df["Ticker"],
+                            y=analyst_df["Hold"],
+                            marker_color='gray'
+                        ))
+                        
+                        fig_analyst.add_trace(go.Bar(
+                            name="Sell",
+                            x=analyst_df["Ticker"],
+                            y=analyst_df["Sell"],
+                            marker_color='red'
+                        ))
+                        
+                        fig_analyst.update_layout(
+                            barmode='stack',
+                            yaxis_title="Count",
+                            height=400
+                        )
+                        st.plotly_chart(fig_analyst, use_container_width=True)
+                    else:
+                        st.info("No analyst ratings available to display")
                 
                 with col2:
                     st.markdown("### 🎯 Analyst Consensus Score")
@@ -1086,12 +1205,15 @@ def render_sentiment_analysis(tickers: List[str] = None) -> None:
                             height=400
                         )
                         st.plotly_chart(fig_score, use_container_width=True)
+                    else:
+                        st.info("No analyst scores available to display")
                 
                 # Short interest
                 st.markdown("### 📉 Short Interest Analysis")
                 
-                valid_short = analyst_df[analyst_df["Short %"].notna()]
-                if not valid_short.empty:
+                if has_short_data:
+                    valid_short = analyst_df[analyst_df["Short %"].notna()]
+                    if not valid_short.empty:
                     fig_short = go.Figure()
                     
                     colors = ['red' if x > 10 else 'orange' if x > 5 else 'green' 
@@ -1114,6 +1236,8 @@ def render_sentiment_analysis(tickers: List[str] = None) -> None:
                     st.plotly_chart(fig_short, use_container_width=True)
                     
                     st.caption("**Note:** High short interest (>10%) can indicate bearish sentiment OR potential short squeeze opportunity")
+                else:
+                    st.info("No short interest data available for these tickers")
                 
                 # Recent recommendations timeline
                 st.markdown("### 📅 Recent Analyst Actions")
@@ -1122,13 +1246,33 @@ def render_sentiment_analysis(tickers: List[str] = None) -> None:
                 
                 if selected_ticker_recs:
                     recs = all_data[selected_ticker_recs]["recommendations"]
-                    if not recs.empty and 'To Grade' in recs.columns:
-                        recent = recs.tail(10).sort_index(ascending=False)
-                        st.dataframe(
-                            recent[['Firm', 'To Grade', 'Action']].reset_index(),
-                            use_container_width=True,
-                            height=300
-                        )
+                    if not recs.empty:
+                        # Find the grade column
+                        grade_col = None
+                        for col in ['To Grade', 'toGrade', 'grade', 'Grade']:
+                            if col in recs.columns:
+                                grade_col = col
+                                break
+                        
+                        if grade_col:
+                            recent = recs.tail(10).sort_index(ascending=False)
+                            
+                            # Display available columns
+                            display_cols = []
+                            for col in ['Firm', 'firm', grade_col, 'Action', 'action']:
+                                if col in recent.columns:
+                                    display_cols.append(col)
+                            
+                            if display_cols:
+                                st.dataframe(
+                                    recent[display_cols].reset_index(),
+                                    use_container_width=True,
+                                    height=300
+                                )
+                            else:
+                                st.dataframe(recent.reset_index(), use_container_width=True, height=300)
+                        else:
+                            st.info(f"Recommendations data exists but grade information not found. Available columns: {', '.join(recs.columns)}")
                     else:
                         st.info("No recent analyst recommendations available")
             
