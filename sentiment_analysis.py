@@ -474,9 +474,9 @@ def render_sentiment_analysis(tickers: List[str] = None) -> None:
                         pcr_score = 50
                     sentiment_components.append(pcr_score)
                 
-                # Analyst component
-                if not pd.isna(analyst_score):
-                    sentiment_components.append(analyst_score)
+                # Analyst component - use metrics dict to ensure it exists
+                if not pd.isna(metrics.get("analyst_score", np.nan)):
+                    sentiment_components.append(metrics["analyst_score"])
                 
                 # MA component
                 ma_score = 50
@@ -972,7 +972,7 @@ def render_sentiment_analysis(tickers: List[str] = None) -> None:
                                 y=hist['Close'].rolling(50).mean(),
                                 name='SMA 50',
                                 line=dict(color='orange', width=1)
-                            ))
+                        ))
                         
                         if len(hist) >= 200:
                             fig_price.add_trace(go.Scatter(
