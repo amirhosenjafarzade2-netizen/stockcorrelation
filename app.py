@@ -311,6 +311,28 @@ def get_available_modules() -> Dict[str, dict]:
     except Exception as e:
         if 'st' in dir():
             st.sidebar.error(f"❌ Error loading Commodities: {str(e)}")
+
+    # ── NEW MODULE: Sentiment Analysis ───────────────────────────────────────
+    try:
+        from sentiment_analysis import render_sentiment_analysis
+        modules["📊 Sentiment Analysis"] = {
+            "func": render_sentiment_analysis,
+            "desc": "Analyze market sentiment, retail interest, options activity, and behavioral indicators",
+            "uses_context": False
+        }
+    except ImportError:
+        pass
+
+    # ── NEW MODULE: Forex Enhanced ───────────────────────────────────────────
+    try:
+        from forex_enhanced import forex_module
+        modules["💱 Forex Analysis"] = {
+            "func": forex_module,
+            "desc": "Advanced currency pair analysis with economic indicators, technical analysis, correlations, and ML predictions",
+            "uses_context": False
+        }
+    except ImportError:
+        pass
   
     return modules
 # ────────────────────────────────────────────────
