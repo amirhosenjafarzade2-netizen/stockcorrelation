@@ -516,8 +516,8 @@ def detect_economic_cycle(data_dict: Dict[str, pd.DataFrame]) -> Tuple[pd.Series
     if len(indicators.columns) < 2:
         return pd.Series(), {'error': 'insufficient_indicators', 'available_indicators': required_indicators, 'min_required': 2}
     
-    if len(indicators) < 30:  # Reduced from 50 to 30 data points
-        return pd.Series(), {'error': 'insufficient_length', 'available_indicators': required_indicators, 'data_points': len(indicators), 'min_required': 30}
+    if len(indicators) < 20:  # Reduced from 30 to 20 data points
+        return pd.Series(), {'error': 'insufficient_length', 'available_indicators': required_indicators, 'data_points': len(indicators), 'min_required': 20}
     
     # Standardize indicators
     scaler = StandardScaler()
@@ -537,19 +537,23 @@ def detect_economic_cycle(data_dict: Dict[str, pd.DataFrame]) -> Tuple[pd.Series
     # Detect peaks and troughs using scipy with adaptive parameters
     composite_clean = composite_smooth.dropna()
     
-    if len(composite_clean) < 30:
+    # More lenient minimum requirement - 15 data points (about 1.25 years of quarterly data)
+    min_required_points = 15
+    
+    if len(composite_clean) < min_required_points:
         # Not enough data even after alignment
         return pd.Series(), {
             'error': 'insufficient_length_after_alignment',
             'available_indicators': required_indicators,
             'data_points': len(composite_clean),
-            'min_required': 30,
-            'message': 'After aligning indicators and calculating growth rates, insufficient overlapping data remains.'
+            'data_points_before_smooth': len(composite),
+            'min_required': min_required_points,
+            'message': f'After smoothing and alignment, only {len(composite_clean)} data points remain (from {len(composite)} before smoothing). Need at least {min_required_points}.'
         }
     
     # Adaptive peak detection parameters based on data length
-    min_distance = max(6, len(composite_clean) // 20)
-    min_prominence = max(0.3, composite_clean.std() * 0.5)
+    min_distance = max(4, len(composite_clean) // 25)  # More sensitive
+    min_prominence = max(0.2, composite_clean.std() * 0.4)  # Lower threshold
     
     peaks, _ = signal.find_peaks(composite_clean, distance=min_distance, prominence=min_prominence)
     troughs, _ = signal.find_peaks(-composite_clean, distance=min_distance, prominence=min_prominence)
@@ -585,6 +589,12 @@ def detect_economic_cycle(data_dict: Dict[str, pd.DataFrame]) -> Tuple[pd.Series
             phases.loc[all_turns[-1]:] = 'Contraction'
         else:
             phases.loc[all_turns[-1]:] = 'Expansion'
+    
+    # If no peaks/troughs detected, use composite value to classify
+    if len(all_turns) == 0:
+        # Use median as threshold
+        median_composite = composite_clean.median()
+        phases = composite.apply(lambda x: 'Expansion' if x > median_composite else 'Contraction')
     
     # Refine based on composite value
     current_phase = phases.iloc[-1] if len(phases) > 0 else 'Unknown'
@@ -1372,41 +1382,43 @@ def economics_module(analysis_context: Optional[Dict] = None):
                 
                 elif error_type == 'insufficient_length':
                     data_points = cycle_analysis.get('data_points', 0)
-                    min_points = cycle_analysis.get('min_required', 30)
+                    min_points = cycle_analysis.get('min_required', 20)
                     st.warning(f"⚠️ Insufficient historical data for cycle detection.")
                     st.info(f"""
                     Current data points: {data_points}
                     Required minimum: {min_points}
                     
-                    Please extend your date range to at least 3-5 years to get enough data points for meaningful cycle analysis.
+                    Please extend your date range to at least 2-3 years to get enough data points for meaningful cycle analysis.
                     
                     **Tips:**
-                    - GDP is quarterly data (need ~2.5+ years for 30 points)
-                    - Monthly indicators need ~2.5+ years
-                    - Try extending start date back to {(datetime.now() - timedelta(days=365*5)).strftime('%Y-%m-%d')}
+                    - GDP is quarterly data (need ~5+ quarters for 20 points)
+                    - Monthly indicators need ~20+ months
+                    - Try extending start date back to {(datetime.now() - timedelta(days=365*3)).strftime('%Y-%m-%d')}
                     """)
                 
                 elif error_type == 'insufficient_length_after_alignment':
                     data_points = cycle_analysis.get('data_points', 0)
-                    min_points = cycle_analysis.get('min_required', 30)
+                    data_points_before = cycle_analysis.get('data_points_before_smooth', 0)
+                    min_points = cycle_analysis.get('min_required', 15)
                     message = cycle_analysis.get('message', '')
-                    st.warning(f"⚠️ Insufficient overlapping data after alignment.")
+                    st.warning(f"⚠️ Insufficient data after smoothing.")
                     st.info(f"""
                     {message}
                     
-                    Current overlapping data points: {data_points}
+                    Data points before smoothing: {data_points_before}
+                    Data points after smoothing: {data_points}
                     Required minimum: {min_points}
                     
                     **What's happening:**
-                    When indicators are combined, they need overlapping dates. Growth rates also reduce available data.
+                    The smoothing operation (rolling average) removes some data points at the edges. Your data has {data_points_before} points, but after smoothing only {data_points} remain.
                     
                     **Solutions:**
-                    1. **Extend date range** to 5-10 years (recommended)
-                    2. **Add more monthly indicators** (they have more frequent data points)
-                    3. **Use GDP Growth** instead of GDP if available (already calculated, no data loss)
+                    1. **Extend date range** to 3-5 years (recommended)
+                    2. **Add more monthly indicators** (they have more frequent data points than quarterly GDP)
+                    3. **Use GDP Growth** instead of GDP if available (already calculated, avoids additional data loss)
                     
                     **Current date range:** {start_date} to {end_date}
-                    **Recommended start:** {(datetime.now() - timedelta(days=365*8)).strftime('%Y-%m-%d')}
+                    **Recommended start:** {(datetime.now() - timedelta(days=365*5)).strftime('%Y-%m-%d')}
                     """)
                 
                 else:
@@ -1447,9 +1459,11 @@ def economics_module(analysis_context: Optional[Dict] = None):
                 with st.expander("🔍 Debug Information"):
                     st.write("**Error Type:**", error_type)
                     st.write("**Available Indicators:**", available)
-                    if error_type == 'insufficient_length':
+                    if 'data_points' in cycle_analysis:
                         st.write("**Data Points Available:**", cycle_analysis.get('data_points', 0))
-                        st.write("**Data Points Required:**", cycle_analysis.get('min_required', 30))
+                        st.write("**Data Points Required:**", cycle_analysis.get('min_required', 15))
+                    if 'data_points_before_smooth' in cycle_analysis:
+                        st.write("**Data Points Before Smoothing:**", cycle_analysis.get('data_points_before_smooth', 0))
                     
                     # Show what data is actually loaded
                     st.write("**Loaded Indicators from data_dict:**")
@@ -1464,7 +1478,7 @@ def economics_module(analysis_context: Optional[Dict] = None):
                 3. **Confidence** → Consumer Sentiment
                 4. **Composite Indices** → Leading Economic Index (highly recommended)
                 
-                Then expand the date range to at least 5 years for better cycle detection.
+                Then expand the date range to at least 3-5 years for better cycle detection.
                 """)
                 
             elif not phases.empty and cycle_analysis:
@@ -1547,7 +1561,7 @@ def economics_module(analysis_context: Optional[Dict] = None):
     
     # ==================== RECESSION INDICATORS ====================
     
-    if show_recession and (data_dict or (show_yield_curve and not yield_curves.empty)):
+    if show_recession and (data_dict or (show_yield_curve and 'yield_curves' in locals() and not yield_curves.empty)):
         st.header("⚠️ Recession Indicators")
         
         # Get spreads if available
@@ -1622,10 +1636,10 @@ def economics_module(analysis_context: Optional[Dict] = None):
             # Individual indicators
             st.subheader("Individual Indicators")
             
-            indicator_cols = st.columns(min(len(recession_indicators.columns) - 1, 4))
+            indicator_cols_display = st.columns(min(len(recession_indicators.columns) - 1, 4))
             
             for idx, col_name in enumerate([c for c in recession_indicators.columns if c != 'Recession_Probability']):
-                with indicator_cols[idx % 4]:
+                with indicator_cols_display[idx % 4]:
                     is_signaling = recession_indicators[col_name].iloc[-1] == 1
                     
                     st.metric(
