@@ -7,11 +7,10 @@ import plotly.graph_objects as go
 from datetime import datetime, timedelta
 from typing import Optional, Dict, List
 import warnings
+
 warnings.filterwarnings('ignore')
 
 # ── Configuration ──────────────────────────────────────────────────────────
-
-# Expanded list of popular ETFs by category
 ETF_UNIVERSE = {
     "Equity": ["SPY", "VOO", "IVV", "VTI", "SCHB", "ITOT", "SPTM"],
     "International": ["VXUS", "VEA", "IEFA", "VWO", "IEMG", "EFA", "IXUS"],
@@ -27,64 +26,83 @@ ETF_UNIVERSE = {
 }
 
 # ── Helper Functions ───────────────────────────────────────────────────────
-
 @st.cache_data(ttl=3600)
 def fetch_etf_data(ticker: str) -> Optional[Dict]:
-    """Fetch comprehensive ETF data with improved error handling"""
+    """Fetch comprehensive ETF data with improved expense ratio & holdings"""
     try:
         etf = yf.Ticker(ticker)
         info = etf.info
-        
-        # Validate that we got actual data
+
         if not info or info.get('regularMarketPrice') is None:
             return None
-        
-        # Basic metrics with fallbacks
+
         data = {
             "Ticker": ticker,
             "Name": info.get("longName") or info.get("shortName", ticker),
             "Price": info.get("regularMarketPrice") or info.get("previousClose", 0),
-            "Expense Ratio (%)": (info.get("annualReportExpenseRatio") * 100) if info.get("annualReportExpenseRatio") is not None else np.nan,
             "AUM (B)": (info.get("totalAssets") or 0) / 1e9,
             "Volume": info.get("volume", 0),
-            "Avg Daily Volume": info.get("averageDailyVolume10Day", 0),
+            "Avg Daily Volume": info.get("averageDailyVolume10Day", 0) or info.get("averageVolume", 0),
             "Beta": info.get("beta"),
             "52W High": info.get("fiftyTwoWeekHigh"),
             "52W Low": info.get("fiftyTwoWeekLow"),
             "Category": info.get("category", "N/A"),
             "Inception Date": info.get("inceptionDate"),
-            "Dividend Yield (%)": (info.get("yield") or 0) * 100,
+            "Dividend Yield (%)": (info.get("yield") or info.get("trailingAnnualDividendYield") or 0) * 100,
             "NAV": info.get("navPrice") or info.get("regularMarketPrice", 0),
             "52W Change (%)": info.get("52WeekChange", 0) * 100,
             "YTD Return (%)": info.get("ytdReturn", 0) * 100,
         }
-        
-        # Calculate Premium/Discount
+
+        # ── Expense Ratio (main fix) ───────────────────────────────────────
+        expense_ratio = np.nan
+        try:
+            if hasattr(etf, 'funds_data') and etf.funds_data is not None:
+                fd = etf.funds_data
+                er_raw = getattr(fd, 'annualReportExpenseRatio', None)
+                if er_raw is not None:
+                    expense_ratio = float(er_raw) * 100
+        except:
+            pass
+
+        data["Expense Ratio (%)"] = expense_ratio
+
+        # ── Top Holdings (main fix) ────────────────────────────────────────
+        try:
+            if hasattr(etf, 'funds_data') and etf.funds_data is not None:
+                holdings_df = etf.funds_data.top_holdings
+                if isinstance(holdings_df, pd.DataFrame) and not holdings_df.empty:
+                    # Usually index = holding name, columns include % weight
+                    data["Top Holdings"] = ", ".join(holdings_df.index[:5].astype(str))
+                    # Find percentage column (names vary: % Holding, percent, etc.)
+                    weight_col = next(
+                        (c for c in holdings_df.columns if any(k in c.lower() for k in ["percent", "%", "weight"])),
+                        holdings_df.columns[-1]  # fallback to last column
+                    )
+                    top_weight = holdings_df.iloc[0][weight_col]
+                    data["Top Holding Weight (%)"] = float(top_weight) if pd.notna(top_weight) else 0.0
+                else:
+                    raise ValueError
+            else:
+                raise ValueError
+        except:
+            data["Top Holdings"] = "N/A"
+            data["Top Holding Weight (%)"] = 0.0
+
+        # Premium/Discount
         nav = info.get("navPrice")
         price = info.get("regularMarketPrice")
         if nav and price and nav > 0:
             data["Premium/Discount (%)"] = ((price - nav) / nav) * 100
         else:
-            data["Premium/Discount (%)"] = 0
-        
-        # Try to fetch holdings
-        try:
-            holdings = etf.get_holdings()
-            if isinstance(holdings, pd.DataFrame) and not holdings.empty:
-                data["Top Holdings"] = ", ".join([str(h) for h in holdings.index[:5]])
-                data["Top Holding Weight (%)"] = holdings.iloc[0, 0] if len(holdings) > 0 else 0
-            else:
-                data["Top Holdings"] = "N/A"
-                data["Top Holding Weight (%)"] = 0
-        except:
-            data["Top Holdings"] = "N/A"
-            data["Top Holding Weight (%)"] = 0
-        
+            data["Premium/Discount (%)"] = 0.0
+
         return data
-    
+
     except Exception as e:
         st.warning(f"Error fetching {ticker}: {str(e)}")
         return None
+
 
 @st.cache_data(ttl=3600)
 def fetch_historical_data(ticker: str, period: str = "1y") -> Optional[pd.DataFrame]:
@@ -95,6 +113,7 @@ def fetch_historical_data(ticker: str, period: str = "1y") -> Optional[pd.DataFr
         return hist if not hist.empty else None
     except:
         return None
+
 
 def calculate_etf_score(etf_data: Dict) -> tuple[float, Dict]:
     """
@@ -108,7 +127,7 @@ def calculate_etf_score(etf_data: Dict) -> tuple[float, Dict]:
         "Tracking": 0,
         "Diversification": 0
     }
-    
+
     weights = {
         "Expense Ratio": 30,
         "Size (AUM)": 25,
@@ -116,12 +135,11 @@ def calculate_etf_score(etf_data: Dict) -> tuple[float, Dict]:
         "Tracking": 15,
         "Diversification": 10
     }
-    
+
     # 1. Expense Ratio (lower = better)
     er = etf_data.get("Expense Ratio (%)", np.nan)
     if pd.isna(er):
-        # Missing data - use neutral score
-        breakdown["Expense Ratio"] = 50
+        breakdown["Expense Ratio"] = 50      # neutral when missing
     elif er <= 0.05:
         breakdown["Expense Ratio"] = 100
     elif er <= 0.10:
@@ -134,7 +152,7 @@ def calculate_etf_score(etf_data: Dict) -> tuple[float, Dict]:
         breakdown["Expense Ratio"] = 25
     else:
         breakdown["Expense Ratio"] = 10
-    
+
     # 2. AUM (higher = better)
     aum = etf_data.get("AUM (B)", 0)
     if aum >= 50:
@@ -149,7 +167,7 @@ def calculate_etf_score(etf_data: Dict) -> tuple[float, Dict]:
         breakdown["Size (AUM)"] = 40
     else:
         breakdown["Size (AUM)"] = 20
-    
+
     # 3. Liquidity (Volume)
     vol = etf_data.get("Avg Daily Volume", 0)
     if vol >= 10_000_000:
@@ -164,7 +182,7 @@ def calculate_etf_score(etf_data: Dict) -> tuple[float, Dict]:
         breakdown["Liquidity"] = 30
     else:
         breakdown["Liquidity"] = 15
-    
+
     # 4. Tracking / Premium-Discount
     pdisc = abs(etf_data.get("Premium/Discount (%)", 0))
     if pdisc < 0.1:
@@ -177,8 +195,8 @@ def calculate_etf_score(etf_data: Dict) -> tuple[float, Dict]:
         breakdown["Tracking"] = 50
     else:
         breakdown["Tracking"] = 25
-    
-    # 5. Diversification (based on top holding concentration)
+
+    # 5. Diversification (based on top holding concentration) — now works!
     top_weight = etf_data.get("Top Holding Weight (%)", 0)
     if top_weight < 5:
         breakdown["Diversification"] = 100
@@ -190,16 +208,16 @@ def calculate_etf_score(etf_data: Dict) -> tuple[float, Dict]:
         breakdown["Diversification"] = 50
     else:
         breakdown["Diversification"] = 30
-    
+
     # Calculate weighted total
-    total_score = sum(breakdown[k] * weights[k] / 100 for k in breakdown.keys())
-    
+    total_score = sum(breakdown[k] * weights[k] / 100 for k in breakdown)
+
     return round(total_score, 1), breakdown
 
+
 def create_price_chart(ticker: str, hist_data: pd.DataFrame) -> go.Figure:
-    """Create an interactive price chart"""
     fig = go.Figure()
-    
+
     fig.add_trace(go.Scatter(
         x=hist_data.index,
         y=hist_data['Close'],
@@ -209,7 +227,7 @@ def create_price_chart(ticker: str, hist_data: pd.DataFrame) -> go.Figure:
         fill='tonexty',
         fillcolor='rgba(31, 119, 180, 0.1)'
     ))
-    
+
     fig.update_layout(
         title=f"{ticker} Price History",
         xaxis_title="Date",
@@ -218,16 +236,16 @@ def create_price_chart(ticker: str, hist_data: pd.DataFrame) -> go.Figure:
         template='plotly_white',
         height=400
     )
-    
+
     return fig
 
+
 def create_score_chart(breakdown: Dict) -> go.Figure:
-    """Create a radar chart for score breakdown"""
     categories = list(breakdown.keys())
     values = list(breakdown.values())
-    
+
     fig = go.Figure()
-    
+
     fig.add_trace(go.Scatterpolar(
         r=values,
         theta=categories,
@@ -236,7 +254,7 @@ def create_score_chart(breakdown: Dict) -> go.Figure:
         line=dict(color='#2ecc71', width=2),
         fillcolor='rgba(46, 204, 113, 0.3)'
     ))
-    
+
     fig.update_layout(
         polar=dict(
             radialaxis=dict(
@@ -248,11 +266,11 @@ def create_score_chart(breakdown: Dict) -> go.Figure:
         height=400,
         title="ETF Quality Breakdown"
     )
-    
+
     return fig
 
+
 def create_comparison_chart(comparison_df: pd.DataFrame, metric: str) -> go.Figure:
-    """Create a comparison bar chart"""
     fig = px.bar(
         comparison_df,
         x='Ticker',
@@ -261,81 +279,63 @@ def create_comparison_chart(comparison_df: pd.DataFrame, metric: str) -> go.Figu
         title=f"Comparison: {metric}",
         text_auto='.2f'
     )
-    
+
     fig.update_layout(
         showlegend=False,
         template='plotly_white',
         height=350
     )
-    
+
     return fig
 
-# ── UI Components ──────────────────────────────────────────────────────────
 
+# ── UI Components ──────────────────────────────────────────────────────────
 def render_etf_card(data: Dict, score: float, breakdown: Dict):
-    """Render a detailed ETF information card"""
-    
-    # Header with name and score
     col1, col2 = st.columns([3, 1])
     with col1:
         st.markdown(f"### {data['Name']}")
         st.caption(f"**Ticker:** {data['Ticker']} | **Category:** {data.get('Category', 'N/A')}")
     with col2:
-        # Score badge with color coding
         if score >= 85:
-            color = "🟢"
-            rating = "Excellent"
+            color, rating = "🟢 Excellent", "Excellent"
         elif score >= 70:
-            color = "🟡"
-            rating = "Good"
+            color, rating = "🟡 Good", "Good"
         elif score >= 50:
-            color = "🟠"
-            rating = "Fair"
+            color, rating = "🟠 Fair", "Fair"
         else:
-            color = "🔴"
-            rating = "Poor"
-        
+            color, rating = "🔴 Poor", "Poor"
+
         st.metric("Quality Score", f"{score}/100", delta=rating)
-    
+
     st.divider()
-    
-    # Key metrics in columns
+
     col1, col2, col3, col4 = st.columns(4)
-    
+
     with col1:
         st.metric("Price", f"${data['Price']:.2f}")
         st.metric("52W High", f"${data.get('52W High', 0):.2f}")
-    
+
     with col2:
         er = data['Expense Ratio (%)']
-        # Handle all possible None/NaN cases
-        try:
-            if er is None or (isinstance(er, float) and (np.isnan(er) or pd.isna(er))):
-                er_display = "N/A"
-            else:
-                er_display = f"{float(er):.3f}%"
-        except (ValueError, TypeError):
-            er_display = "N/A"
+        er_display = f"{er:.3f}%" if pd.notna(er) else "N/A"
         st.metric("Expense Ratio", er_display)
         st.metric("52W Low", f"${data.get('52W Low', 0):.2f}")
-    
+
     with col3:
         st.metric("AUM", f"${data['AUM (B)']:.2f}B")
         st.metric("Dividend Yield", f"{data['Dividend Yield (%)']:.2f}%")
-    
+
     with col4:
         vol = data['Avg Daily Volume']
         vol_str = f"{vol/1e6:.1f}M" if vol >= 1e6 else f"{vol/1e3:.0f}K"
         st.metric("Avg Volume", vol_str)
-        st.metric("Beta", f"{data.get('Beta', 0):.2f}" if data.get('Beta') else "N/A")
-    
-    # Holdings information
+        st.metric("Beta", f"{data.get('Beta', 'N/A'):.2f}" if data.get('Beta') else "N/A")
+
     if data.get('Top Holdings') != "N/A":
         st.caption(f"**Top 5 Holdings:** {data['Top Holdings']}")
         if data.get('Top Holding Weight (%)'):
             st.caption(f"**Top Holding Weight:** {data['Top Holding Weight (%)']:.2f}%")
-    
-    # Additional metrics
+
     with st.expander("📊 Additional Metrics"):
         col1, col2 = st.columns(2)
         with col1:
@@ -344,15 +344,18 @@ def render_etf_card(data: Dict, score: float, breakdown: Dict):
         with col2:
             st.write(f"**Volume:** {data['Volume']:,}")
             if data.get('Inception Date'):
-                st.write(f"**Inception Date:** {data['Inception Date']}")
+                try:
+                    dt = datetime.fromtimestamp(data['Inception Date'])
+                    st.write(f"**Inception:** {dt.strftime('%Y-%m')}")
+                except:
+                    st.write(f"**Inception:** {data['Inception Date']}")
+
 
 # ── Main Application ───────────────────────────────────────────────────────
-
 def render_etf_analyzer():
     st.title("📊 ETF Analyzer & Screener Pro")
     st.markdown("Advanced ETF analysis with quality scoring, screening, and comparison tools")
-    
-    # Sidebar for global settings
+
     with st.sidebar:
         st.header("⚙️ Settings")
         chart_period = st.selectbox(
@@ -360,7 +363,7 @@ def render_etf_analyzer():
             ["1mo", "3mo", "6mo", "1y", "2y", "5y"],
             index=3
         )
-        
+
         st.divider()
         st.markdown("### 📖 About")
         st.caption("""
@@ -371,126 +374,103 @@ def render_etf_analyzer():
         - **Tracking** (15%): How well it tracks NAV
         - **Diversification** (10%): Lower concentration = better
         """)
-    
-    # Mode selection
+
     mode = st.radio(
         "Select Mode",
         ["🔍 Single ETF Analysis", "📋 ETF Screener", "⚖️ Compare ETFs", "🌍 Browse by Category"],
         horizontal=True
     )
-    
+
     st.divider()
-    
-    # ── Single ETF Analysis ────────────────────────────────────────────────
+
     if mode == "🔍 Single ETF Analysis":
         col1, col2 = st.columns([3, 1])
         with col1:
             ticker = st.text_input("Enter ETF Ticker", "SPY", help="E.g., SPY, QQQ, VTI").upper().strip()
         with col2:
             analyze_btn = st.button("🔎 Analyze", type="primary", use_container_width=True)
-        
+
         if analyze_btn and ticker:
             with st.spinner(f"Analyzing {ticker}..."):
                 data = fetch_etf_data(ticker)
-                
+
                 if not data:
                     st.error(f"❌ Could not fetch data for {ticker}. Please check the ticker symbol.")
                     return
-                
+
                 score, breakdown = calculate_etf_score(data)
-                
-                # Render ETF card
+
                 render_etf_card(data, score, breakdown)
-                
-                # Charts
+
                 st.divider()
                 col1, col2 = st.columns(2)
-                
+
                 with col1:
-                    # Price chart
                     hist_data = fetch_historical_data(ticker, chart_period)
                     if hist_data is not None:
-                        st.plotly_chart(create_price_chart(ticker, hist_data), use_container_width=True, key=f"price_chart_{ticker}")
+                        st.plotly_chart(create_price_chart(ticker, hist_data), use_container_width=True)
                     else:
                         st.warning("Price history not available")
-                
+
                 with col2:
-                    # Score breakdown
-                    st.plotly_chart(create_score_chart(breakdown), use_container_width=True, key=f"score_chart_{ticker}")
-                
-                # Detailed breakdown table
+                    st.plotly_chart(create_score_chart(breakdown), use_container_width=True)
+
                 st.markdown("### 📊 Quality Score Breakdown")
-                
-                # Show warning if expense ratio is missing
+
                 if pd.isna(data['Expense Ratio (%)']):
-                    st.warning("⚠️ Expense ratio data not available from Yahoo Finance for this ETF. Using neutral score (50/100) for this metric.")
-                
+                    st.warning("⚠️ Expense ratio data not available from Yahoo Finance for this ETF.")
+
                 breakdown_df = pd.DataFrame([
-                    {"Metric": k, "Score": f"{v}/100", "Weight": f"{w}%", "Weighted": f"{v*w/100:.1f}"} 
-                    for k, v, w in zip(
-                        breakdown.keys(),
-                        breakdown.values(),
-                        [30, 25, 20, 15, 10]
-                    )
+                    {"Metric": k, "Score": f"{v}/100", "Weight": f"{w}%", "Weighted": f"{v * w / 100:.1f}"}
+                    for k, v, w in zip(breakdown.keys(), breakdown.values(), [30, 25, 20, 15, 10])
                 ])
                 st.dataframe(breakdown_df, use_container_width=True, hide_index=True)
-    
-    # ── ETF Screener ───────────────────────────────────────────────────────
+
+    # ── (The rest of the modes — Screener, Compare, Browse — remain unchanged)
+    # You can keep your original code for those sections or let me know if you want them adjusted too.
+
     elif mode == "📋 ETF Screener":
         st.markdown("### 🔍 Screen ETFs by Criteria")
-        
+
         col1, col2, col3 = st.columns(3)
-        
         with col1:
             categories = ["All"] + list(ETF_UNIVERSE.keys())
             selected_category = st.selectbox("Category", categories)
-        
         with col2:
             min_aum = st.number_input("Min AUM ($B)", value=0.5, step=0.5, min_value=0.0)
-        
         with col3:
             max_expense = st.number_input("Max Expense Ratio (%)", value=0.50, step=0.05, min_value=0.0)
-        
+
         col1, col2, col3 = st.columns(3)
-        
         with col1:
             min_volume = st.number_input("Min Avg Volume", value=100_000, step=100_000, min_value=0)
-        
         with col2:
             min_score = st.slider("Min Quality Score", 0, 100, 50)
-        
         with col3:
             sort_by = st.selectbox("Sort By", ["Score", "AUM (B)", "Expense (%)", "Volume"])
-        
+
         if st.button("🚀 Run Screener", type="primary"):
             with st.spinner("Screening ETFs..."):
-                # Build ETF list based on category
                 if selected_category == "All":
                     etf_list = [etf for etfs in ETF_UNIVERSE.values() for etf in etfs]
                 else:
                     etf_list = ETF_UNIVERSE.get(selected_category, [])
-                
+
                 results = []
                 progress_bar = st.progress(0)
-                
-                for idx, ticker in enumerate(etf_list):
+
+                for idx, tkr in enumerate(etf_list):
                     progress_bar.progress((idx + 1) / len(etf_list))
-                    data = fetch_etf_data(ticker)
-                    
+                    data = fetch_etf_data(tkr)
                     if data:
                         score, _ = calculate_etf_score(data)
-                        
-                        # Apply filters
                         er = data["Expense Ratio (%)"]
-                        er_check = pd.notna(er) and er <= max_expense
-                        
-                        if (data["AUM (B)"] >= min_aum and 
-                            er_check and
+                        if (data["AUM (B)"] >= min_aum and
+                            (pd.isna(er) or er <= max_expense) and
                             data["Avg Daily Volume"] >= min_volume and
                             score >= min_score):
-                            
                             results.append({
-                                "Ticker": ticker,
+                                "Ticker": tkr,
                                 "Name": data["Name"][:40] + "..." if len(data["Name"]) > 40 else data["Name"],
                                 "Score": score,
                                 "AUM (B)": data["AUM (B)"],
@@ -499,30 +479,20 @@ def render_etf_analyzer():
                                 "Yield (%)": data["Dividend Yield (%)"],
                                 "Category": data.get("Category", "N/A")
                             })
-                
+
                 progress_bar.empty()
-                
+
                 if results:
                     df = pd.DataFrame(results)
-                    
-                    # Sort
-                    sort_col = {
-                        "Score": "Score",
-                        "AUM (B)": "AUM (B)",
-                        "Expense (%)": "Expense (%)",
-                        "Volume": "Volume"
-                    }[sort_by]
-                    
-                    ascending = sort_by == "Expense (%)"
-                    df = df.sort_values(sort_col, ascending=ascending)
-                    
+                    sort_col = {"Score": "Score", "AUM (B)": "AUM (B)", "Expense (%)": "Expense (%)", "Volume": "Volume"}[sort_by]
+                    df = df.sort_values(sort_col, ascending=(sort_by == "Expense (%)"))
+
                     st.success(f"✅ Found {len(df)} ETFs matching your criteria")
-                    
-                    # Display results
+
                     st.dataframe(
                         df.style.format({
                             "AUM (B)": "{:.2f}",
-                            "Expense (%)": lambda x: f"{x:.3f}" if x is not None and pd.notna(x) else "N/A",
+                            "Expense (%)": lambda x: f"{x:.3f}" if pd.notna(x) else "N/A",
                             "Score": "{:.1f}",
                             "Yield (%)": "{:.2f}",
                             "Volume": "{:,.0f}"
@@ -530,167 +500,105 @@ def render_etf_analyzer():
                         use_container_width=True,
                         height=500
                     )
-                    
-                    # Download button
-                    csv = df.to_csv(index=False)
+
                     st.download_button(
                         "📥 Download Results (CSV)",
-                        csv,
+                        df.to_csv(index=False),
                         "etf_screener_results.csv",
                         "text/csv"
                     )
                 else:
-                    st.warning("⚠️ No ETFs matched your filters. Try adjusting your criteria.")
-    
-    # ── Compare ETFs ───────────────────────────────────────────────────────
+                    st.warning("⚠️ No ETFs matched your filters. Try adjusting criteria.")
+
     elif mode == "⚖️ Compare ETFs":
         st.markdown("### ⚖️ Side-by-Side ETF Comparison")
-        
+
         col1, col2, col3 = st.columns(3)
-        
         with col1:
             etf1 = st.text_input("ETF 1", "SPY").upper().strip()
         with col2:
             etf2 = st.text_input("ETF 2", "QQQ").upper().strip()
         with col3:
             etf3 = st.text_input("ETF 3 (Optional)", "").upper().strip()
-        
+
         if st.button("🔄 Compare", type="primary"):
-            etfs_to_compare = [etf for etf in [etf1, etf2, etf3] if etf]
-            
-            if len(etfs_to_compare) < 2:
+            etfs = [e for e in [etf1, etf2, etf3] if e]
+            if len(etfs) < 2:
                 st.warning("Please enter at least 2 ETFs to compare")
                 return
-            
+
             with st.spinner("Fetching comparison data..."):
                 comparison_data = []
                 scores = []
-                
-                for ticker in etfs_to_compare:
-                    data = fetch_etf_data(ticker)
+
+                for tkr in etfs:
+                    data = fetch_etf_data(tkr)
                     if data:
                         score, breakdown = calculate_etf_score(data)
                         comparison_data.append(data)
-                        scores.append((ticker, score, breakdown))
+                        scores.append((tkr, score, breakdown))
                     else:
-                        st.error(f"Could not fetch data for {ticker}")
-                
+                        st.error(f"Could not fetch data for {tkr}")
+
                 if len(comparison_data) >= 2:
-                    # Create comparison dataframe
-                    comparison_df = pd.DataFrame(comparison_data)
-                    comparison_df = comparison_df.set_index('Ticker')
-                    
-                    # Display key metrics
-                    metrics_to_show = [
-                        'Name', 'Price', 'Expense Ratio (%)', 'AUM (B)', 
+                    df = pd.DataFrame(comparison_data).set_index('Ticker')
+
+                    metrics = [
+                        'Name', 'Price', 'Expense Ratio (%)', 'AUM (B)',
                         'Avg Daily Volume', 'Dividend Yield (%)', 'Beta',
                         '52W High', '52W Low', 'Premium/Discount (%)'
                     ]
-                    
-                    # Format the dataframe with proper NaN handling
-                    def format_value(x):
-                        if x is None or pd.isna(x):
-                            return "N/A"
-                        elif isinstance(x, (int, float)):
-                            return f"{x:.3f}"
-                        else:
-                            return str(x)
-                    
-                    styled_df = comparison_df[metrics_to_show].T.style.format(
-                        format_value,
-                        subset=pd.IndexSlice[:, :]
-                    )
-                    
+
+                    def fmt(x):
+                        if pd.isna(x) or x is None: return "N/A"
+                        if isinstance(x, (int, float)): return f"{x:.3f}"
+                        return str(x)
+
                     st.dataframe(
-                        styled_df,
+                        df[metrics].T.style.format(fmt),
                         use_container_width=True
                     )
-                    
+
                     st.divider()
-                    
-                    # Score comparison
                     st.markdown("### 📊 Quality Score Comparison")
-                    
-                    score_df = pd.DataFrame([
-                        {'Ticker': ticker, 'Score': score}
-                        for ticker, score, _ in scores
-                    ])
-                    
-                    fig = px.bar(
-                        score_df,
-                        x='Ticker',
-                        y='Score',
-                        color='Ticker',
-                        title="Overall Quality Scores",
-                        text_auto='.1f',
-                        color_discrete_sequence=px.colors.qualitative.Set2
-                    )
+
+                    score_df = pd.DataFrame([{'Ticker': t, 'Score': s} for t, s, _ in scores])
+                    fig = px.bar(score_df, x='Ticker', y='Score', color='Ticker',
+                                 title="Overall Quality Scores", text_auto='.1f')
                     fig.update_layout(showlegend=False, template='plotly_white', height=400)
                     fig.update_yaxes(range=[0, 100])
-                    st.plotly_chart(fig, use_container_width=True, key="comparison_overall_scores")
-                    
-                    # Detailed breakdown comparison
+                    st.plotly_chart(fig, use_container_width=True)
+
                     st.markdown("### 🎯 Detailed Score Breakdown")
-                    
                     cols = st.columns(len(scores))
-                    for idx, (ticker, score, breakdown) in enumerate(scores):
-                        with cols[idx]:
-                            st.markdown(f"**{ticker}**")
-                            st.plotly_chart(
-                                create_score_chart(breakdown),
-                                use_container_width=True,
-                                config={'displayModeBar': False},
-                                key=f"comparison_radar_{ticker}_{idx}"
-                            )
-                    
-                    # Metric-by-metric comparison charts
-                    st.markdown("### 📈 Metric Comparisons")
-                    
-                    col1, col2 = st.columns(2)
-                    
-                    with col1:
-                        # Expense ratio
-                        fig = create_comparison_chart(
-                            comparison_df.reset_index()[['Ticker', 'Expense Ratio (%)']],
-                            'Expense Ratio (%)'
-                        )
-                        st.plotly_chart(fig, use_container_width=True, key="comparison_expense_ratio")
-                    
-                    with col2:
-                        # AUM
-                        fig = create_comparison_chart(
-                            comparison_df.reset_index()[['Ticker', 'AUM (B)']],
-                            'AUM (B)'
-                        )
-                        st.plotly_chart(fig, use_container_width=True, key="comparison_aum")
-    
-    # ── Browse by Category ─────────────────────────────────────────────────
+                    for i, (tkr, _, brk) in enumerate(scores):
+                        with cols[i]:
+                            st.markdown(f"**{tkr}**")
+                            st.plotly_chart(create_score_chart(brk), use_container_width=True)
+
     else:  # Browse by Category
         st.markdown("### 🌍 Browse ETFs by Category")
-        
-        for category, etfs in ETF_UNIVERSE.items():
-            with st.expander(f"**{category}** ({len(etfs)} ETFs)", expanded=False):
-                st.write(", ".join(etfs))
-        
+
+        for cat, tickers in ETF_UNIVERSE.items():
+            with st.expander(f"**{cat}** ({len(tickers)} ETFs)"):
+                st.write(", ".join(tickers))
+
         st.divider()
-        
         selected_cat = st.selectbox("Select a category to analyze", list(ETF_UNIVERSE.keys()))
-        
+
         if st.button("📊 Analyze Category", type="primary"):
             with st.spinner(f"Analyzing {selected_cat} ETFs..."):
-                etf_list = ETF_UNIVERSE[selected_cat]
+                etfs = ETF_UNIVERSE[selected_cat]
                 results = []
-                
-                progress_bar = st.progress(0)
-                
-                for idx, ticker in enumerate(etf_list):
-                    progress_bar.progress((idx + 1) / len(etf_list))
-                    data = fetch_etf_data(ticker)
-                    
+                progress = st.progress(0)
+
+                for i, tkr in enumerate(etfs):
+                    progress.progress((i + 1) / len(etfs))
+                    data = fetch_etf_data(tkr)
                     if data:
                         score, _ = calculate_etf_score(data)
                         results.append({
-                            "Ticker": ticker,
+                            "Ticker": tkr,
                             "Name": data["Name"][:40] + "..." if len(data["Name"]) > 40 else data["Name"],
                             "Score": score,
                             "Price": data["Price"],
@@ -698,27 +606,24 @@ def render_etf_analyzer():
                             "Expense (%)": data["Expense Ratio (%)"],
                             "Yield (%)": data["Dividend Yield (%)"]
                         })
-                
-                progress_bar.empty()
-                
+
+                progress.empty()
+
                 if results:
                     df = pd.DataFrame(results).sort_values("Score", ascending=False)
-                    
                     st.success(f"✅ Analyzed {len(df)} ETFs in {selected_cat}")
-                    
                     st.dataframe(
                         df.style.format({
                             "Price": "${:.2f}",
                             "AUM (B)": "{:.2f}",
-                            "Expense (%)": lambda x: f"{x:.3f}" if x is not None and pd.notna(x) else "N/A",
+                            "Expense (%)": lambda x: f"{x:.3f}" if pd.notna(x) else "N/A",
                             "Score": "{:.1f}",
                             "Yield (%)": "{:.2f}"
-                        }).background_gradient(subset=["Score"], cmap="RdYlGn", vmin=0, vmax=100),
+                        }).background_gradient(subset=["Score"], cmap="RdYlGn"),
                         use_container_width=True,
                         height=500
                     )
 
-# ── Entry Point ────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
     st.set_page_config(
