@@ -308,7 +308,14 @@ def render_etf_card(data: Dict, score: float, breakdown: Dict):
     
     with col2:
         er = data['Expense Ratio (%)']
-        er_display = f"{er:.3f}%" if pd.notna(er) else "N/A"
+        # Handle all possible None/NaN cases
+        try:
+            if er is None or (isinstance(er, float) and (np.isnan(er) or pd.isna(er))):
+                er_display = "N/A"
+            else:
+                er_display = f"{float(er):.3f}%"
+        except (ValueError, TypeError):
+            er_display = "N/A"
         st.metric("Expense Ratio", er_display)
         st.metric("52W Low", f"${data.get('52W Low', 0):.2f}")
     
@@ -515,7 +522,7 @@ def render_etf_analyzer():
                     st.dataframe(
                         df.style.format({
                             "AUM (B)": "{:.2f}",
-                            "Expense (%)": lambda x: f"{x:.3f}" if pd.notna(x) else "N/A",
+                            "Expense (%)": lambda x: f"{x:.3f}" if x is not None and pd.notna(x) else "N/A",
                             "Score": "{:.1f}",
                             "Yield (%)": "{:.2f}",
                             "Volume": "{:,.0f}"
@@ -581,8 +588,16 @@ def render_etf_analyzer():
                     ]
                     
                     # Format the dataframe with proper NaN handling
+                    def format_value(x):
+                        if x is None or pd.isna(x):
+                            return "N/A"
+                        elif isinstance(x, (int, float)):
+                            return f"{x:.3f}"
+                        else:
+                            return str(x)
+                    
                     styled_df = comparison_df[metrics_to_show].T.style.format(
-                        lambda x: f"{x:.3f}" if isinstance(x, (int, float)) and pd.notna(x) else ("N/A" if pd.isna(x) else str(x)),
+                        format_value,
                         subset=pd.IndexSlice[:, :]
                     )
                     
@@ -695,7 +710,7 @@ def render_etf_analyzer():
                         df.style.format({
                             "Price": "${:.2f}",
                             "AUM (B)": "{:.2f}",
-                            "Expense (%)": lambda x: f"{x:.3f}" if pd.notna(x) else "N/A",
+                            "Expense (%)": lambda x: f"{x:.3f}" if x is not None and pd.notna(x) else "N/A",
                             "Score": "{:.1f}",
                             "Yield (%)": "{:.2f}"
                         }).background_gradient(subset=["Score"], cmap="RdYlGn", vmin=0, vmax=100),
