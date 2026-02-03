@@ -515,7 +515,7 @@ def render_etf_analyzer():
                     st.dataframe(
                         df.style.format({
                             "AUM (B)": "{:.2f}",
-                            "Expense (%)": "{:.3f}",
+                            "Expense (%)": lambda x: f"{x:.3f}" if pd.notna(x) else "N/A",
                             "Score": "{:.1f}",
                             "Yield (%)": "{:.2f}",
                             "Volume": "{:,.0f}"
@@ -580,8 +580,14 @@ def render_etf_analyzer():
                         '52W High', '52W Low', 'Premium/Discount (%)'
                     ]
                     
+                    # Format the dataframe with proper NaN handling
+                    styled_df = comparison_df[metrics_to_show].T.style.format(
+                        lambda x: f"{x:.3f}" if isinstance(x, (int, float)) and pd.notna(x) else ("N/A" if pd.isna(x) else str(x)),
+                        subset=pd.IndexSlice[:, :]
+                    )
+                    
                     st.dataframe(
-                        comparison_df[metrics_to_show].T,
+                        styled_df,
                         use_container_width=True
                     )
                     
@@ -689,7 +695,7 @@ def render_etf_analyzer():
                         df.style.format({
                             "Price": "${:.2f}",
                             "AUM (B)": "{:.2f}",
-                            "Expense (%)": "{:.3f}",
+                            "Expense (%)": lambda x: f"{x:.3f}" if pd.notna(x) else "N/A",
                             "Score": "{:.1f}",
                             "Yield (%)": "{:.2f}"
                         }).background_gradient(subset=["Score"], cmap="RdYlGn", vmin=0, vmax=100),
