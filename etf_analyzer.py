@@ -592,7 +592,7 @@ def render_etf_analyzer():
                         color_discrete_sequence=px.colors.qualitative.Set2
                     )
                     fig.update_layout(showlegend=False, template='plotly_white', height=400)
-                    fig.update_yaxis(range=[0, 100])
+                    fig.update_yaxes(range=[0, 100])
                     st.plotly_chart(fig, use_container_width=True)
                     
                     # Detailed breakdown comparison
