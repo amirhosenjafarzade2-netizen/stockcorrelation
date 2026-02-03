@@ -398,13 +398,13 @@ def render_etf_analyzer():
                     # Price chart
                     hist_data = fetch_historical_data(ticker, chart_period)
                     if hist_data is not None:
-                        st.plotly_chart(create_price_chart(ticker, hist_data), use_container_width=True)
+                        st.plotly_chart(create_price_chart(ticker, hist_data), use_container_width=True, key=f"price_chart_{ticker}")
                     else:
                         st.warning("Price history not available")
                 
                 with col2:
                     # Score breakdown
-                    st.plotly_chart(create_score_chart(breakdown), use_container_width=True)
+                    st.plotly_chart(create_score_chart(breakdown), use_container_width=True, key=f"score_chart_{ticker}")
                 
                 # Detailed breakdown table
                 st.markdown("### 📊 Quality Score Breakdown")
@@ -593,7 +593,7 @@ def render_etf_analyzer():
                     )
                     fig.update_layout(showlegend=False, template='plotly_white', height=400)
                     fig.update_yaxes(range=[0, 100])
-                    st.plotly_chart(fig, use_container_width=True)
+                    st.plotly_chart(fig, use_container_width=True, key="comparison_overall_scores")
                     
                     # Detailed breakdown comparison
                     st.markdown("### 🎯 Detailed Score Breakdown")
@@ -605,7 +605,8 @@ def render_etf_analyzer():
                             st.plotly_chart(
                                 create_score_chart(breakdown),
                                 use_container_width=True,
-                                config={'displayModeBar': False}
+                                config={'displayModeBar': False},
+                                key=f"comparison_radar_{ticker}_{idx}"
                             )
                     
                     # Metric-by-metric comparison charts
@@ -619,7 +620,7 @@ def render_etf_analyzer():
                             comparison_df.reset_index()[['Ticker', 'Expense Ratio (%)']],
                             'Expense Ratio (%)'
                         )
-                        st.plotly_chart(fig, use_container_width=True)
+                        st.plotly_chart(fig, use_container_width=True, key="comparison_expense_ratio")
                     
                     with col2:
                         # AUM
@@ -627,7 +628,7 @@ def render_etf_analyzer():
                             comparison_df.reset_index()[['Ticker', 'AUM (B)']],
                             'AUM (B)'
                         )
-                        st.plotly_chart(fig, use_container_width=True)
+                        st.plotly_chart(fig, use_container_width=True, key="comparison_aum")
     
     # ── Browse by Category ─────────────────────────────────────────────────
     else:  # Browse by Category
