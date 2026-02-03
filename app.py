@@ -332,9 +332,9 @@ def get_available_modules() -> Dict[str, dict]:
         }
     except ImportError:
         pass
-    return modules
-     # ── NEW MODULE: etf Analysis ───────────────────────────────────────
-     try:
+    
+    # ── NEW MODULE: etf Analysis ───────────────────────────────────────
+    try:
         from etf_analyzer import render_etf_analyzer
         modules["📈 ETF Analyzer & Screener"] = {
             "func": render_etf_analyzer,
@@ -343,6 +343,8 @@ def get_available_modules() -> Dict[str, dict]:
         }
     except ImportError:
         pass
+    
+    return modules
 # ────────────────────────────────────────────────
 # Session State Initialization
 # ────────────────────────────────────────────────
