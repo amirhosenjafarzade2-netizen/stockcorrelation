@@ -44,7 +44,7 @@ def fetch_etf_data(ticker: str) -> Optional[Dict]:
             "Ticker": ticker,
             "Name": info.get("longName") or info.get("shortName", ticker),
             "Price": info.get("regularMarketPrice") or info.get("previousClose", 0),
-            "Expense Ratio (%)": (info.get("annualReportExpenseRatio") or 0) * 100,
+            "Expense Ratio (%)": (info.get("annualReportExpenseRatio") * 100) if info.get("annualReportExpenseRatio") is not None else np.nan,
             "AUM (B)": (info.get("totalAssets") or 0) / 1e9,
             "Volume": info.get("volume", 0),
             "Avg Daily Volume": info.get("averageDailyVolume10Day", 0),
@@ -118,8 +118,11 @@ def calculate_etf_score(etf_data: Dict) -> tuple[float, Dict]:
     }
     
     # 1. Expense Ratio (lower = better)
-    er = etf_data.get("Expense Ratio (%)", 99)
-    if er <= 0.05:
+    er = etf_data.get("Expense Ratio (%)", np.nan)
+    if pd.isna(er):
+        # Missing data - use neutral score
+        breakdown["Expense Ratio"] = 50
+    elif er <= 0.05:
         breakdown["Expense Ratio"] = 100
     elif er <= 0.10:
         breakdown["Expense Ratio"] = 90
@@ -304,7 +307,9 @@ def render_etf_card(data: Dict, score: float, breakdown: Dict):
         st.metric("52W High", f"${data.get('52W High', 0):.2f}")
     
     with col2:
-        st.metric("Expense Ratio", f"{data['Expense Ratio (%)']:.3f}%")
+        er = data['Expense Ratio (%)']
+        er_display = f"{er:.3f}%" if pd.notna(er) else "N/A"
+        st.metric("Expense Ratio", er_display)
         st.metric("52W Low", f"${data.get('52W Low', 0):.2f}")
     
     with col3:
@@ -408,6 +413,11 @@ def render_etf_analyzer():
                 
                 # Detailed breakdown table
                 st.markdown("### 📊 Quality Score Breakdown")
+                
+                # Show warning if expense ratio is missing
+                if pd.isna(data['Expense Ratio (%)']):
+                    st.warning("⚠️ Expense ratio data not available from Yahoo Finance for this ETF. Using neutral score (50/100) for this metric.")
+                
                 breakdown_df = pd.DataFrame([
                     {"Metric": k, "Score": f"{v}/100", "Weight": f"{w}%", "Weighted": f"{v*w/100:.1f}"} 
                     for k, v, w in zip(
@@ -464,8 +474,11 @@ def render_etf_analyzer():
                         score, _ = calculate_etf_score(data)
                         
                         # Apply filters
+                        er = data["Expense Ratio (%)"]
+                        er_check = pd.notna(er) and er <= max_expense
+                        
                         if (data["AUM (B)"] >= min_aum and 
-                            data["Expense Ratio (%)"] <= max_expense and
+                            er_check and
                             data["Avg Daily Volume"] >= min_volume and
                             score >= min_score):
                             
