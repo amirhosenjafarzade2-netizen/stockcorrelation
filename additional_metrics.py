@@ -693,7 +693,7 @@ def render_additional_metrics(
             
             ticker_select = st.selectbox("Select ticker for monthly heatmap:", tickers, key="monthly_heatmap")
             
-            monthly_rets = analyzer.simple_returns[ticker_select].resample('M').sum()
+            monthly_rets = analyzer.simple_returns[ticker_select].resample('ME').sum()
             monthly_pivot = pd.DataFrame({
                 'Year': monthly_rets.index.year,
                 'Month': monthly_rets.index.month,
