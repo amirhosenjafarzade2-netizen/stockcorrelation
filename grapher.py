@@ -308,6 +308,14 @@ def render_grapher():
                 if analyst_data:
                     st.success("✅ **Analyst Data**: Available")
 
+            # ── DEBUG (remove after confirming data) ──────────────────
+            with st.expander("🔍 Debug: raw yfinance index labels"):
+                st.write("**Income index:**", list(income.index) if not income.empty else "EMPTY")
+                st.write("**Cashflow index:**", list(cashflow.index) if not cashflow.empty else "EMPTY")
+                st.write("**Balance index:**", list(balance.index) if not balance.empty else "EMPTY")
+                st.write("**Income columns:**", list(income.columns) if not income.empty else "EMPTY")
+            # ── END DEBUG ─────────────────────────────────────────────────
+
             # Extract metrics
             revenue = safe_get(income, "Total Revenue")
             gross_profit = safe_get(income, "Gross Profit")
