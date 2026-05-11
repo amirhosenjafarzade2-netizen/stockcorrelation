@@ -869,7 +869,7 @@ def render_correlation_finder(
                     "CI Upper": "{:.4f}",
                     "N Obs": "{:.0f}"
                 }).background_gradient(cmap="RdBu_r", subset=["Correlation"], vmin=-1, vmax=1)
-                  .applymap(lambda x: 'background-color: lightgreen' if x == "✓" else 'background-color: lightcoral', 
+                  .map(lambda x: 'background-color: lightgreen' if x == "✓" else 'background-color: lightcoral', 
                            subset=["Significant"]),
                 use_container_width=True
             )
@@ -1408,7 +1408,7 @@ def render_correlation_finder(
                     "Rolling Std": "{:.3f}"
                 }).background_gradient(cmap="RdBu_r", subset=["Correlation"], vmin=-1, vmax=1)
                   .background_gradient(cmap="YlOrRd", subset=["Rolling Std"])
-                  .applymap(lambda x: 'background-color: lightgreen' if x == "✓" else 'background-color: lightcoral', 
+                  .map(lambda x: 'background-color: lightgreen' if x == "✓" else 'background-color: lightcoral', 
                            subset=["Significant"]),
                 use_container_width=True,
                 height=400
