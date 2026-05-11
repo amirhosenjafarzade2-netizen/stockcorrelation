@@ -52,13 +52,25 @@ def fetch_yfinance_fundamentals(ticker: str, frequency: str):
         is_annual = (frequency == "Annual")
         
         if is_annual:
-            income = ticker_obj.get_income_stmt(freq="yearly")
-            balance = ticker_obj.get_balance_sheet(freq="yearly") 
-            cashflow = ticker_obj.get_cashflow(freq="yearly")
+            income = ticker_obj.get_income_stmt(pretty=True, freq='yearly')
+            if income is None or income.empty:
+                income = ticker_obj.financials
+            balance = ticker_obj.get_balance_sheet(pretty=True, freq='yearly')
+            if balance is None or balance.empty:
+                balance = ticker_obj.balance_sheet
+            cashflow = ticker_obj.get_cash_flow(pretty=True, freq='yearly')
+            if cashflow is None or cashflow.empty:
+                cashflow = ticker_obj.cashflow
         else:
-            income = ticker_obj.get_income_stmt(freq="quarterly")
-            balance = ticker_obj.get_balance_sheet(freq="quarterly")
-            cashflow = ticker_obj.get_cashflow(freq="quarterly")
+            income = ticker_obj.get_income_stmt(pretty=True, freq='quarterly')
+            if income is None or income.empty:
+                income = ticker_obj.quarterly_financials
+            balance = ticker_obj.get_balance_sheet(pretty=True, freq='quarterly')
+            if balance is None or balance.empty:
+                balance = ticker_obj.quarterly_balance_sheet
+            cashflow = ticker_obj.get_cash_flow(pretty=True, freq='quarterly')
+            if cashflow is None or cashflow.empty:
+                cashflow = ticker_obj.quarterly_cashflow
         
         info = ticker_obj.info
         return income, balance, cashflow, info
@@ -94,12 +106,12 @@ def safe_get(df: pd.DataFrame, key: str, default=None) -> pd.Series:
         return pd.Series(dtype=float)
     
     if key in df.index:
-        return df.loc[key]
+        return df.loc[key].sort_index()
     
     # Case-insensitive partial match
     for idx in df.index:
         if isinstance(idx, str) and key.lower() in idx.lower():
-            return df.loc[idx]
+            return df.loc[idx].sort_index()
     
     # Alternatives
     alternatives = {
@@ -124,10 +136,10 @@ def safe_get(df: pd.DataFrame, key: str, default=None) -> pd.Series:
     
     for alt in alternatives.get(key, []):
         if alt in df.index:
-            return df.loc[alt]
+            return df.loc[alt].sort_index()
         for idx in df.index:
             if isinstance(idx, str) and alt.lower() in idx.lower():
-                return df.loc[idx]
+                return df.loc[idx].sort_index()
     
     if default is not None:
         return pd.Series(default, index=df.columns if not df.empty else [])
