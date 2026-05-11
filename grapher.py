@@ -26,10 +26,16 @@ def fetch_price_data(ticker: str, start_date: date, end_date: date) -> pd.Series
         try:
             prices = yf.download(ticker, start=start_date, end=end_date, progress=False, auto_adjust=True)
             
-            if isinstance(prices, pd.DataFrame) and "Close" in prices.columns:
-                return prices["Close"]
-            elif isinstance(prices, pd.DataFrame) and not prices.empty:
-                return prices.iloc[:, 0]
+            if isinstance(prices, pd.DataFrame) and not prices.empty:
+                # yfinance may return MultiIndex columns; flatten to 1D Series
+                if "Close" in prices.columns:
+                    series = prices["Close"]
+                else:
+                    series = prices.iloc[:, 0]
+                # squeeze in case it's still a DataFrame (MultiIndex edge case)
+                if isinstance(series, pd.DataFrame):
+                    series = series.squeeze()
+                return series.dropna()
             else:
                 return pd.Series(dtype=float)
         except Exception as e:
@@ -327,14 +333,16 @@ def render_grapher():
                     plot_line(prices, f"{ticker} Price", "Price (USD)", "#1f77b4")
                     
                     col1, col2, col3, col4 = st.columns(4)
+                    p_last = float(prices.iloc[-1].squeeze() if hasattr(prices.iloc[-1], 'squeeze') else prices.iloc[-1])
+                    p_first = float(prices.iloc[0].squeeze() if hasattr(prices.iloc[0], 'squeeze') else prices.iloc[0])
                     with col1:
-                        st.metric("Current", f"${float(prices.iloc[-1]):.2f}")
+                        st.metric("Current", f"${p_last:.2f}")
                     with col2:
                         st.metric("High", f"${float(prices.max()):.2f}")
                     with col3:
                         st.metric("Low", f"${float(prices.min()):.2f}")
                     with col4:
-                        ret = ((float(prices.iloc[-1]) / float(prices.iloc[0])) - 1) * 100
+                        ret = ((p_last / p_first) - 1) * 100
                         st.metric("Return", f"{ret:.1f}%")
                 
                 st.markdown("### Revenue")
