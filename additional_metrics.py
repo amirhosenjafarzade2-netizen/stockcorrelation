@@ -464,7 +464,7 @@ def render_additional_metrics(
                     "Days Underwater": "{:.0f}",
                     "Calmar Ratio": "{:.2f}"
                 }).background_gradient(cmap="RdYlGn_r", subset=["Max Drawdown", "Current Drawdown"])
-                  .applymap(lambda x: 'background-color: lightgreen' if x == "Recovered" else '', 
+                  .map(lambda x: 'background-color: lightgreen' if x == "Recovered" else '', 
                            subset=["Recovery Status"]),
                 use_container_width=True
             )
