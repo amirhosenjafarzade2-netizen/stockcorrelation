@@ -1,5 +1,7 @@
 # advanced_models_improved.py - Enhanced Fundamental Financial Models Module
-# Comprehensive DuPont, Altman Z-Score, Piotroski F-Score, WACC, and more
+# Comprehensive DuPont, Altman Z-Score, Piotroski F-Score, WACC, Graham Number,
+# Beneish M-Score, EV/EBITDA, Greenblatt Magic Formula, and more.
+
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -12,23 +14,67 @@ from datetime import datetime
 import warnings
 warnings.filterwarnings('ignore')
 
+# ==================== PAGE CONFIG ====================
+
+st.set_page_config(
+    page_title="Advanced Financial Models",
+    page_icon="🔬",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
+
+# Custom CSS for better UI
+st.markdown("""
+<style>
+    .metric-card {
+        background: #f8f9fa;
+        border-left: 4px solid #1f77b4;
+        padding: 12px 16px;
+        border-radius: 6px;
+        margin: 4px 0;
+    }
+    .score-badge {
+        display: inline-block;
+        padding: 4px 12px;
+        border-radius: 20px;
+        font-weight: bold;
+        font-size: 1.1em;
+    }
+    .badge-green { background: #d4edda; color: #155724; }
+    .badge-orange { background: #fff3cd; color: #856404; }
+    .badge-red { background: #f8d7da; color: #721c24; }
+    .section-header {
+        font-size: 1.4em;
+        font-weight: 700;
+        border-bottom: 2px solid #1f77b4;
+        padding-bottom: 6px;
+        margin-bottom: 16px;
+    }
+    .stMetric { border-radius: 8px; }
+    div[data-testid="metric-container"] {
+        background: white;
+        border: 1px solid #e0e0e0;
+        border-radius: 8px;
+        padding: 12px;
+        box-shadow: 0 1px 3px rgba(0,0,0,0.08);
+    }
+</style>
+""", unsafe_allow_html=True)
+
 # ==================== DATA FETCHING ====================
 
 @st.cache_data(ttl=3600)
-def fetch_financial_data(ticker: str) -> Dict:
+def fetch_financial_data(ticker: str) -> Optional[Dict]:
     """Fetch comprehensive financial data for analysis."""
     try:
         stock = yf.Ticker(ticker)
         info = stock.info
-        
-        # Get financial statements
+        if not info or info.get('regularMarketPrice') is None and info.get('currentPrice') is None:
+            return None
         income_stmt = stock.financials
         balance_sheet = stock.balance_sheet
         cash_flow = stock.cashflow
-        
-        # Get historical data for trend analysis
         hist_data = stock.history(period='5y')
-        
         return {
             'info': info,
             'income_statement': income_stmt,
@@ -38,63 +84,58 @@ def fetch_financial_data(ticker: str) -> Dict:
             'ticker': ticker
         }
     except Exception as e:
-        st.error(f"Error fetching data: {str(e)}")
+        st.error(f"Error fetching data for {ticker}: {str(e)}")
         return None
 
-def safe_get(df: pd.DataFrame, key: str, col: int = 0, default: float = 0) -> float:
-    """Safely get value from DataFrame."""
+
+def safe_get(df: pd.DataFrame, key: str, col: int = 0, default: float = 0.0) -> float:
+    """Safely extract a float from a DataFrame by row name and column index."""
     try:
+        if df is None or df.empty:
+            return default
         if key in df.index:
             val = df.loc[key].iloc[col]
             return float(val) if pd.notna(val) else default
         return default
-    except:
+    except Exception:
         return default
+
+
+def fmt_billions(val: float) -> str:
+    if abs(val) >= 1e12:
+        return f"${val/1e12:.2f}T"
+    if abs(val) >= 1e9:
+        return f"${val/1e9:.2f}B"
+    if abs(val) >= 1e6:
+        return f"${val/1e6:.2f}M"
+    return f"${val:,.0f}"
 
 # ==================== DUPONT ANALYSIS ====================
 
-def dupont_analysis_3way(net_income: float, revenue: float, assets: float, equity: float) -> Dict:
-    """
-    3-Way DuPont Analysis: ROE = Profit Margin × Asset Turnover × Equity Multiplier
-    """
+def dupont_analysis_3way(net_income, revenue, assets, equity) -> Dict:
     if revenue == 0 or assets == 0 or equity == 0:
         return {}
-    
     profit_margin = net_income / revenue
     asset_turnover = revenue / assets
     equity_multiplier = assets / equity
     roe = profit_margin * asset_turnover * equity_multiplier
-    
     return {
         'ROE': roe * 100,
         'Profit Margin': profit_margin * 100,
         'Asset Turnover': asset_turnover,
         'Equity Multiplier': equity_multiplier,
-        'Components': {
-            'Net Income': net_income,
-            'Revenue': revenue,
-            'Total Assets': assets,
-            'Total Equity': equity
-        }
     }
 
-def dupont_analysis_5way(net_income: float, ebt: float, ebit: float, revenue: float, 
-                         assets: float, equity: float) -> Dict:
-    """
-    5-Way DuPont Analysis: More detailed decomposition
-    ROE = Tax Burden × Interest Burden × EBIT Margin × Asset Turnover × Equity Multiplier
-    """
+
+def dupont_analysis_5way(net_income, ebt, ebit, revenue, assets, equity) -> Dict:
     if not all([ebt, ebit, revenue, assets, equity]):
         return {}
-    
     tax_burden = net_income / ebt if ebt != 0 else 0
     interest_burden = ebt / ebit if ebit != 0 else 0
     ebit_margin = ebit / revenue if revenue != 0 else 0
     asset_turnover = revenue / assets if assets != 0 else 0
     equity_multiplier = assets / equity if equity != 0 else 0
-    
     roe = tax_burden * interest_burden * ebit_margin * asset_turnover * equity_multiplier
-    
     return {
         'ROE': roe * 100,
         'Tax Burden': tax_burden,
@@ -102,1081 +143,863 @@ def dupont_analysis_5way(net_income: float, ebt: float, ebit: float, revenue: fl
         'EBIT Margin': ebit_margin * 100,
         'Asset Turnover': asset_turnover,
         'Equity Multiplier': equity_multiplier,
-        'Components': {
-            'Net Income': net_income,
-            'EBT': ebt,
-            'EBIT': ebit,
-            'Revenue': revenue,
-            'Assets': assets,
-            'Equity': equity
-        }
     }
 
 # ==================== ALTMAN Z-SCORE ====================
 
-def altman_z_score_public(working_capital: float, retained_earnings: float, ebit: float,
-                         market_cap: float, total_liab: float, revenue: float, 
-                         total_assets: float) -> Dict:
-    """
-    Altman Z-Score for publicly traded companies.
-    
-    Z = 1.2X1 + 1.4X2 + 3.3X3 + 0.6X4 + 1.0X5
-    where:
-    X1 = Working Capital / Total Assets
-    X2 = Retained Earnings / Total Assets
-    X3 = EBIT / Total Assets
-    X4 = Market Value of Equity / Total Liabilities
-    X5 = Sales / Total Assets
-    
-    Interpretation:
-    Z > 2.99: Safe Zone (low bankruptcy risk)
-    1.81 < Z < 2.99: Grey Zone
-    Z < 1.81: Distress Zone (high bankruptcy risk)
-    """
+def altman_z_score_public(working_capital, retained_earnings, ebit,
+                          market_cap, total_liab, revenue, total_assets) -> Dict:
     if total_assets == 0:
         return {}
-    
     x1 = working_capital / total_assets
     x2 = retained_earnings / total_assets
     x3 = ebit / total_assets
     x4 = market_cap / total_liab if total_liab > 0 else 0
     x5 = revenue / total_assets
-    
-    z_score = 1.2 * x1 + 1.4 * x2 + 3.3 * x3 + 0.6 * x4 + 1.0 * x5
-    
-    # Determine zone
-    if z_score > 2.99:
-        zone = "Safe Zone"
-        risk = "Low"
-        color = "green"
-    elif z_score > 1.81:
-        zone = "Grey Zone"
-        risk = "Moderate"
-        color = "orange"
-    else:
-        zone = "Distress Zone"
-        risk = "High"
-        color = "red"
-    
+    z = 1.2*x1 + 1.4*x2 + 3.3*x3 + 0.6*x4 + 1.0*x5
+    zone, risk, color = ("Safe Zone", "Low", "green") if z > 2.99 else \
+                        ("Grey Zone", "Moderate", "orange") if z > 1.81 else \
+                        ("Distress Zone", "High", "red")
     return {
-        'Z-Score': z_score,
-        'Zone': zone,
-        'Bankruptcy Risk': risk,
-        'Color': color,
-        'Components': {
-            'X1 (Working Capital / Assets)': x1,
-            'X2 (Retained Earnings / Assets)': x2,
-            'X3 (EBIT / Assets)': x3,
-            'X4 (Market Cap / Liabilities)': x4,
-            'X5 (Sales / Assets)': x5
-        },
-        'Weights': {
-            'X1 Weight': 1.2,
-            'X2 Weight': 1.4,
-            'X3 Weight': 3.3,
-            'X4 Weight': 0.6,
-            'X5 Weight': 1.0
-        }
-    }
-
-def altman_z_score_private(working_capital: float, retained_earnings: float, ebit: float,
-                          book_equity: float, total_liab: float, revenue: float,
-                          total_assets: float) -> Dict:
-    """
-    Altman Z-Score for private companies (modified version).
-    Z' = 0.717X1 + 0.847X2 + 3.107X3 + 0.420X4 + 0.998X5
-    Uses book value instead of market value.
-    """
-    if total_assets == 0:
-        return {}
-    
-    x1 = working_capital / total_assets
-    x2 = retained_earnings / total_assets
-    x3 = ebit / total_assets
-    x4 = book_equity / total_liab if total_liab > 0 else 0
-    x5 = revenue / total_assets
-    
-    z_score = 0.717 * x1 + 0.847 * x2 + 3.107 * x3 + 0.420 * x4 + 0.998 * x5
-    
-    # Different thresholds for private companies
-    if z_score > 2.6:
-        zone = "Safe Zone"
-        risk = "Low"
-        color = "green"
-    elif z_score > 1.1:
-        zone = "Grey Zone"
-        risk = "Moderate"
-        color = "orange"
-    else:
-        zone = "Distress Zone"
-        risk = "High"
-        color = "red"
-    
-    return {
-        'Z-Score': z_score,
-        'Zone': zone,
-        'Bankruptcy Risk': risk,
-        'Color': color,
-        'Model': 'Private Company',
-        'Components': {
-            'X1 (Working Capital / Assets)': x1,
-            'X2 (Retained Earnings / Assets)': x2,
-            'X3 (EBIT / Assets)': x3,
-            'X4 (Book Equity / Liabilities)': x4,
-            'X5 (Sales / Assets)': x5
-        }
+        'Z-Score': z, 'Zone': zone, 'Bankruptcy Risk': risk, 'Color': color,
+        'Components': {'X1 Working Capital/Assets': x1, 'X2 Retained Earnings/Assets': x2,
+                       'X3 EBIT/Assets': x3, 'X4 MktCap/Liabilities': x4, 'X5 Sales/Assets': x5},
+        'Weights': {'X1': 1.2, 'X2': 1.4, 'X3': 3.3, 'X4': 0.6, 'X5': 1.0}
     }
 
 # ==================== PIOTROSKI F-SCORE ====================
 
-def piotroski_f_score(current_data: Dict, prior_data: Dict) -> Dict:
-    """
-    Piotroski F-Score: 9-point score assessing financial strength.
-    
-    Profitability (4 points):
-    1. ROA > 0
-    2. Operating Cash Flow > 0
-    3. Change in ROA > 0
-    4. Accruals < 0 (CFO > Net Income)
-    
-    Leverage/Liquidity (3 points):
-    5. Change in Long-term Debt < 0
-    6. Change in Current Ratio > 0
-    7. No new shares issued
-    
-    Operating Efficiency (2 points):
-    8. Change in Gross Margin > 0
-    9. Change in Asset Turnover > 0
-    
-    Score Interpretation:
-    8-9: Strong
-    5-7: Moderate
-    0-4: Weak
-    """
+def piotroski_f_score(curr: Dict, prev: Dict) -> Dict:
     score = 0
     details = {}
-    
+
+    def check(label: str, passed: bool, value: str, category: str):
+        nonlocal score
+        if passed:
+            score += 1
+        details[label] = {'score': int(passed), 'value': value, 'pass': passed, 'category': category}
+
     # Profitability
-    # 1. Positive ROA
-    roa = current_data.get('roa', 0)
-    if roa > 0:
-        score += 1
-        details['ROA Positive'] = {'score': 1, 'value': f'{roa:.2%}', 'pass': True}
-    else:
-        details['ROA Positive'] = {'score': 0, 'value': f'{roa:.2%}', 'pass': False}
-    
-    # 2. Positive Operating Cash Flow
-    cfo = current_data.get('cfo', 0)
-    if cfo > 0:
-        score += 1
-        details['CFO Positive'] = {'score': 1, 'value': f'${cfo/1e9:.2f}B', 'pass': True}
-    else:
-        details['CFO Positive'] = {'score': 0, 'value': f'${cfo/1e9:.2f}B', 'pass': False}
-    
-    # 3. Change in ROA
-    delta_roa = current_data.get('roa', 0) - prior_data.get('roa', 0)
-    if delta_roa > 0:
-        score += 1
-        details['ROA Improvement'] = {'score': 1, 'value': f'+{delta_roa:.2%}', 'pass': True}
-    else:
-        details['ROA Improvement'] = {'score': 0, 'value': f'{delta_roa:.2%}', 'pass': False}
-    
-    # 4. Accruals (CFO > Net Income means lower accruals)
-    net_income = current_data.get('net_income', 0)
-    if cfo > net_income:
-        score += 1
-        details['Quality of Earnings'] = {'score': 1, 'value': 'High', 'pass': True}
-    else:
-        details['Quality of Earnings'] = {'score': 0, 'value': 'Low', 'pass': False}
-    
-    # Leverage/Liquidity
-    # 5. Decrease in Long-term Debt
-    delta_debt = current_data.get('long_term_debt', 0) - prior_data.get('long_term_debt', 0)
-    if delta_debt <= 0:
-        score += 1
-        details['Leverage Decrease'] = {'score': 1, 'value': f'${-delta_debt/1e9:.2f}B', 'pass': True}
-    else:
-        details['Leverage Decrease'] = {'score': 0, 'value': f'+${delta_debt/1e9:.2f}B', 'pass': False}
-    
-    # 6. Increase in Current Ratio
-    delta_current = current_data.get('current_ratio', 0) - prior_data.get('current_ratio', 0)
-    if delta_current > 0:
-        score += 1
-        details['Liquidity Improvement'] = {'score': 1, 'value': f'+{delta_current:.2f}', 'pass': True}
-    else:
-        details['Liquidity Improvement'] = {'score': 0, 'value': f'{delta_current:.2f}', 'pass': False}
-    
-    # 7. No new shares issued
-    delta_shares = current_data.get('shares_outstanding', 0) - prior_data.get('shares_outstanding', 0)
-    if delta_shares <= 0:
-        score += 1
-        details['No Dilution'] = {'score': 1, 'value': 'No new shares', 'pass': True}
-    else:
-        details['No Dilution'] = {'score': 0, 'value': 'Shares issued', 'pass': False}
-    
-    # Operating Efficiency
-    # 8. Increase in Gross Margin
-    delta_margin = current_data.get('gross_margin', 0) - prior_data.get('gross_margin', 0)
-    if delta_margin > 0:
-        score += 1
-        details['Margin Improvement'] = {'score': 1, 'value': f'+{delta_margin:.2%}', 'pass': True}
-    else:
-        details['Margin Improvement'] = {'score': 0, 'value': f'{delta_margin:.2%}', 'pass': False}
-    
-    # 9. Increase in Asset Turnover
-    delta_turnover = current_data.get('asset_turnover', 0) - prior_data.get('asset_turnover', 0)
-    if delta_turnover > 0:
-        score += 1
-        details['Efficiency Improvement'] = {'score': 1, 'value': f'+{delta_turnover:.2f}', 'pass': True}
-    else:
-        details['Efficiency Improvement'] = {'score': 0, 'value': f'{delta_turnover:.2f}', 'pass': False}
-    
-    # Overall assessment
-    if score >= 8:
-        assessment = "Strong"
-        color = "green"
-    elif score >= 5:
-        assessment = "Moderate"
-        color = "orange"
-    else:
-        assessment = "Weak"
-        color = "red"
-    
-    return {
-        'F-Score': score,
-        'Assessment': assessment,
-        'Color': color,
-        'Details': details
-    }
+    roa = curr.get('roa', 0)
+    check('ROA Positive', roa > 0, f'{roa:.2%}', 'Profitability')
+    cfo = curr.get('cfo', 0)
+    check('CFO Positive', cfo > 0, fmt_billions(cfo), 'Profitability')
+    delta_roa = curr.get('roa', 0) - prev.get('roa', 0)
+    check('ROA Improving', delta_roa > 0, f'{delta_roa:+.2%}', 'Profitability')
+    ni = curr.get('net_income', 0)
+    check('Quality of Earnings (CFO>NI)', cfo > ni, 'High' if cfo > ni else 'Low', 'Profitability')
 
-# ==================== WACC CALCULATION ====================
+    # Leverage / Liquidity
+    delta_debt = curr.get('long_term_debt', 0) - prev.get('long_term_debt', 0)
+    check('Leverage Decreasing', delta_debt <= 0, fmt_billions(-delta_debt), 'Leverage')
+    delta_cr = curr.get('current_ratio', 0) - prev.get('current_ratio', 0)
+    check('Current Ratio Improving', delta_cr > 0, f'{delta_cr:+.2f}', 'Leverage')
+    delta_shares = curr.get('shares_outstanding', 0) - prev.get('shares_outstanding', 0)
+    check('No Share Dilution', delta_shares <= 0, 'No new shares' if delta_shares <= 0 else f'+{delta_shares/1e6:.1f}M', 'Leverage')
 
-def calculate_wacc(market_cap: float, total_debt: float, cost_equity: float,
-                  cost_debt: float, tax_rate: float) -> Dict:
-    """
-    Calculate Weighted Average Cost of Capital (WACC).
-    
-    WACC = (E/V × Re) + (D/V × Rd × (1-Tc))
-    where:
-    E = Market value of equity
-    D = Market value of debt
-    V = E + D (total value)
-    Re = Cost of equity
-    Rd = Cost of debt
-    Tc = Corporate tax rate
-    """
+    # Efficiency
+    delta_gm = curr.get('gross_margin', 0) - prev.get('gross_margin', 0)
+    check('Gross Margin Improving', delta_gm > 0, f'{delta_gm:+.2%}', 'Efficiency')
+    delta_at = curr.get('asset_turnover', 0) - prev.get('asset_turnover', 0)
+    check('Asset Turnover Improving', delta_at > 0, f'{delta_at:+.2f}', 'Efficiency')
+
+    assessment, color = ('Strong', 'green') if score >= 8 else ('Moderate', 'orange') if score >= 5 else ('Weak', 'red')
+    return {'F-Score': score, 'Assessment': assessment, 'Color': color, 'Details': details}
+
+# ==================== WACC ====================
+
+def calculate_wacc(market_cap, total_debt, cost_equity, cost_debt, tax_rate) -> Dict:
     total_value = market_cap + total_debt
-    
     if total_value == 0:
         return {}
-    
-    equity_weight = market_cap / total_value
-    debt_weight = total_debt / total_value
-    
-    wacc = (equity_weight * cost_equity) + (debt_weight * cost_debt * (1 - tax_rate))
-    
+    ew = market_cap / total_value
+    dw = total_debt / total_value
+    wacc = ew * cost_equity + dw * cost_debt * (1 - tax_rate)
     return {
         'WACC': wacc * 100,
         'Cost of Equity': cost_equity * 100,
         'Cost of Debt': cost_debt * 100,
         'After-Tax Cost of Debt': cost_debt * (1 - tax_rate) * 100,
         'Tax Rate': tax_rate * 100,
-        'Equity Weight': equity_weight * 100,
-        'Debt Weight': debt_weight * 100,
-        'Components': {
-            'Equity Value': market_cap,
-            'Debt Value': total_debt,
-            'Total Value': total_value
-        }
+        'Equity Weight': ew * 100,
+        'Debt Weight': dw * 100,
+        'Equity Value': market_cap,
+        'Debt Value': total_debt,
+        'Total Value': total_value,
     }
 
-def estimate_cost_of_equity_capm(risk_free_rate: float, beta: float, 
-                                market_return: float) -> float:
-    """
-    Estimate cost of equity using CAPM.
-    Re = Rf + β(Rm - Rf)
-    """
-    return risk_free_rate + beta * (market_return - risk_free_rate)
 
-def estimate_cost_of_debt(interest_expense: float, total_debt: float) -> float:
-    """
-    Estimate cost of debt from financials.
-    Rd = Interest Expense / Total Debt
-    """
-    if total_debt == 0:
-        return 0
-    return interest_expense / total_debt
+def capm(rf: float, beta: float, rm: float) -> float:
+    return rf + beta * (rm - rf)
 
-# ==================== ADDITIONAL MODELS ====================
+# ==================== GRAHAM NUMBER ====================
 
-def beneish_m_score(data: Dict) -> Dict:
-    """
-    Beneish M-Score: Detects earnings manipulation.
-    M-Score > -1.78 suggests possible manipulation.
-    """
-    # This is a simplified version - full implementation requires detailed data
-    # Placeholder for demonstration
-    m_score = -2.5  # Example value
-    
-    if m_score > -1.78:
-        status = "Possible Manipulation"
-        color = "red"
-    else:
-        status = "Unlikely Manipulation"
-        color = "green"
-    
-    return {
-        'M-Score': m_score,
-        'Status': status,
-        'Color': color,
-        'Interpretation': 'Scores above -1.78 suggest potential earnings manipulation'
-    }
-
-def graham_number(eps: float, book_value_per_share: float) -> Dict:
-    """
-    Benjamin Graham's intrinsic value formula.
-    Fair Value = √(22.5 × EPS × BVPS)
-    """
-    if eps <= 0 or book_value_per_share <= 0:
+def graham_number(eps: float, bvps: float) -> Dict:
+    if eps <= 0 or bvps <= 0:
         return {}
+    gn = np.sqrt(22.5 * eps * bvps)
+    return {'Graham Number': gn, 'EPS': eps, 'Book Value per Share': bvps}
+
+# ==================== BENEISH M-SCORE ====================
+
+def beneish_m_score(curr: Dict, prev: Dict) -> Dict:
+    """
+    Beneish M-Score (8-variable model).
+    M > -1.78 → possible earnings manipulation.
     
-    fair_value = np.sqrt(22.5 * eps * book_value_per_share)
-    
+    Variables:
+    DSRI  = Days Sales in Receivables Index
+    GMI   = Gross Margin Index
+    AQI   = Asset Quality Index
+    SGI   = Sales Growth Index
+    DEPI  = Depreciation Index
+    SGAI  = SG&A Index
+    LVGI  = Leverage Index
+    TATA  = Total Accruals to Total Assets
+    """
+    def safe_div(a, b, default=1.0):
+        return a / b if b and b != 0 else default
+
+    # DSRI
+    rec_curr = curr.get('receivables', 0)
+    rev_curr = curr.get('revenue', 1)
+    rec_prev = prev.get('receivables', 0)
+    rev_prev = prev.get('revenue', 1)
+    days_rec_curr = safe_div(rec_curr, rev_curr) * 365
+    days_rec_prev = safe_div(rec_prev, rev_prev) * 365
+    dsri = safe_div(days_rec_curr, days_rec_prev)
+
+    # GMI
+    gm_curr = safe_div(curr.get('gross_profit', 0), rev_curr)
+    gm_prev = safe_div(prev.get('gross_profit', 0), rev_prev)
+    gmi = safe_div(gm_prev, gm_curr)
+
+    # AQI
+    ta_curr = curr.get('total_assets', 1)
+    ca_curr = curr.get('current_assets', 0)
+    ppe_curr = curr.get('ppe', 0)
+    ta_prev = prev.get('total_assets', 1)
+    ca_prev = prev.get('current_assets', 0)
+    ppe_prev = prev.get('ppe', 0)
+    aqi = safe_div(1 - safe_div(ca_curr + ppe_curr, ta_curr),
+                   1 - safe_div(ca_prev + ppe_prev, ta_prev))
+
+    # SGI
+    sgi = safe_div(rev_curr, rev_prev)
+
+    # DEPI
+    dep_curr = curr.get('depreciation', 0)
+    dep_prev = prev.get('depreciation', 0)
+    depi = safe_div(
+        safe_div(dep_prev, dep_prev + ppe_prev) if (dep_prev + ppe_prev) else 0,
+        safe_div(dep_curr, dep_curr + ppe_curr) if (dep_curr + ppe_curr) else 1
+    )
+
+    # SGAI
+    sga_curr = curr.get('sga', 0)
+    sga_prev = prev.get('sga', 0)
+    sgai = safe_div(safe_div(sga_curr, rev_curr), safe_div(sga_prev, rev_prev))
+
+    # LVGI
+    ltd_curr = curr.get('long_term_debt', 0)
+    ltd_prev = prev.get('long_term_debt', 0)
+    cl_curr = curr.get('current_liabilities', 0)
+    cl_prev = prev.get('current_liabilities', 0)
+    lvgi = safe_div(
+        safe_div(ltd_curr + cl_curr, ta_curr),
+        safe_div(ltd_prev + cl_prev, ta_prev)
+    )
+
+    # TATA
+    cfo = curr.get('cfo', 0)
+    ni = curr.get('net_income', 0)
+    tata = safe_div(ni - cfo, ta_curr)
+
+    m = (-4.840
+         + 0.920 * dsri
+         + 0.528 * gmi
+         + 0.404 * aqi
+         + 0.892 * sgi
+         + 0.115 * depi
+         - 0.172 * sgai
+         + 4.679 * tata
+         - 0.327 * lvgi)
+
+    if m > -1.78:
+        status, color = "Possible Manipulation", "red"
+    else:
+        status, color = "Unlikely Manipulation", "green"
+
     return {
-        'Graham Number': fair_value,
-        'EPS': eps,
-        'Book Value per Share': book_value_per_share,
-        'Formula': '√(22.5 × EPS × BVPS)'
+        'M-Score': m, 'Status': status, 'Color': color,
+        'Components': {
+            'DSRI (Receivables)': dsri, 'GMI (Gross Margin)': gmi,
+            'AQI (Asset Quality)': aqi, 'SGI (Sales Growth)': sgi,
+            'DEPI (Depreciation)': depi, 'SGAI (SG&A)': sgai,
+            'LVGI (Leverage)': lvgi, 'TATA (Accruals)': tata,
+        }
     }
 
-# ==================== VISUALIZATION FUNCTIONS ====================
+# ==================== EV/EBITDA ====================
 
-def create_dupont_waterfall(dupont_data: Dict) -> go.Figure:
-    """Create waterfall chart for DuPont analysis."""
-    if 'Profit Margin' not in dupont_data:
-        return go.Figure()
-    
-    # For 3-way DuPont
-    fig = go.Figure(go.Waterfall(
-        name="DuPont",
-        orientation="v",
-        measure=["relative", "relative", "relative", "total"],
-        x=["Profit Margin", "Asset Turnover", "Equity Multiplier", "ROE"],
-        textposition="outside",
-        text=[f"{dupont_data['Profit Margin']:.2f}%", 
-              f"{dupont_data['Asset Turnover']:.2f}x",
-              f"{dupont_data['Equity Multiplier']:.2f}x",
-              f"{dupont_data['ROE']:.2f}%"],
-        y=[dupont_data['Profit Margin'], 
-           dupont_data['Asset Turnover'] * 10,  # Scale for visualization
-           dupont_data['Equity Multiplier'] * 5,
-           dupont_data['ROE']],
-        connector={"line": {"color": "rgb(63, 63, 63)"}},
-    ))
-    
-    fig.update_layout(
-        title="DuPont Analysis Breakdown",
-        template='plotly_white',
-        height=500,
-        showlegend=False
-    )
-    
-    return fig
+def ev_ebitda_analysis(market_cap, total_debt, cash, ebitda, revenue,
+                       net_income, total_assets, sector='N/A') -> Dict:
+    ev = market_cap + total_debt - cash
+    ev_ebitda = ev / ebitda if ebitda > 0 else None
+    ev_revenue = ev / revenue if revenue > 0 else None
+    ev_assets = ev / total_assets if total_assets > 0 else None
+    return {
+        'Enterprise Value': ev,
+        'EV/EBITDA': ev_ebitda,
+        'EV/Revenue': ev_revenue,
+        'EV/Assets': ev_assets,
+        'EBITDA': ebitda,
+        'EV': ev,
+    }
 
-def create_altman_gauge(z_score: float, model_type: str = 'public') -> go.Figure:
-    """Create gauge chart for Altman Z-Score."""
-    if model_type == 'public':
-        threshold_low = 1.81
-        threshold_high = 2.99
-    else:
-        threshold_low = 1.1
-        threshold_high = 2.6
-    
+# ==================== MAGIC FORMULA (GREENBLATT) ====================
+
+def magic_formula(ebit, enterprise_value, ebit_net_working_capital, tangible_assets) -> Dict:
+    """
+    Greenblatt Magic Formula:
+    Earnings Yield = EBIT / Enterprise Value
+    Return on Capital = EBIT / (Net Working Capital + Net Fixed Assets)
+    """
+    earnings_yield = ebit / enterprise_value if enterprise_value > 0 else None
+    roc = ebit / tangible_assets if tangible_assets > 0 else None
+    return {
+        'Earnings Yield': earnings_yield * 100 if earnings_yield else None,
+        'Return on Capital': roc * 100 if roc else None,
+    }
+
+# ==================== VISUALIZATIONS ====================
+
+def gauge_chart(value: float, title: str, min_val: float, max_val: float,
+                thresholds: List[Tuple], unit: str = '') -> go.Figure:
+    """Generic gauge chart."""
+    steps = []
+    prev = min_val
+    for thresh, color in thresholds:
+        steps.append({'range': [prev, thresh], 'color': color})
+        prev = thresh
+    steps.append({'range': [prev, max_val], 'color': thresholds[-1][1]})
+
     fig = go.Figure(go.Indicator(
-        mode="gauge+number+delta",
-        value=z_score,
-        domain={'x': [0, 1], 'y': [0, 1]},
-        title={'text': "Altman Z-Score", 'font': {'size': 24}},
-        delta={'reference': threshold_high},
+        mode="gauge+number",
+        value=value,
+        number={'suffix': unit, 'font': {'size': 28}},
+        title={'text': title, 'font': {'size': 16}},
         gauge={
-            'axis': {'range': [None, 5], 'tickwidth': 1, 'tickcolor': "darkblue"},
-            'bar': {'color': "darkblue"},
-            'bgcolor': "white",
+            'axis': {'range': [min_val, max_val], 'tickwidth': 1},
+            'bar': {'color': '#2c3e50', 'thickness': 0.25},
+            'steps': steps,
             'borderwidth': 2,
-            'bordercolor': "gray",
-            'steps': [
-                {'range': [0, threshold_low], 'color': '#ffcccc'},
-                {'range': [threshold_low, threshold_high], 'color': '#ffffcc'},
-                {'range': [threshold_high, 5], 'color': '#ccffcc'}
-            ],
-            'threshold': {
-                'line': {'color': "red", 'width': 4},
-                'thickness': 0.75,
-                'value': threshold_low
-            }
+            'bordercolor': '#ccc',
         }
     ))
-    
-    fig.update_layout(
-        template='plotly_white',
-        height=400,
-        font={'color': "darkblue", 'family': "Arial"}
-    )
-    
+    fig.update_layout(height=280, margin=dict(t=60, b=20, l=30, r=30),
+                      paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)')
     return fig
 
-def create_piotroski_heatmap(details: Dict) -> go.Figure:
-    """Create heatmap for Piotroski F-Score components."""
-    categories = list(details.keys())
-    scores = [details[cat]['score'] for cat in categories]
-    
-    # Group by category type
-    profitability = categories[:4]
-    leverage = categories[4:7]
-    efficiency = categories[7:]
-    
-    fig = go.Figure()
-    
-    # Create custom heatmap
-    fig.add_trace(go.Bar(
-        name='Score',
-        x=categories,
-        y=scores,
-        marker_color=['green' if details[cat]['pass'] else 'red' for cat in categories],
-        text=[f"{details[cat]['value']}" for cat in categories],
-        textposition='auto'
+
+def piotroski_bar(details: Dict) -> go.Figure:
+    cats = list(details.keys())
+    colors = ['#27ae60' if details[c]['pass'] else '#e74c3c' for c in cats]
+    fig = go.Figure(go.Bar(
+        x=cats, y=[details[c]['score'] for c in cats],
+        marker_color=colors,
+        text=[details[c]['value'] for c in cats],
+        textposition='outside',
+        width=0.6,
     ))
-    
     fig.update_layout(
-        title='Piotroski F-Score Component Analysis',
-        xaxis_title='Component',
-        yaxis_title='Score (0 or 1)',
-        template='plotly_white',
-        height=500,
+        title='Piotroski F-Score — Component Pass/Fail',
+        yaxis=dict(range=[0, 1.5], title='Pass (1) / Fail (0)'),
+        xaxis=dict(tickangle=-30),
+        template='plotly_white', height=420,
         showlegend=False,
-        yaxis=dict(range=[0, 1.2])
     )
-    
-    # Add section separators
-    fig.add_vline(x=3.5, line_dash="dash", line_color="gray", annotation_text="Leverage")
-    fig.add_vline(x=6.5, line_dash="dash", line_color="gray", annotation_text="Efficiency")
-    
+    fig.add_vline(x=3.5, line_dash='dash', line_color='#aaa', annotation_text='Leverage →', annotation_position='top right')
+    fig.add_vline(x=6.5, line_dash='dash', line_color='#aaa', annotation_text='Efficiency →', annotation_position='top right')
     return fig
 
-def create_wacc_breakdown(wacc_data: Dict) -> go.Figure:
-    """Create pie chart showing WACC components."""
-    if not wacc_data:
-        return go.Figure()
-    
-    equity_contribution = wacc_data['Equity Weight'] / 100 * wacc_data['Cost of Equity']
-    debt_contribution = wacc_data['Debt Weight'] / 100 * wacc_data['After-Tax Cost of Debt']
-    
-    fig = go.Figure(data=[go.Pie(
-        labels=['Equity Cost Component', 'Debt Cost Component'],
-        values=[equity_contribution, debt_contribution],
-        hole=.3,
-        marker_colors=['lightblue', 'lightcoral']
-    )])
-    
-    fig.update_layout(
-        title=f'WACC Breakdown: {wacc_data["WACC"]:.2f}%',
-        template='plotly_white',
-        height=400,
-        annotations=[dict(text=f'{wacc_data["WACC"]:.2f}%', x=0.5, y=0.5, 
-                         font_size=20, showarrow=False)]
-    )
-    
+
+def wacc_waterfall(wacc_data: Dict) -> go.Figure:
+    ew = wacc_data['Equity Weight'] / 100
+    dw = wacc_data['Debt Weight'] / 100
+    re = wacc_data['Cost of Equity'] / 100
+    rd_at = wacc_data['After-Tax Cost of Debt'] / 100
+    equity_contrib = ew * re * 100
+    debt_contrib = dw * rd_at * 100
+
+    fig = go.Figure(go.Waterfall(
+        orientation='v',
+        measure=['relative', 'relative', 'total'],
+        x=['Equity Component\n(w×Re)', 'Debt Component\n(w×Rd×(1-T))', 'WACC'],
+        y=[equity_contrib, debt_contrib, 0],
+        text=[f'{equity_contrib:.2f}%', f'{debt_contrib:.2f}%', f'{wacc_data["WACC"]:.2f}%'],
+        textposition='outside',
+        connector={'line': {'color': '#636363'}},
+        increasing={'marker': {'color': '#3498db'}},
+        totals={'marker': {'color': '#2c3e50'}},
+    ))
+    fig.update_layout(title='WACC Build-Up', template='plotly_white', height=380,
+                      yaxis_title='Rate (%)')
     return fig
+
+
+def dupont_tree(d3: Dict, d5: Optional[Dict] = None) -> go.Figure:
+    """Sankey-style DuPont breakdown."""
+    labels = ['ROE', 'Profit Margin', 'Asset Turnover', 'Equity Multiplier']
+    values = [abs(d3['ROE']), abs(d3['Profit Margin']), abs(d3['Asset Turnover'])*10, abs(d3['Equity Multiplier'])*10]
+    colors = ['#2c3e50', '#3498db', '#27ae60', '#e67e22']
+
+    fig = go.Figure(go.Bar(
+        x=labels, y=values, marker_color=colors,
+        text=[f"{d3['ROE']:.2f}%", f"{d3['Profit Margin']:.2f}%",
+              f"{d3['Asset Turnover']:.2f}x", f"{d3['Equity Multiplier']:.2f}x"],
+        textposition='outside',
+    ))
+    fig.update_layout(title='3-Way DuPont Components (normalised for comparison)',
+                      template='plotly_white', height=380, showlegend=False,
+                      yaxis_title='Normalised Value')
+    return fig
+
+
+def beneish_radar(components: Dict) -> go.Figure:
+    labels = list(components.keys())
+    vals = [abs(v) for v in components.values()]
+    # close the polygon
+    labels_closed = labels + [labels[0]]
+    vals_closed = vals + [vals[0]]
+    fig = go.Figure(go.Scatterpolar(
+        r=vals_closed, theta=labels_closed, fill='toself',
+        fillcolor='rgba(231,76,60,0.25)', line_color='#e74c3c',
+    ))
+    fig.update_layout(
+        polar=dict(radialaxis=dict(visible=True)),
+        title='Beneish M-Score Variable Profile',
+        template='plotly_white', height=420,
+    )
+    return fig
+
+# ==================== SCORE DISPLAY HELPERS ====================
+
+def score_badge(label: str, value: str, color: str):
+    color_map = {'green': 'badge-green', 'orange': 'badge-orange', 'red': 'badge-red'}
+    css = color_map.get(color, 'badge-green')
+    st.markdown(f'<span class="score-badge {css}">{label}: {value}</span>', unsafe_allow_html=True)
+
+
+def render_score_summary(title: str, score_str: str, assessment: str, color: str, explanation: str):
+    color_hex = {'green': '#27ae60', 'orange': '#f39c12', 'red': '#e74c3c'}.get(color, '#2c3e50')
+    bg = {'green': '#d4edda', 'orange': '#fff3cd', 'red': '#f8d7da'}.get(color, '#f8f9fa')
+    st.markdown(f"""
+    <div style="background:{bg}; border-left:6px solid {color_hex};
+                padding:16px 20px; border-radius:8px; margin:10px 0;">
+        <div style="font-size:1.5em; font-weight:800; color:{color_hex};">{title}: {score_str}</div>
+        <div style="font-size:1.1em; font-weight:600; color:#333; margin-top:4px;">{assessment}</div>
+        <div style="color:#555; margin-top:6px;">{explanation}</div>
+    </div>
+    """, unsafe_allow_html=True)
 
 # ==================== MAIN MODULE ====================
 
 def advanced_models_module(analysis_context: Optional[Dict] = None):
-    """
-    Enhanced fundamental financial models module.
-    
-    Args:
-        analysis_context: Optional context from main app
-    """
     st.title("🔬 Advanced Fundamental Models")
-    st.markdown("""
-    Deep-dive financial analysis using proven academic and practitioner models:
-    DuPont Analysis, Altman Z-Score, Piotroski F-Score, WACC, and more.
-    """)
-    
-    # Sidebar configuration
-    with st.sidebar:
-        st.header("Model Selection")
-        
-        ticker = st.text_input(
-            "Ticker Symbol",
-            value="AAPL",
-            help="Enter stock ticker (e.g., AAPL, MSFT, GOOGL)"
-        ).upper()
-        
-        selected_models = st.multiselect(
-            "Select Models to Run",
-            ["DuPont Analysis", "Altman Z-Score", "Piotroski F-Score", 
-             "WACC Analysis", "Graham Number"],
-            default=["DuPont Analysis", "Altman Z-Score"]
-        )
-    
-    if st.button("🔍 Run Analysis", use_container_width=True):
-        with st.spinner(f"Fetching financial data for {ticker}..."):
-            data = fetch_financial_data(ticker)
-            
-            if not data:
-                st.error(f"❌ Could not fetch data for {ticker}")
-                return
-            
-            info = data['info']
-            income_stmt = data['income_statement']
-            balance_sheet = data['balance_sheet']
-            cash_flow = data['cash_flow']
-            
-            # Display company header
-            st.header(f"📊 {info.get('longName', ticker)}")
-            
-            col1, col2, col3, col4 = st.columns(4)
-            
-            with col1:
-                st.metric("Sector", info.get('sector', 'N/A'))
-            with col2:
-                market_cap = info.get('marketCap', 0) / 1e9
-                st.metric("Market Cap", f"${market_cap:.2f}B")
-            with col3:
-                current_price = info.get('currentPrice', 0)
-                st.metric("Price", f"${current_price:.2f}")
-            with col4:
-                pe = info.get('trailingPE', 0)
-                st.metric("P/E", f"{pe:.2f}" if pe else "N/A")
-            
-            st.divider()
-            
-            # Extract financial data
-            try:
-                # Latest financials (column 0)
-                net_income = safe_get(income_stmt, 'Net Income', 0)
-                revenue = safe_get(income_stmt, 'Total Revenue', 0)
-                ebit = safe_get(income_stmt, 'EBIT', 0)
-                ebt = safe_get(income_stmt, 'Pretax Income', 0)
-                gross_profit = safe_get(income_stmt, 'Gross Profit', 0)
-                
-                total_assets = safe_get(balance_sheet, 'Total Assets', 0)
-                total_equity = safe_get(balance_sheet, 'Stockholders Equity', 0)
-                current_assets = safe_get(balance_sheet, 'Current Assets', 0)
-                current_liab = safe_get(balance_sheet, 'Current Liabilities', 0)
-                total_liab = safe_get(balance_sheet, 'Total Liabilities Net Minority Interest', 0)
-                long_term_debt = safe_get(balance_sheet, 'Long Term Debt', 0)
-                retained_earnings = safe_get(balance_sheet, 'Retained Earnings', 0)
-                
-                operating_cf = safe_get(cash_flow, 'Operating Cash Flow', 0)
-                
-                working_capital = current_assets - current_liab
-                
-                # Prior period data (column 1)
-                net_income_prior = safe_get(income_stmt, 'Net Income', 1)
-                revenue_prior = safe_get(income_stmt, 'Total Revenue', 1)
-                gross_profit_prior = safe_get(income_stmt, 'Gross Profit', 1)
-                total_assets_prior = safe_get(balance_sheet, 'Total Assets', 1)
-                long_term_debt_prior = safe_get(balance_sheet, 'Long Term Debt', 1)
-                current_assets_prior = safe_get(balance_sheet, 'Current Assets', 1)
-                current_liab_prior = safe_get(balance_sheet, 'Current Liabilities', 1)
-                
-            except Exception as e:
-                st.error(f"Error extracting financial data: {str(e)}")
-                return
-            
-            # ==================== DUPONT ANALYSIS ====================
-            if "DuPont Analysis" in selected_models:
-                st.header("📊 DuPont Analysis")
-                
-                st.write("**Return on Equity (ROE) Decomposition**")
-                
-                # Calculate both 3-way and 5-way
-                dupont_3 = dupont_analysis_3way(net_income, revenue, total_assets, total_equity)
-                dupont_5 = dupont_analysis_5way(net_income, ebt, ebit, revenue, total_assets, total_equity)
-                
-                if dupont_3:
-                    col1, col2 = st.columns(2)
-                    
-                    with col1:
-                        st.subheader("3-Way DuPont Analysis")
-                        st.metric("ROE", f"{dupont_3['ROE']:.2f}%")
-                        
-                        st.write("**Components:**")
-                        st.write(f"• Profit Margin: {dupont_3['Profit Margin']:.2f}%")
-                        st.write(f"• Asset Turnover: {dupont_3['Asset Turnover']:.2f}x")
-                        st.write(f"• Equity Multiplier: {dupont_3['Equity Multiplier']:.2f}x")
-                        
-                        # Formula
-                        st.info(f"""
-                        **ROE = Profit Margin × Asset Turnover × Equity Multiplier**
-                        
-                        {dupont_3['ROE']:.2f}% = {dupont_3['Profit Margin']:.2f}% × {dupont_3['Asset Turnover']:.2f} × {dupont_3['Equity Multiplier']:.2f}
-                        """)
-                    
-                    with col2:
-                        if dupont_5:
-                            st.subheader("5-Way DuPont Analysis")
-                            st.metric("ROE", f"{dupont_5['ROE']:.2f}%")
-                            
-                            st.write("**Components:**")
-                            st.write(f"• Tax Burden: {dupont_5['Tax Burden']:.2f}")
-                            st.write(f"• Interest Burden: {dupont_5['Interest Burden']:.2f}")
-                            st.write(f"• EBIT Margin: {dupont_5['EBIT Margin']:.2f}%")
-                            st.write(f"• Asset Turnover: {dupont_5['Asset Turnover']:.2f}x")
-                            st.write(f"• Equity Multiplier: {dupont_5['Equity Multiplier']:.2f}x")
-                    
-                    # Visualization
-                    st.subheader("Visual Breakdown")
-                    
-                    # Create custom decomposition chart
-                    components_3 = ['Profit\nMargin', 'Asset\nTurnover', 'Equity\nMultiplier']
-                    values_3 = [dupont_3['Profit Margin'], dupont_3['Asset Turnover']*10, dupont_3['Equity Multiplier']*10]
-                    
-                    fig = go.Figure()
-                    
-                    fig.add_trace(go.Bar(
-                        x=components_3,
-                        y=values_3,
-                        text=[f"{dupont_3['Profit Margin']:.2f}%", 
-                              f"{dupont_3['Asset Turnover']:.2f}x",
-                              f"{dupont_3['Equity Multiplier']:.2f}x"],
-                        textposition='auto',
-                        marker_color=['lightblue', 'lightgreen', 'lightcoral']
-                    ))
-                    
-                    fig.update_layout(
-                        title='DuPont Components (Normalized for Visualization)',
-                        yaxis_title='Value',
-                        template='plotly_white',
-                        height=400,
-                        showlegend=False
-                    )
-                    
-                    st.plotly_chart(fig, use_container_width=True)
-                    
-                    # Interpretation
-                    st.subheader("💡 Interpretation")
-                    
-                    avg_profit_margin = 10.0  # Industry average placeholder
-                    avg_asset_turnover = 0.8
-                    avg_equity_mult = 2.0
-                    
-                    interpretations = []
-                    
-                    if dupont_3['Profit Margin'] > avg_profit_margin:
-                        interpretations.append("✅ **Strong profit margin** - Company efficiently converts revenue to profit")
-                    else:
-                        interpretations.append("⚠️ **Low profit margin** - Consider cost management or pricing power")
-                    
-                    if dupont_3['Asset Turnover'] > avg_asset_turnover:
-                        interpretations.append("✅ **High asset turnover** - Efficient use of assets to generate revenue")
-                    else:
-                        interpretations.append("⚠️ **Low asset turnover** - Assets may be underutilized")
-                    
-                    if dupont_3['Equity Multiplier'] > avg_equity_mult:
-                        interpretations.append("⚠️ **High leverage** - Company uses significant debt (higher risk/return)")
-                    else:
-                        interpretations.append("✅ **Conservative leverage** - Lower financial risk")
-                    
-                    for interp in interpretations:
-                        st.write(interp)
-                
-                else:
-                    st.warning("⚠️ Insufficient data for DuPont analysis")
-            
-            # ==================== ALTMAN Z-SCORE ====================
-            if "Altman Z-Score" in selected_models:
-                st.header("🚨 Altman Z-Score")
-                
-                st.write("**Financial Distress Prediction Model**")
-                
-                # Calculate Z-Score
-                market_cap_val = info.get('marketCap', 0)
-                altman = altman_z_score_public(working_capital, retained_earnings, ebit,
-                                              market_cap_val, total_liab, revenue, total_assets)
-                
-                if altman:
-                    col1, col2, col3 = st.columns(3)
-                    
-                    with col1:
-                        color_map = {'green': '🟢', 'orange': '🟡', 'red': '🔴'}
-                        st.metric("Z-Score", f"{altman['Z-Score']:.2f}",
-                                 delta=color_map[altman['Color']])
-                    
-                    with col2:
-                        st.metric("Zone", altman['Zone'])
-                    
-                    with col3:
-                        st.metric("Bankruptcy Risk", altman['Bankruptcy Risk'])
-                    
-                    # Gauge chart
-                    fig_gauge = create_altman_gauge(altman['Z-Score'])
-                    st.plotly_chart(fig_gauge, use_container_width=True)
-                    
-                    # Component breakdown
-                    st.subheader("📊 Component Analysis")
-                    
-                    comp_df = pd.DataFrame({
-                        'Component': list(altman['Components'].keys()),
-                        'Value': list(altman['Components'].values()),
-                        'Weight': list(altman['Weights'].values()),
-                        'Contribution': [altman['Weights'][f'X{i+1} Weight'] * altman['Components'][f'X{i+1} (Working Capital / Assets)' if i==0 else list(altman['Components'].keys())[i]]
-                                       for i in range(5)]
-                    })
-                    
-                    st.dataframe(
-                        comp_df.style.format({
-                            'Value': '{:.4f}',
-                            'Weight': '{:.2f}',
-                            'Contribution': '{:.4f}'
-                        }).background_gradient(subset=['Contribution'], cmap='RdYlGn'),
-                        use_container_width=True,
-                        hide_index=True
-                    )
-                    
-                    # Interpretation
-                    st.subheader("💡 Interpretation")
-                    
-                    if altman['Zone'] == "Safe Zone":
-                        st.success(f"""
-                        **{altman['Zone']}** - The company shows strong financial health with a Z-Score of {altman['Z-Score']:.2f}.
-                        Bankruptcy risk is low, indicating solid financial stability.
-                        """)
-                    elif altman['Zone'] == "Grey Zone":
-                        st.warning(f"""
-                        **{altman['Zone']}** - The company is in a zone of uncertainty with a Z-Score of {altman['Z-Score']:.2f}.
-                        Monitor financial health closely as risk is moderate.
-                        """)
-                    else:
-                        st.error(f"""
-                        **{altman['Zone']}** - The company shows signs of financial distress with a Z-Score of {altman['Z-Score']:.2f}.
-                        Bankruptcy risk is high - exercise extreme caution.
-                        """)
-                    
-                    st.info("""
-                    **Z-Score Thresholds:**
-                    - **> 2.99**: Safe Zone (Low Risk)
-                    - **1.81 - 2.99**: Grey Zone (Moderate Risk)
-                    - **< 1.81**: Distress Zone (High Risk)
-                    """)
-                
-                else:
-                    st.warning("⚠️ Insufficient data for Altman Z-Score")
-            
-            # ==================== PIOTROSKI F-SCORE ====================
-            if "Piotroski F-Score" in selected_models:
-                st.header("📈 Piotroski F-Score")
-                
-                st.write("**9-Point Financial Strength Assessment**")
-                
-                # Prepare current and prior data
-                current_data = {
-                    'roa': net_income / total_assets if total_assets > 0 else 0,
-                    'cfo': operating_cf,
-                    'net_income': net_income,
-                    'long_term_debt': long_term_debt,
-                    'current_ratio': current_assets / current_liab if current_liab > 0 else 0,
-                    'shares_outstanding': info.get('sharesOutstanding', 0),
-                    'gross_margin': gross_profit / revenue if revenue > 0 else 0,
-                    'asset_turnover': revenue / total_assets if total_assets > 0 else 0
-                }
-                
-                prior_data = {
-                    'roa': net_income_prior / total_assets_prior if total_assets_prior > 0 else 0,
-                    'long_term_debt': long_term_debt_prior,
-                    'current_ratio': current_assets_prior / current_liab_prior if current_liab_prior > 0 else 0,
-                    'shares_outstanding': info.get('sharesOutstanding', 0) * 1.01,  # Assume slight change
-                    'gross_margin': gross_profit_prior / revenue_prior if revenue_prior > 0 else 0,
-                    'asset_turnover': revenue_prior / total_assets_prior if total_assets_prior > 0 else 0
-                }
-                
-                piotroski = piotroski_f_score(current_data, prior_data)
-                
-                if piotroski:
-                    col1, col2, col3 = st.columns(3)
-                    
-                    with col1:
-                        color_map = {'green': '🟢', 'orange': '🟡', 'red': '🔴'}
-                        st.metric("F-Score", f"{piotroski['F-Score']}/9",
-                                 delta=color_map[piotroski['Color']])
-                    
-                    with col2:
-                        st.metric("Assessment", piotroski['Assessment'])
-                    
-                    with col3:
-                        st.metric("Passed Tests", f"{piotroski['F-Score']}/9")
-                    
-                    # Component visualization
-                    fig_piotroski = create_piotroski_heatmap(piotroski['Details'])
-                    st.plotly_chart(fig_piotroski, use_container_width=True)
-                    
-                    # Detailed breakdown
-                    st.subheader("📊 Detailed Breakdown")
-                    
-                    # Group by category
-                    st.write("**Profitability Signals (4 points):**")
-                    for i, key in enumerate(list(piotroski['Details'].keys())[:4]):
-                        detail = piotroski['Details'][key]
-                        icon = "✅" if detail['pass'] else "❌"
-                        st.write(f"{icon} {key}: {detail['value']} (Score: {detail['score']})")
-                    
-                    st.write("**Leverage & Liquidity Signals (3 points):**")
-                    for key in list(piotroski['Details'].keys())[4:7]:
-                        detail = piotroski['Details'][key]
-                        icon = "✅" if detail['pass'] else "❌"
-                        st.write(f"{icon} {key}: {detail['value']} (Score: {detail['score']})")
-                    
-                    st.write("**Operating Efficiency Signals (2 points):**")
-                    for key in list(piotroski['Details'].keys())[7:]:
-                        detail = piotroski['Details'][key]
-                        icon = "✅" if detail['pass'] else "❌"
-                        st.write(f"{icon} {key}: {detail['value']} (Score: {detail['score']})")
-                    
-                    # Interpretation
-                    st.subheader("💡 Interpretation")
-                    
-                    if piotroski['F-Score'] >= 8:
-                        st.success(f"""
-                        **Strong Financial Position** - F-Score of {piotroski['F-Score']}/9 indicates excellent financial health.
-                        The company demonstrates strong profitability, improving leverage, and operational efficiency.
-                        """)
-                    elif piotroski['F-Score'] >= 5:
-                        st.info(f"""
-                        **Moderate Financial Position** - F-Score of {piotroski['F-Score']}/9 suggests adequate financial health.
-                        Some areas show strength while others need improvement.
-                        """)
-                    else:
-                        st.warning(f"""
-                        **Weak Financial Position** - F-Score of {piotroski['F-Score']}/9 indicates concerning financial health.
-                        Multiple red flags across profitability, leverage, and efficiency metrics.
-                        """)
-                    
-                    st.info("""
-                    **F-Score Interpretation:**
-                    - **8-9**: Strong financials, potential value investment
-                    - **5-7**: Moderate financials, requires further analysis
-                    - **0-4**: Weak financials, high risk
-                    """)
-                
-                else:
-                    st.warning("⚠️ Insufficient data for Piotroski F-Score")
-            
-            # ==================== WACC ANALYSIS ====================
-            if "WACC Analysis" in selected_models:
-                st.header("💰 WACC (Weighted Average Cost of Capital)")
-                
-                st.write("**Cost of Capital Analysis**")
-                
-                # Get inputs
-                col1, col2 = st.columns(2)
-                
-                with col1:
-                    st.subheader("Market Data")
-                    risk_free_rate = st.number_input("Risk-Free Rate (%)", value=4.5, min_value=0.0, max_value=20.0, step=0.1) / 100
-                    market_return = st.number_input("Market Return (%)", value=10.0, min_value=0.0, max_value=30.0, step=0.5) / 100
-                    beta = st.number_input("Beta", value=float(info.get('beta', 1.0)), min_value=-2.0, max_value=3.0, step=0.1)
-                
-                with col2:
-                    st.subheader("Company Financials")
-                    market_cap_input = st.number_input("Market Cap ($B)", value=market_cap, min_value=0.0, step=1.0) * 1e9
-                    total_debt_input = st.number_input("Total Debt ($B)", value=long_term_debt/1e9, min_value=0.0, step=0.1) * 1e9
-                    tax_rate = st.number_input("Tax Rate (%)", value=21.0, min_value=0.0, max_value=50.0, step=1.0) / 100
-                
-                # Calculate costs
-                cost_equity = estimate_cost_of_equity_capm(risk_free_rate, beta, market_return)
-                
-                # Estimate cost of debt
-                interest_expense = safe_get(income_stmt, 'Interest Expense', 0)
-                if interest_expense < 0:
-                    interest_expense = abs(interest_expense)
-                cost_debt = estimate_cost_of_debt(interest_expense, total_debt_input) if total_debt_input > 0 else 0.05
-                
-                # Calculate WACC
-                wacc_result = calculate_wacc(market_cap_input, total_debt_input, cost_equity, cost_debt, tax_rate)
-                
-                if wacc_result:
-                    # Display results
-                    col1, col2, col3 = st.columns(3)
-                    
-                    with col1:
-                        st.metric("WACC", f"{wacc_result['WACC']:.2f}%")
-                    with col2:
-                        st.metric("Cost of Equity", f"{wacc_result['Cost of Equity']:.2f}%")
-                    with col3:
-                        st.metric("After-Tax Cost of Debt", f"{wacc_result['After-Tax Cost of Debt']:.2f}%")
-                    
-                    # Capital structure
-                    st.subheader("📊 Capital Structure")
-                    
-                    col1, col2 = st.columns(2)
-                    
-                    with col1:
-                        st.metric("Equity Weight", f"{wacc_result['Equity Weight']:.1f}%")
-                        st.metric("Debt Weight", f"{wacc_result['Debt Weight']:.1f}%")
-                    
-                    with col2:
-                        # Pie chart
-                        fig_wacc = create_wacc_breakdown(wacc_result)
-                        st.plotly_chart(fig_wacc, use_container_width=True)
-                    
-                    # Detailed breakdown
-                    st.subheader("🔍 Calculation Details")
-                    
-                    breakdown_df = pd.DataFrame({
-                        'Component': ['Equity', 'Debt', 'Total'],
-                        'Value ($B)': [
-                            market_cap_input / 1e9,
-                            total_debt_input / 1e9,
-                            (market_cap_input + total_debt_input) / 1e9
-                        ],
-                        'Weight (%)': [
-                            wacc_result['Equity Weight'],
-                            wacc_result['Debt Weight'],
-                            100.0
-                        ],
-                        'Cost (%)': [
-                            wacc_result['Cost of Equity'],
-                            wacc_result['After-Tax Cost of Debt'],
-                            wacc_result['WACC']
-                        ],
-                        'Contribution to WACC (%)': [
-                            wacc_result['Equity Weight'] / 100 * wacc_result['Cost of Equity'],
-                            wacc_result['Debt Weight'] / 100 * wacc_result['After-Tax Cost of Debt'],
-                            wacc_result['WACC']
-                        ]
-                    })
-                    
-                    st.dataframe(
-                        breakdown_df.style.format({
-                            'Value ($B)': '${:.2f}',
-                            'Weight (%)': '{:.2f}',
-                            'Cost (%)': '{:.2f}',
-                            'Contribution to WACC (%)': '{:.2f}'
-                        }),
-                        use_container_width=True,
-                        hide_index=True
-                    )
-                    
-                    # Formula display
-                    st.info(f"""
-                    **WACC Formula:**
-                    WACC = (E/V × Re) + (D/V × Rd × (1-Tc))
-                    
-                    Where:
-                    - E/V = {wacc_result['Equity Weight']:.1f}% (Equity weight)
-                    - Re = {wacc_result['Cost of Equity']:.2f}% (Cost of equity via CAPM)
-                    - D/V = {wacc_result['Debt Weight']:.1f}% (Debt weight)
-                    - Rd = {wacc_result['Cost of Debt']:.2f}% (Cost of debt)
-                    - Tc = {tax_rate*100:.1f}% (Tax rate)
-                    
-                    **Result:** {wacc_result['WACC']:.2f}%
-                    """)
-                    
-                    # Interpretation
-                    st.subheader("💡 Interpretation")
-                    
-                    if wacc_result['WACC'] < 8:
-                        st.success("**Low WACC** - Company has cheap access to capital, favorable for investments")
-                    elif wacc_result['WACC'] < 12:
-                        st.info("**Moderate WACC** - Typical cost of capital for established companies")
-                    else:
-                        st.warning("**High WACC** - Expensive capital, company must generate high returns to create value")
-                    
-                    st.write(f"""
-                    **Use Cases:**
-                    - Discount rate for DCF valuation
-                    - Hurdle rate for capital budgeting
-                    - Benchmark for investment returns
-                    - Projects must return > {wacc_result['WACC']:.2f}% to create shareholder value
-                    """)
-                
-                else:
-                    st.warning("⚠️ Insufficient data for WACC calculation")
-            
-            # ==================== GRAHAM NUMBER ====================
-            if "Graham Number" in selected_models:
-                st.header("💎 Graham Number (Value Investment)")
-                
-                st.write("**Benjamin Graham's Fair Value Formula**")
-                
-                eps = info.get('trailingEps', 0)
-                book_value = info.get('bookValue', 0)
-                
-                graham = graham_number(eps, book_value)
-                
-                if graham:
-                    col1, col2, col3 = st.columns(3)
-                    
-                    with col1:
-                        st.metric("Graham Number", f"${graham['Graham Number']:.2f}")
-                    with col2:
-                        st.metric("Current Price", f"${current_price:.2f}")
-                    with col3:
-                        upside = ((graham['Graham Number'] - current_price) / current_price * 100)
-                        st.metric("Margin of Safety", f"{upside:+.1f}%")
-                    
-                    st.info(f"""
-                    **Formula:** Fair Value = √(22.5 × EPS × Book Value)
-                    
-                    - EPS: ${eps:.2f}
-                    - Book Value: ${book_value:.2f}
-                    - **Graham Number: ${graham['Graham Number']:.2f}**
-                    
-                    **Benjamin Graham's principle:** Buy when price is below intrinsic value with a margin of safety.
-                    """)
-                    
-                    if upside > 25:
-                        st.success("**Significantly Undervalued** - Large margin of safety")
-                    elif upside > 0:
-                        st.info("**Undervalued** - Some margin of safety exists")
-                    else:
-                        st.warning("**Overvalued** - Trading above Graham's fair value")
-                
-                else:
-                    st.warning("⚠️ Graham Number requires positive EPS and book value")
-    
-    # Educational section
-    with st.expander("📚 Model Explanations"):
-        st.markdown("""
-        ### DuPont Analysis
-        Breaks down ROE into its component parts to understand drivers of profitability:
-        - **Profit Margin**: How much profit is earned per dollar of sales
-        - **Asset Turnover**: How efficiently assets generate revenue
-        - **Equity Multiplier**: Degree of financial leverage
-        
-        ### Altman Z-Score
-        Predicts bankruptcy probability using financial ratios:
-        - Developed by Edward Altman in 1968
-        - **> 2.99**: Safe (low bankruptcy risk)
-        - **1.81-2.99**: Grey zone
-        - **< 1.81**: High bankruptcy risk
-        
-        ### Piotroski F-Score
-        9-point score assessing financial strength:
-        - **Profitability**: ROA, cash flow, improving ROA, quality of earnings
-        - **Leverage**: Decreasing debt, improving liquidity, no dilution
-        - **Efficiency**: Improving margins and asset turnover
-        - **8-9**: Strong, **5-7**: Moderate, **0-4**: Weak
-        
-        ### WACC
-        Weighted average cost of capital - the minimum return required:
-        - Used as discount rate in DCF valuations
-        - Hurdle rate for investment decisions
-        - Lower WACC = cheaper capital = easier to create value
-        
-        ### Graham Number
-        Benjamin Graham's value investing formula:
-        - Estimates fair value based on earnings and book value
-        - Buy with "margin of safety" (below fair value)
-        - Conservative approach to value investing
-        """)
-    
-    # Footer
-    st.divider()
-    st.caption("🔬 Advanced Models Module | Deep fundamental analysis using proven financial frameworks")
+    st.markdown("Deep-dive financial analysis: DuPont · Altman Z · Piotroski F · WACC · Graham · Beneish M · EV/EBITDA · Magic Formula")
 
-# Standalone execution for testing
+    # ---- Sidebar ----
+    with st.sidebar:
+        st.header("⚙️ Configuration")
+        ticker = st.text_input("Ticker Symbol", value="AAPL",
+                               help="NYSE / NASDAQ ticker, e.g. AAPL, MSFT, TSLA").upper().strip()
+
+        all_models = [
+            "DuPont Analysis",
+            "Altman Z-Score",
+            "Piotroski F-Score",
+            "WACC Analysis",
+            "Graham Number",
+            "Beneish M-Score",
+            "EV/EBITDA Multiples",
+            "Magic Formula (Greenblatt)",
+        ]
+        selected_models = st.multiselect("Models to run", all_models, default=all_models[:5])
+
+        st.divider()
+        st.subheader("WACC Inputs")
+        rf_rate = st.number_input("Risk-Free Rate (%)", 0.0, 20.0, 4.5, 0.1) / 100
+        mkt_return = st.number_input("Market Return (%)", 0.0, 30.0, 10.0, 0.5) / 100
+        custom_tax = st.number_input("Tax Rate (%)", 0.0, 50.0, 21.0, 1.0) / 100
+
+        run_btn = st.button("🚀 Run Analysis", use_container_width=True, type="primary")
+
+    if not run_btn:
+        st.info("👈 Configure settings in the sidebar and press **Run Analysis**.")
+        return
+
+    # ---- Fetch data ----
+    with st.spinner(f"Fetching data for **{ticker}** …"):
+        data = fetch_financial_data(ticker)
+
+    if not data:
+        st.error(f"❌ Could not fetch data for **{ticker}**. Check the ticker and try again.")
+        return
+
+    info = data['info']
+    inc = data['income_statement']
+    bs = data['balance_sheet']
+    cf = data['cash_flow']
+
+    # ---- Company header ----
+    name = info.get('longName', ticker)
+    sector = info.get('sector', 'N/A')
+    current_price = info.get('currentPrice') or info.get('regularMarketPrice', 0)
+    market_cap = info.get('marketCap', 0)
+    beta_val = info.get('beta', 1.0) or 1.0
+
+    st.header(f"📊 {name}")
+    c1, c2, c3, c4, c5 = st.columns(5)
+    c1.metric("Sector", sector)
+    c2.metric("Market Cap", fmt_billions(market_cap))
+    c3.metric("Price", f"${current_price:.2f}")
+    c4.metric("P/E (TTM)", f"{info.get('trailingPE', 0):.1f}" if info.get('trailingPE') else "N/A")
+    c5.metric("Beta", f"{beta_val:.2f}")
+    st.divider()
+
+    # ---- Extract financials ----
+    try:
+        # Current period (col 0)
+        net_income   = safe_get(inc, 'Net Income', 0)
+        revenue      = safe_get(inc, 'Total Revenue', 0)
+        ebit         = safe_get(inc, 'EBIT', 0)
+        ebt          = safe_get(inc, 'Pretax Income', 0)
+        gross_profit = safe_get(inc, 'Gross Profit', 0)
+        int_expense  = abs(safe_get(inc, 'Interest Expense', 0))
+        sga          = abs(safe_get(inc, 'Selling General Administrative', 0))
+
+        total_assets   = safe_get(bs, 'Total Assets', 0)
+        total_equity   = safe_get(bs, 'Stockholders Equity', 0)
+        current_assets = safe_get(bs, 'Current Assets', 0)
+        current_liab   = safe_get(bs, 'Current Liabilities', 0)
+        total_liab     = safe_get(bs, 'Total Liabilities Net Minority Interest', 0)
+        long_term_debt = safe_get(bs, 'Long Term Debt', 0)
+        retained_earn  = safe_get(bs, 'Retained Earnings', 0)
+        cash           = safe_get(bs, 'Cash And Cash Equivalents', 0)
+        receivables    = safe_get(bs, 'Receivables', 0)
+        ppe            = safe_get(bs, 'Net PPE', 0)
+        depreciation   = abs(safe_get(cf, 'Depreciation And Amortization', 0))
+
+        operating_cf   = safe_get(cf, 'Operating Cash Flow', 0)
+        working_capital = current_assets - current_liab
+
+        # Prior period (col 1)
+        ni_prev       = safe_get(inc, 'Net Income', 1)
+        rev_prev      = safe_get(inc, 'Total Revenue', 1)
+        gp_prev       = safe_get(inc, 'Gross Profit', 1)
+        sga_prev      = abs(safe_get(inc, 'Selling General Administrative', 1))
+        ta_prev       = safe_get(bs, 'Total Assets', 1)
+        ltd_prev      = safe_get(bs, 'Long Term Debt', 1)
+        ca_prev       = safe_get(bs, 'Current Assets', 1)
+        cl_prev       = safe_get(bs, 'Current Liabilities', 1)
+        rec_prev      = safe_get(bs, 'Receivables', 1)
+        ppe_prev      = safe_get(bs, 'Net PPE', 1)
+        dep_prev      = abs(safe_get(cf, 'Depreciation And Amortization', 1))
+        cfo_prev      = safe_get(cf, 'Operating Cash Flow', 1)
+
+        shares_out    = info.get('sharesOutstanding', 0)
+
+        # Derived
+        ebitda = ebit + depreciation
+
+    except Exception as e:
+        st.error(f"Error extracting financials: {e}")
+        return
+
+    # ===========================================================
+    # DUPONT
+    # ===========================================================
+    if "DuPont Analysis" in selected_models:
+        st.subheader("📊 DuPont Analysis")
+        d3 = dupont_analysis_3way(net_income, revenue, total_assets, total_equity)
+        d5 = dupont_analysis_5way(net_income, ebt, ebit, revenue, total_assets, total_equity)
+
+        if d3:
+            render_score_summary(
+                "ROE (3-Way)", f"{d3['ROE']:.2f}%",
+                f"Profit Margin {d3['Profit Margin']:.2f}% × Asset Turnover {d3['Asset Turnover']:.2f}x × Equity Multiplier {d3['Equity Multiplier']:.2f}x",
+                'green' if d3['ROE'] > 15 else 'orange' if d3['ROE'] > 5 else 'red',
+                "ROE above 15% is generally considered strong for most sectors."
+            )
+
+            col1, col2 = st.columns(2)
+            with col1:
+                st.markdown("**3-Way Components**")
+                st.metric("Profit Margin", f"{d3['Profit Margin']:.2f}%")
+                st.metric("Asset Turnover", f"{d3['Asset Turnover']:.2f}x")
+                st.metric("Equity Multiplier", f"{d3['Equity Multiplier']:.2f}x")
+            with col2:
+                if d5:
+                    st.markdown("**5-Way Components**")
+                    st.metric("Tax Burden", f"{d5['Tax Burden']:.3f}")
+                    st.metric("Interest Burden", f"{d5['Interest Burden']:.3f}")
+                    st.metric("EBIT Margin", f"{d5['EBIT Margin']:.2f}%")
+                    st.metric("Asset Turnover", f"{d5['Asset Turnover']:.2f}x")
+                    st.metric("Equity Multiplier", f"{d5['Equity Multiplier']:.2f}x")
+
+            st.plotly_chart(dupont_tree(d3, d5), use_container_width=True)
+        else:
+            st.warning("Insufficient data for DuPont analysis.")
+        st.divider()
+
+    # ===========================================================
+    # ALTMAN Z-SCORE
+    # ===========================================================
+    if "Altman Z-Score" in selected_models:
+        st.subheader("🚨 Altman Z-Score")
+        altman = altman_z_score_public(working_capital, retained_earn, ebit,
+                                       market_cap, total_liab, revenue, total_assets)
+        if altman:
+            render_score_summary(
+                "Altman Z-Score", f"{altman['Z-Score']:.2f}",
+                f"{altman['Zone']}  ·  Bankruptcy Risk: {altman['Bankruptcy Risk']}",
+                altman['Color'],
+                "Z > 2.99 = Safe · 1.81–2.99 = Grey Zone · < 1.81 = Distress"
+            )
+            fig_gauge = gauge_chart(
+                altman['Z-Score'], 'Altman Z-Score', 0, 5,
+                [(1.81, '#f8d7da'), (2.99, '#fff3cd')], ''
+            )
+            col1, col2 = st.columns([1, 1])
+            with col1:
+                st.plotly_chart(fig_gauge, use_container_width=True)
+            with col2:
+                comp = altman['Components']
+                wts = altman['Weights']
+                keys = list(comp.keys())
+                wt_vals = list(wts.values())
+                comp_vals = list(comp.values())
+                contrib = [w * v for w, v in zip(wt_vals, comp_vals)]
+                df_comp = pd.DataFrame({
+                    'Variable': keys,
+                    'Raw Value': comp_vals,
+                    'Weight': wt_vals,
+                    'Contribution': contrib
+                })
+                st.dataframe(
+                    df_comp.style.format({'Raw Value': '{:.4f}', 'Weight': '{:.2f}', 'Contribution': '{:.4f}'})
+                                 .background_gradient(subset=['Contribution'], cmap='RdYlGn'),
+                    use_container_width=True, hide_index=True
+                )
+        else:
+            st.warning("Insufficient data for Altman Z-Score.")
+        st.divider()
+
+    # ===========================================================
+    # PIOTROSKI F-SCORE
+    # ===========================================================
+    if "Piotroski F-Score" in selected_models:
+        st.subheader("📈 Piotroski F-Score")
+
+        curr_data = {
+            'roa': net_income / total_assets if total_assets else 0,
+            'cfo': operating_cf, 'net_income': net_income,
+            'long_term_debt': long_term_debt,
+            'current_ratio': current_assets / current_liab if current_liab else 0,
+            'shares_outstanding': shares_out,
+            'gross_margin': gross_profit / revenue if revenue else 0,
+            'asset_turnover': revenue / total_assets if total_assets else 0,
+        }
+        prev_data = {
+            'roa': ni_prev / ta_prev if ta_prev else 0,
+            'long_term_debt': ltd_prev,
+            'current_ratio': ca_prev / cl_prev if cl_prev else 0,
+            'shares_outstanding': shares_out * 1.01,
+            'gross_margin': gp_prev / rev_prev if rev_prev else 0,
+            'asset_turnover': rev_prev / ta_prev if ta_prev else 0,
+        }
+
+        pio = piotroski_f_score(curr_data, prev_data)
+
+        render_score_summary(
+            "Piotroski F-Score", f"{pio['F-Score']} / 9",
+            pio['Assessment'],
+            pio['Color'],
+            "8–9 = Strong (potential value play) · 5–7 = Moderate · 0–4 = Weak / high risk"
+        )
+
+        # Detailed component table
+        details = pio['Details']
+        rows = []
+        for name_k, d in details.items():
+            rows.append({
+                'Category': d['category'],
+                'Signal': name_k,
+                'Value': d['value'],
+                'Pass': '✅' if d['pass'] else '❌',
+                'Score': d['score'],
+            })
+        df_pio = pd.DataFrame(rows)
+
+        col1, col2 = st.columns([2, 3])
+        with col1:
+            # Score breakdown by category
+            by_cat = df_pio.groupby('Category')['Score'].agg(['sum', 'count']).reset_index()
+            by_cat.columns = ['Category', 'Scored', 'Max']
+            for _, row in by_cat.iterrows():
+                pct = row['Scored'] / row['Max']
+                color_cat = 'green' if pct >= 0.67 else 'orange' if pct >= 0.34 else 'red'
+                score_badge(row['Category'], f"{int(row['Scored'])}/{int(row['Max'])}", color_cat)
+                st.markdown("")
+        with col2:
+            st.dataframe(df_pio[['Category', 'Signal', 'Value', 'Pass', 'Score']],
+                         use_container_width=True, hide_index=True)
+
+        st.plotly_chart(piotroski_bar(details), use_container_width=True)
+        st.divider()
+
+    # ===========================================================
+    # WACC
+    # ===========================================================
+    if "WACC Analysis" in selected_models:
+        st.subheader("💰 WACC — Weighted Average Cost of Capital")
+
+        cost_eq = capm(rf_rate, beta_val, mkt_return)
+        cost_dt = int_expense / long_term_debt if long_term_debt > 0 else 0.05
+
+        wacc_res = calculate_wacc(market_cap, long_term_debt, cost_eq, cost_dt, custom_tax)
+
+        if wacc_res:
+            render_score_summary(
+                "WACC", f"{wacc_res['WACC']:.2f}%",
+                f"Cost of Equity {wacc_res['Cost of Equity']:.2f}%  ·  After-Tax Cost of Debt {wacc_res['After-Tax Cost of Debt']:.2f}%",
+                'green' if wacc_res['WACC'] < 8 else 'orange' if wacc_res['WACC'] < 12 else 'red',
+                "Projects must earn above WACC to create shareholder value. Lower WACC = cheaper capital."
+            )
+
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("WACC", f"{wacc_res['WACC']:.2f}%")
+            c2.metric("Cost of Equity (CAPM)", f"{wacc_res['Cost of Equity']:.2f}%")
+            c3.metric("After-Tax Cost of Debt", f"{wacc_res['After-Tax Cost of Debt']:.2f}%")
+            c4.metric("Equity / Debt Split", f"{wacc_res['Equity Weight']:.0f}% / {wacc_res['Debt Weight']:.0f}%")
+
+            col1, col2 = st.columns(2)
+            with col1:
+                st.plotly_chart(wacc_waterfall(wacc_res), use_container_width=True)
+            with col2:
+                fig_pie = go.Figure(go.Pie(
+                    labels=['Equity', 'Debt'],
+                    values=[wacc_res['Equity Weight'], wacc_res['Debt Weight']],
+                    hole=0.45,
+                    marker_colors=['#3498db', '#e74c3c'],
+                ))
+                fig_pie.update_layout(title='Capital Structure', height=380,
+                                      template='plotly_white',
+                                      annotations=[dict(text=f"{wacc_res['WACC']:.2f}%\nWACC",
+                                                        x=0.5, y=0.5, font_size=14, showarrow=False)])
+                st.plotly_chart(fig_pie, use_container_width=True)
+
+            with st.expander("🔍 Detailed WACC Calculation"):
+                st.markdown(f"""
+| | Equity | Debt | **Total** |
+|---|---|---|---|
+| **Value** | {fmt_billions(wacc_res['Equity Value'])} | {fmt_billions(wacc_res['Debt Value'])} | {fmt_billions(wacc_res['Total Value'])} |
+| **Weight** | {wacc_res['Equity Weight']:.2f}% | {wacc_res['Debt Weight']:.2f}% | 100% |
+| **Pre-tax Cost** | {wacc_res['Cost of Equity']:.2f}% | {wacc_res['Cost of Debt']:.2f}% | – |
+| **After-tax Cost** | {wacc_res['Cost of Equity']:.2f}% | {wacc_res['After-Tax Cost of Debt']:.2f}% | – |
+| **WACC Contribution** | {wacc_res['Equity Weight']/100*wacc_res['Cost of Equity']:.2f}% | {wacc_res['Debt Weight']/100*wacc_res['After-Tax Cost of Debt']:.2f}% | **{wacc_res['WACC']:.2f}%** |
+
+CAPM: Re = {rf_rate*100:.2f}% + {beta_val:.2f} × ({mkt_return*100:.2f}% − {rf_rate*100:.2f}%) = **{cost_eq*100:.2f}%**
+                """)
+        else:
+            st.warning("Insufficient data for WACC calculation.")
+        st.divider()
+
+    # ===========================================================
+    # GRAHAM NUMBER
+    # ===========================================================
+    if "Graham Number" in selected_models:
+        st.subheader("💎 Graham Number")
+        eps = info.get('trailingEps', 0) or 0
+        bvps = info.get('bookValue', 0) or 0
+        graham = graham_number(eps, bvps)
+
+        if graham:
+            gn = graham['Graham Number']
+            upside = (gn - current_price) / current_price * 100 if current_price else 0
+            color = 'green' if upside > 25 else 'orange' if upside > 0 else 'red'
+            render_score_summary(
+                "Graham Number", f"${gn:.2f}",
+                f"Current Price ${current_price:.2f}  ·  Margin of Safety {upside:+.1f}%",
+                color,
+                "Buy when price < Graham Number with ≥25% margin of safety (Benjamin Graham)."
+            )
+            c1, c2, c3 = st.columns(3)
+            c1.metric("Graham Fair Value", f"${gn:.2f}")
+            c2.metric("Current Price", f"${current_price:.2f}")
+            c3.metric("Margin of Safety", f"{upside:+.1f}%",
+                      delta_color="normal" if upside > 0 else "inverse")
+
+            # Visual price comparison
+            fig_gn = go.Figure()
+            fig_gn.add_trace(go.Bar(x=['Graham Number', 'Current Price'],
+                                    y=[gn, current_price],
+                                    marker_color=['#27ae60', '#3498db'],
+                                    text=[f'${gn:.2f}', f'${current_price:.2f}'],
+                                    textposition='outside'))
+            fig_gn.update_layout(title='Graham Number vs Current Price',
+                                  template='plotly_white', height=340,
+                                  yaxis_title='Price ($)')
+            st.plotly_chart(fig_gn, use_container_width=True)
+        else:
+            st.warning("⚠️ Graham Number requires positive EPS and book value per share.")
+        st.divider()
+
+    # ===========================================================
+    # BENEISH M-SCORE
+    # ===========================================================
+    if "Beneish M-Score" in selected_models:
+        st.subheader("🕵️ Beneish M-Score — Earnings Manipulation Detection")
+
+        curr_b = {
+            'receivables': receivables, 'revenue': revenue, 'gross_profit': gross_profit,
+            'current_assets': current_assets, 'ppe': ppe, 'total_assets': total_assets,
+            'depreciation': depreciation, 'sga': sga,
+            'long_term_debt': long_term_debt, 'current_liabilities': current_liab,
+            'cfo': operating_cf, 'net_income': net_income,
+        }
+        prev_b = {
+            'receivables': rec_prev, 'revenue': rev_prev, 'gross_profit': gp_prev,
+            'current_assets': ca_prev, 'ppe': ppe_prev, 'total_assets': ta_prev,
+            'depreciation': dep_prev, 'sga': sga_prev,
+            'long_term_debt': ltd_prev, 'current_liabilities': cl_prev,
+            'cfo': cfo_prev, 'net_income': ni_prev,
+        }
+
+        m_res = beneish_m_score(curr_b, prev_b)
+
+        render_score_summary(
+            "M-Score", f"{m_res['M-Score']:.3f}",
+            m_res['Status'],
+            m_res['Color'],
+            "M > −1.78 signals possible earnings manipulation (Beneish 1999). Use alongside other checks."
+        )
+
+        c1, c2 = st.columns(2)
+        with c1:
+            comp = m_res['Components']
+            df_m = pd.DataFrame({'Variable': list(comp.keys()), 'Value': list(comp.values())})
+            st.dataframe(df_m.style.format({'Value': '{:.4f}'}), use_container_width=True, hide_index=True)
+        with c2:
+            st.plotly_chart(beneish_radar(comp), use_container_width=True)
+        st.divider()
+
+    # ===========================================================
+    # EV/EBITDA
+    # ===========================================================
+    if "EV/EBITDA Multiples" in selected_models:
+        st.subheader("📐 EV / EBITDA & Enterprise Multiples")
+
+        ev_res = ev_ebitda_analysis(market_cap, long_term_debt, cash, ebitda,
+                                    revenue, net_income, total_assets, sector)
+
+        if ebitda > 0:
+            ev_mult = ev_res['EV/EBITDA']
+            color_ev = 'green' if ev_mult and ev_mult < 12 else 'orange' if ev_mult and ev_mult < 20 else 'red'
+            render_score_summary(
+                "EV/EBITDA", f"{ev_mult:.1f}x" if ev_mult else "N/A",
+                f"Enterprise Value {fmt_billions(ev_res['Enterprise Value'])}  ·  EBITDA {fmt_billions(ebitda)}",
+                color_ev,
+                "EV/EBITDA < 10x often considered cheap; > 20x expensive (varies by sector & growth)."
+            )
+
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Enterprise Value", fmt_billions(ev_res['Enterprise Value']))
+        c2.metric("EBITDA", fmt_billions(ev_res['EBITDA']))
+        c3.metric("EV/EBITDA", f"{ev_res['EV/EBITDA']:.1f}x" if ev_res['EV/EBITDA'] else "N/A")
+        c4.metric("EV/Revenue", f"{ev_res['EV/Revenue']:.2f}x" if ev_res['EV/Revenue'] else "N/A")
+
+        # Waterfall: EV bridge
+        fig_ev = go.Figure(go.Waterfall(
+            orientation='v',
+            measure=['relative', 'relative', 'relative', 'total'],
+            x=['Market Cap', '+ Total Debt', '− Cash & Equiv', 'Enterprise Value'],
+            y=[market_cap, long_term_debt, -cash, 0],
+            text=[fmt_billions(market_cap), fmt_billions(long_term_debt),
+                  f'−{fmt_billions(cash)}', fmt_billions(ev_res['Enterprise Value'])],
+            textposition='outside',
+            connector={'line': {'color': '#636363'}},
+            increasing={'marker': {'color': '#3498db'}},
+            decreasing={'marker': {'color': '#e74c3c'}},
+            totals={'marker': {'color': '#2c3e50'}},
+        ))
+        fig_ev.update_layout(title='Enterprise Value Bridge', template='plotly_white', height=380)
+        st.plotly_chart(fig_ev, use_container_width=True)
+        st.divider()
+
+    # ===========================================================
+    # MAGIC FORMULA
+    # ===========================================================
+    if "Magic Formula (Greenblatt)" in selected_models:
+        st.subheader("🧙 Magic Formula — Greenblatt")
+
+        tangible = (working_capital if working_capital > 0 else 0) + ppe
+        ev_for_magic = market_cap + long_term_debt - cash
+        mf = magic_formula(ebit, ev_for_magic, working_capital, tangible)
+
+        if mf['Earnings Yield'] is not None and mf['Return on Capital'] is not None:
+            ey = mf['Earnings Yield']
+            roc = mf['Return on Capital']
+            color_mf = 'green' if ey > 8 and roc > 15 else 'orange' if ey > 4 else 'red'
+            render_score_summary(
+                "Magic Formula",
+                f"EY {ey:.1f}%  ·  ROC {roc:.1f}%",
+                "High Earnings Yield + High Return on Capital = Greenblatt's ideal",
+                color_mf,
+                "Earnings Yield > 8% and ROC > 15% are typical thresholds for inclusion."
+            )
+            c1, c2 = st.columns(2)
+            c1.metric("Earnings Yield (EBIT/EV)", f"{ey:.2f}%")
+            c2.metric("Return on Capital (EBIT/Tangible)", f"{roc:.2f}%")
+
+            fig_mf = go.Figure()
+            fig_mf.add_trace(go.Bar(x=['Earnings Yield', 'Return on Capital'],
+                                    y=[ey, roc],
+                                    marker_color=['#3498db', '#27ae60'],
+                                    text=[f'{ey:.2f}%', f'{roc:.2f}%'],
+                                    textposition='outside'))
+            fig_mf.add_hline(y=8, line_dash='dash', line_color='gray',
+                             annotation_text='EY threshold (8%)')
+            fig_mf.add_hline(y=15, line_dash='dot', line_color='gray',
+                              annotation_text='ROC threshold (15%)')
+            fig_mf.update_layout(title='Magic Formula Metrics', template='plotly_white',
+                                  height=360, yaxis_title='%')
+            st.plotly_chart(fig_mf, use_container_width=True)
+        else:
+            st.warning("Insufficient data for Magic Formula calculation.")
+        st.divider()
+
+    # ===========================================================
+    # EDUCATION EXPANDER
+    # ===========================================================
+    with st.expander("📚 Model Reference Guide"):
+        st.markdown("""
+| Model | Purpose | Key Threshold |
+|---|---|---|
+| **DuPont (3-Way)** | Decompose ROE into margin × turnover × leverage | ROE > 15% = strong |
+| **DuPont (5-Way)** | Add tax & interest burden dimensions | Identify drag on ROE |
+| **Altman Z-Score** | Predict bankruptcy probability | > 2.99 safe, < 1.81 distress |
+| **Piotroski F-Score** | 9-point quality screen | 8–9 strong, 0–4 weak |
+| **WACC** | Cost of capital / DCF discount rate | Lower is better |
+| **Graham Number** | Value investing fair price | Buy below with ≥25% margin |
+| **Beneish M-Score** | Earnings manipulation detection | M > −1.78 = possible fraud |
+| **EV/EBITDA** | Capital-structure-neutral valuation | < 10x cheap, > 20x pricey |
+| **Magic Formula** | Combined quality + value screen | EY > 8%, ROC > 15% |
+        """)
+
+    st.caption("🔬 Advanced Models Module — all figures sourced from Yahoo Finance via yfinance. Not financial advice.")
+
+
 if __name__ == "__main__":
     advanced_models_module(None)
