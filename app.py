@@ -343,6 +343,17 @@ def get_available_modules() -> Dict[str, dict]:
         }
     except ImportError:
         pass
+
+    # ── NEW MODULE: Insider & Institutional Activity ──────────────────────────
+    try:
+        from insider_institutional import render_insider_institutional
+        modules["🏦 Insider & Institutional"] = {
+            "func": render_insider_institutional,
+            "desc": "Insider transactions, institutional ownership, short interest & composite smart-money signal",
+            "uses_context": False
+        }
+    except ImportError:
+        pass
     
     return modules
 # ────────────────────────────────────────────────
