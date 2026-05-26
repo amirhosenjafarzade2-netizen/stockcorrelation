@@ -1,38 +1,33 @@
-# intrinsic_value_pro.py
-# Professional Intrinsic Value Calculator & Screener
-# Fixed + Stabilized + Production-Oriented Version
+# intrinsic_value.py
+# ============================================================
+# Intrinsic Value Pro
+# Fixed Version
 #
-# Features:
-# - Correct Graham Number
-# - Stable DCF with debt/cash adjustments
-# - Lynch valuation
-# - Scenario DCF (Bear/Base/Bull)
-# - Median + outlier filtering
-# - Multi-stock screener
-# - Threaded fetching
-# - Safer parsing
-# - Proper CAGR
-# - Financial-sector handling
-# - Streamlit UI
-#
-# Educational purposes only. Not financial advice.
+# FIXES:
+# - Added valuation method selector UI
+# - Removed Finviz dependency (403 fix)
+# - Removed duplicate st.set_page_config()
+# - Added safer NaN handling
+# - Improved screener stability
+# - Better error handling
+# ============================================================
 
 import streamlit as st
 import yfinance as yf
 import pandas as pd
 import numpy as np
-import requests
-from bs4 import BeautifulSoup
-from typing import Dict, List, Optional, Tuple
+
+from typing import Dict, List, Optional
 from concurrent.futures import ThreadPoolExecutor, as_completed
+
 import plotly.graph_objects as go
 import plotly.express as px
-import time
+
 from datetime import datetime
 
-# ─────────────────────────────────────────────────────────────
+# ============================================================
 # CONFIG
-# ─────────────────────────────────────────────────────────────
+# ============================================================
 
 DCF_YEARS = 5
 
@@ -46,9 +41,9 @@ OUTLIER_MULTIPLE = 10
 
 MAX_THREADS = 10
 
-# ─────────────────────────────────────────────────────────────
+# ============================================================
 # HELPERS
-# ─────────────────────────────────────────────────────────────
+# ============================================================
 
 def safe_float(value):
 
@@ -103,70 +98,9 @@ def remove_outliers(values, current_price):
 
     return cleaned
 
-
-# ─────────────────────────────────────────────────────────────
-# FINVIZ
-# ─────────────────────────────────────────────────────────────
-
-@st.cache_data(ttl=3600)
-def get_finviz_data(ticker: str):
-
-    headers = {
-        "User-Agent": (
-            "Mozilla/5.0"
-        )
-    }
-
-    url = f"https://finviz.com/quote.ashx?t={ticker}"
-
-    try:
-
-        response = requests.get(
-            url,
-            headers=headers,
-            timeout=10
-        )
-
-        response.raise_for_status()
-
-        soup = BeautifulSoup(
-            response.text,
-            "html.parser"
-        )
-
-        table = soup.find(
-            "table",
-            {"class": "snapshot-table2"}
-        )
-
-        data = {}
-
-        if table:
-
-            rows = table.find_all("tr")
-
-            for row in rows:
-
-                cells = row.find_all("td")
-
-                for i in range(0, len(cells), 2):
-
-                    if i + 1 < len(cells):
-
-                        key = cells[i].text.strip()
-                        val = cells[i + 1].text.strip()
-
-                        data[key] = val
-
-        return data
-
-    except:
-        return {}
-
-
-# ─────────────────────────────────────────────────────────────
+# ============================================================
 # STOCK DATA
-# ─────────────────────────────────────────────────────────────
+# ============================================================
 
 @st.cache_data(ttl=1800)
 def fetch_stock_data(ticker: str) -> Optional[Dict]:
@@ -177,14 +111,15 @@ def fetch_stock_data(ticker: str) -> Optional[Dict]:
 
         info = stock.info
 
+        if not info:
+            return None
+
         price = safe_float(
             info.get("currentPrice")
         )
 
         if np.isnan(price) or price <= 0:
             return None
-
-        finviz = get_finviz_data(ticker)
 
         market_cap = safe_float(
             info.get("marketCap")
@@ -206,39 +141,58 @@ def fetch_stock_data(ticker: str) -> Optional[Dict]:
             info.get("freeCashflow")
         )
 
-        sector = info.get(
-            "sector",
-            "N/A"
+        roe = (
+            safe_float(info.get("returnOnEquity")) * 100
+            if info.get("returnOnEquity") is not None
+            else np.nan
         )
 
         data = {
+
             "Symbol": ticker,
+
             "Price": price,
+
             "EPS": safe_float(
                 info.get("trailingEps")
             ),
+
             "Book Value": safe_float(
                 info.get("bookValue")
             ),
+
             "Forward EPS": safe_float(
                 info.get("forwardEps")
             ),
+
             "Shares": shares,
+
             "Market Cap": market_cap,
+
             "Debt": total_debt,
+
             "Cash": cash,
+
             "FCF": fcf,
-            "Sector": sector,
+
+            "Sector": info.get(
+                "sector",
+                "N/A"
+            ),
+
             "Industry": info.get(
                 "industry",
                 "N/A"
             ),
+
             "PE": safe_float(
                 info.get("trailingPE")
             ),
+
             "PEG": safe_float(
                 info.get("pegRatio")
             ),
+
             "Dividend Yield": (
                 safe_float(
                     info.get("dividendYield")
@@ -246,12 +200,13 @@ def fetch_stock_data(ticker: str) -> Optional[Dict]:
                 if info.get("dividendYield")
                 else 0
             ),
-            "ROE": safe_float(
-                finviz.get("ROE")
-            ),
+
+            "ROE": roe
         }
 
+        # ====================================================
         # EPS CAGR
+        # ====================================================
 
         growth = 0.05
 
@@ -289,8 +244,7 @@ def fetch_stock_data(ticker: str) -> Optional[Dict]:
 
                         growth = (
                             (
-                                end_eps
-                                / start_eps
+                                end_eps / start_eps
                             ) ** (
                                 1 / years
                             ) - 1
@@ -305,13 +259,12 @@ def fetch_stock_data(ticker: str) -> Optional[Dict]:
 
         return data
 
-    except:
+    except Exception:
         return None
 
-
-# ─────────────────────────────────────────────────────────────
+# ============================================================
 # VALUATION METHODS
-# ─────────────────────────────────────────────────────────────
+# ============================================================
 
 def graham_number(data):
 
@@ -334,7 +287,9 @@ def graham_number(data):
 def lynch_value(data):
 
     eps = data["EPS"]
+
     growth = data["Growth"] * 100
+
     div_yield = data["Dividend Yield"]
 
     if (
@@ -359,6 +314,7 @@ def dcf_value(
 ):
 
     fcf = data["FCF"]
+
     shares = data["Shares"]
 
     if (
@@ -438,22 +394,24 @@ def dcf_value(
 
     return intrinsic
 
-
-# ─────────────────────────────────────────────────────────────
+# ============================================================
 # SCENARIO DCF
-# ─────────────────────────────────────────────────────────────
+# ============================================================
 
 def scenario_dcf(data):
 
     scenarios = {
+
         "Bear": {
             "discount": 0.12,
             "terminal": 0.02
         },
+
         "Base": {
             "discount": 0.10,
             "terminal": 0.03
         },
+
         "Bull": {
             "discount": 0.08,
             "terminal": 0.04
@@ -472,10 +430,9 @@ def scenario_dcf(data):
 
     return results
 
-
-# ─────────────────────────────────────────────────────────────
+# ============================================================
 # COMBINED VALUE
-# ─────────────────────────────────────────────────────────────
+# ============================================================
 
 def intrinsic_value(data):
 
@@ -513,10 +470,9 @@ def intrinsic_value(data):
 
     return intrinsic, methods
 
-
-# ─────────────────────────────────────────────────────────────
+# ============================================================
 # VISUALS
-# ─────────────────────────────────────────────────────────────
+# ============================================================
 
 def valuation_chart(
     current_price,
@@ -532,6 +488,7 @@ def valuation_chart(
         if not np.isnan(v):
 
             names.append(k)
+
             vals.append(v)
 
             colors.append(
@@ -571,49 +528,57 @@ def valuation_chart(
 
     return fig
 
-
-# ─────────────────────────────────────────────────────────────
+# ============================================================
 # UNIVERSES
-# ─────────────────────────────────────────────────────────────
+# ============================================================
 
 @st.cache_data(ttl=86400)
 def get_sp500():
 
-    tables = pd.read_html(
-        "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
-    )
+    try:
 
-    df = tables[0]
+        tables = pd.read_html(
+            "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
+        )
 
-    return (
-        df["Symbol"]
-        .str.replace(".", "-", regex=False)
-        .tolist()
-    )
+        df = tables[0]
+
+        return (
+            df["Symbol"]
+            .str.replace(".", "-", regex=False)
+            .tolist()
+        )
+
+    except:
+        return []
 
 
 @st.cache_data(ttl=86400)
 def get_nasdaq100():
 
-    tables = pd.read_html(
-        "https://en.wikipedia.org/wiki/Nasdaq-100"
-    )
+    try:
 
-    for table in tables:
+        tables = pd.read_html(
+            "https://en.wikipedia.org/wiki/Nasdaq-100"
+        )
 
-        if "Ticker" in table.columns:
+        for table in tables:
 
-            return (
-                table["Ticker"]
-                .tolist()
-            )
+            if "Ticker" in table.columns:
+
+                return (
+                    table["Ticker"]
+                    .tolist()
+                )
+
+    except:
+        pass
 
     return []
 
-
-# ─────────────────────────────────────────────────────────────
+# ============================================================
 # SINGLE STOCK UI
-# ─────────────────────────────────────────────────────────────
+# ============================================================
 
 def single_stock_ui():
 
@@ -623,6 +588,17 @@ def single_stock_ui():
         "Ticker",
         "AAPL"
     ).upper().strip()
+
+    valuation_mode = st.selectbox(
+        "Valuation Method",
+        [
+            "Combined",
+            "Graham",
+            "Lynch",
+            "DCF",
+            "Scenario DCF"
+        ]
+    )
 
     if st.button(
         "Calculate",
@@ -645,19 +621,71 @@ def single_stock_ui():
 
                 return
 
-            intrinsic, methods = (
+            all_intrinsic, methods = (
                 intrinsic_value(data)
             )
 
+            if valuation_mode == "Combined":
+
+                intrinsic = all_intrinsic
+
+            elif valuation_mode == "Graham":
+
+                intrinsic = methods.get(
+                    "Graham",
+                    np.nan
+                )
+
+            elif valuation_mode == "Lynch":
+
+                intrinsic = methods.get(
+                    "Lynch",
+                    np.nan
+                )
+
+            elif valuation_mode == "DCF":
+
+                intrinsic = methods.get(
+                    "DCF",
+                    np.nan
+                )
+
+            elif valuation_mode == "Scenario DCF":
+
+                scenarios = scenario_dcf(
+                    data
+                )
+
+                valid_vals = [
+                    v for v in scenarios.values()
+                    if not np.isnan(v)
+                ]
+
+                intrinsic = (
+                    np.mean(valid_vals)
+                    if valid_vals
+                    else np.nan
+                )
+
+                methods = scenarios
+
             price = data["Price"]
 
-            premium = (
-                (price - intrinsic)
-                / intrinsic
-            ) * 100
+            if (
+                np.isnan(intrinsic)
+                or intrinsic <= 0
+            ):
+                premium = np.nan
+            else:
+                premium = (
+                    (price - intrinsic)
+                    / intrinsic
+                ) * 100
 
             mos_price = (
                 intrinsic * 0.7
+                if not np.isnan(intrinsic)
+                else np.nan
             )
 
             c1, c2, c3, c4 = st.columns(4)
@@ -669,17 +697,29 @@ def single_stock_ui():
 
             c2.metric(
                 "Intrinsic",
-                f"${intrinsic:.2f}"
+                (
+                    f"${intrinsic:.2f}"
+                    if not np.isnan(intrinsic)
+                    else "N/A"
+                )
             )
 
             c3.metric(
                 "Premium",
-                f"{premium:+.1f}%"
+                (
+                    f"{premium:+.1f}%"
+                    if not np.isnan(premium)
+                    else "N/A"
+                )
             )
 
             c4.metric(
                 "Margin of Safety",
-                f"${mos_price:.2f}"
+                (
+                    f"${mos_price:.2f}"
+                    if not np.isnan(mos_price)
+                    else "N/A"
+                )
             )
 
             fig = valuation_chart(
@@ -722,6 +762,7 @@ def single_stock_ui():
                 k: (
                     round(v, 4)
                     if isinstance(v, float)
+                    and not np.isnan(v)
                     else v
                 )
                 for k, v in data.items()
@@ -729,46 +770,61 @@ def single_stock_ui():
 
             st.json(raw)
 
-
-# ─────────────────────────────────────────────────────────────
+# ============================================================
 # SCREENER
-# ─────────────────────────────────────────────────────────────
+# ============================================================
 
 def process_stock(symbol):
 
-    data = fetch_stock_data(
-        symbol
-    )
+    try:
 
-    if not data:
+        data = fetch_stock_data(
+            symbol
+        )
+
+        if not data:
+            return None
+
+        intrinsic, methods = (
+            intrinsic_value(data)
+        )
+
+        if np.isnan(intrinsic):
+            return None
+
+        price = data["Price"]
+
+        if intrinsic <= 0:
+            return None
+
+        premium = (
+            (price - intrinsic)
+            / intrinsic
+        ) * 100
+
+        return {
+
+            "Symbol": symbol,
+
+            "Price": price,
+
+            "Intrinsic": intrinsic,
+
+            "Premium %": premium,
+
+            "Sector": data["Sector"],
+
+            "PE": data["PE"],
+
+            "Growth %": (
+                data["Growth"] * 100
+            ),
+
+            "ROE": data["ROE"],
+        }
+
+    except:
         return None
-
-    intrinsic, methods = (
-        intrinsic_value(data)
-    )
-
-    if np.isnan(intrinsic):
-        return None
-
-    price = data["Price"]
-
-    premium = (
-        (price - intrinsic)
-        / intrinsic
-    ) * 100
-
-    return {
-        "Symbol": symbol,
-        "Price": price,
-        "Intrinsic": intrinsic,
-        "Premium %": premium,
-        "Sector": data["Sector"],
-        "PE": data["PE"],
-        "Growth %": (
-            data["Growth"] * 100
-        ),
-        "ROE": data["ROE"],
-    }
 
 
 def screener_ui():
@@ -785,9 +841,11 @@ def screener_ui():
     )
 
     if universe == "S&P 500":
+
         tickers = get_sp500()
 
     elif universe == "NASDAQ 100":
+
         tickers = get_nasdaq100()
 
     else:
@@ -800,13 +858,22 @@ def screener_ui():
         tickers = [
             x.strip().upper()
             for x in custom.split(",")
+            if x.strip()
         ]
+
+    if not tickers:
+
+        st.warning(
+            "Could not load universe."
+        )
+
+        return
 
     max_stocks = st.slider(
         "Max Stocks",
         10,
-        300,
-        50
+        min(300, len(tickers)),
+        min(50, len(tickers))
     )
 
     tickers = tickers[:max_stocks]
@@ -853,37 +920,42 @@ def screener_ui():
                     completed / len(tickers)
                 )
 
-                result = future.result()
+                try:
 
-                if result:
+                    result = future.result()
 
-                    premium = (
-                        result["Premium %"]
-                    )
+                    if result:
 
-                    include = False
-
-                    if (
-                        screen
-                        == "Undervalued"
-                        and premium < 0
-                    ):
-                        include = True
-
-                    elif (
-                        screen
-                        == "Overvalued"
-                        and premium > 0
-                    ):
-                        include = True
-
-                    elif screen == "All":
-                        include = True
-
-                    if include:
-                        results.append(
-                            result
+                        premium = (
+                            result["Premium %"]
                         )
+
+                        include = False
+
+                        if (
+                            screen
+                            == "Undervalued"
+                            and premium < 0
+                        ):
+                            include = True
+
+                        elif (
+                            screen
+                            == "Overvalued"
+                            and premium > 0
+                        ):
+                            include = True
+
+                        elif screen == "All":
+                            include = True
+
+                        if include:
+                            results.append(
+                                result
+                            )
+
+                except:
+                    continue
 
         if not results:
 
@@ -906,11 +978,17 @@ def screener_ui():
 
         st.dataframe(
             df.style.format({
+
                 "Price": "${:.2f}",
+
                 "Intrinsic": "${:.2f}",
+
                 "Premium %": "{:.1f}%",
+
                 "PE": "{:.1f}",
+
                 "Growth %": "{:.1f}%",
+
                 "ROE": "{:.1f}"
             }),
             use_container_width=True
@@ -944,20 +1022,11 @@ def screener_ui():
             mime="text/csv"
         )
 
-
-# ─────────────────────────────────────────────────────────────
+# ============================================================
 # MAIN
-# ─────────────────────────────────────────────────────────────
+# ============================================================
 
 def main():
-
-    st.set_page_config(
-        page_title=(
-            "Intrinsic Value Pro"
-        ),
-        page_icon="📈",
-        layout="wide"
-    )
 
     st.title(
         "📈 Intrinsic Value Pro"
@@ -980,14 +1049,23 @@ def main():
     )
 
     if mode == "Single Stock":
+
         single_stock_ui()
 
     else:
+
         screener_ui()
 
-
-if __name__ == "__main__":
-    main()
+# ============================================================
+# STREAMLIT MODULE ENTRY
+# ============================================================
 
 def render_intrinsic_value():
     main()
+
+# ============================================================
+# STANDALONE RUN
+# ============================================================
+
+if __name__ == "__main__":
+    render_intrinsic_value()
