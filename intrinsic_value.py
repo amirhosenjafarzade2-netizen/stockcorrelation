@@ -1,8 +1,21 @@
-# intrinsic_value.py - Stock Intrinsic Value Calculator and Screener
-# Version 2.0 - Enhanced with better UX, visualizations, and error handling
-# Calculates intrinsic value using multiple methods: Graham, Lynch (PEG-based), DCF, PE, Forward PE
-# Screens for overvalued/undervalued stocks with filtering options
-# Note: Intrinsic value calculations are estimates and involve assumptions. Not financial advice.
+# intrinsic_value_pro.py
+# Professional Intrinsic Value Calculator & Screener
+# Fixed + Stabilized + Production-Oriented Version
+#
+# Features:
+# - Correct Graham Number
+# - Stable DCF with debt/cash adjustments
+# - Lynch valuation
+# - Scenario DCF (Bear/Base/Bull)
+# - Median + outlier filtering
+# - Multi-stock screener
+# - Threaded fetching
+# - Safer parsing
+# - Proper CAGR
+# - Financial-sector handling
+# - Streamlit UI
+#
+# Educational purposes only. Not financial advice.
 
 import streamlit as st
 import yfinance as yf
@@ -10,771 +23,968 @@ import pandas as pd
 import numpy as np
 import requests
 from bs4 import BeautifulSoup
-import time
+from typing import Dict, List, Optional, Tuple
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import plotly.graph_objects as go
 import plotly.express as px
-from typing import List, Dict, Optional, Tuple
+import time
 from datetime import datetime
-from concurrent.futures import ThreadPoolExecutor, as_completed
 
-# ── Constants ──────────────────────────────────────────────────────────────
-DEFAULT_DISCOUNT_RATE = 0.10  # 10% discount rate for DCF
-DEFAULT_GROWTH_RATE = 0.05    # 5% perpetual growth for DCF
-DEFAULT_TERMINAL_MULTIPLE = 15.0  # Terminal P/E for DCF
-DEFAULT_RISK_FREE_RATE = 0.04  # 4% risk-free rate for Graham
-DEFAULT_EPS_GROWTH_YEARS = 5.0   # For Lynch PEG
+# ─────────────────────────────────────────────────────────────
+# CONFIG
+# ─────────────────────────────────────────────────────────────
 
-# ── Helper Functions ───────────────────────────────────────────────────────
+DCF_YEARS = 5
+
+BASE_DISCOUNT = 0.10
+BASE_TERMINAL = 0.03
+
+MAX_GROWTH = 0.15
+MIN_GROWTH = 0.03
+
+OUTLIER_MULTIPLE = 10
+
+MAX_THREADS = 10
+
+# ─────────────────────────────────────────────────────────────
+# HELPERS
+# ─────────────────────────────────────────────────────────────
+
+def safe_float(value):
+
+    try:
+
+        if value is None:
+            return np.nan
+
+        if isinstance(value, str):
+
+            value = (
+                value.replace("%", "")
+                .replace(",", "")
+                .replace("$", "")
+                .strip()
+            )
+
+            if value in ["-", "", "N/A"]:
+                return np.nan
+
+        return float(value)
+
+    except:
+        return np.nan
+
+
+def clamp_growth(growth):
+
+    return np.clip(
+        growth,
+        MIN_GROWTH,
+        MAX_GROWTH
+    )
+
+
+def remove_outliers(values, current_price):
+
+    cleaned = []
+
+    for v in values:
+
+        if np.isnan(v):
+            continue
+
+        if v <= 0:
+            continue
+
+        if v > current_price * OUTLIER_MULTIPLE:
+            continue
+
+        cleaned.append(v)
+
+    return cleaned
+
+
+# ─────────────────────────────────────────────────────────────
+# FINVIZ
+# ─────────────────────────────────────────────────────────────
 
 @st.cache_data(ttl=3600)
-def get_finviz_data(ticker: str) -> Dict:
-    """Scrape additional data from Finviz with better error handling"""
-    data = {}
+def get_finviz_data(ticker: str):
+
     headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+        "User-Agent": (
+            "Mozilla/5.0"
+        )
     }
+
     url = f"https://finviz.com/quote.ashx?t={ticker}"
-    
+
     try:
-        response = requests.get(url, headers=headers, timeout=10)
+
+        response = requests.get(
+            url,
+            headers=headers,
+            timeout=10
+        )
+
         response.raise_for_status()
-        soup = BeautifulSoup(response.text, 'html.parser')
-        
-        # Find the table with fundamentals
-        table = soup.find('table', {'class': 'snapshot-table2'})
+
+        soup = BeautifulSoup(
+            response.text,
+            "html.parser"
+        )
+
+        table = soup.find(
+            "table",
+            {"class": "snapshot-table2"}
+        )
+
+        data = {}
+
         if table:
-            rows = table.find_all('tr')
+
+            rows = table.find_all("tr")
+
             for row in rows:
-                cells = row.find_all('td')
+
+                cells = row.find_all("td")
+
                 for i in range(0, len(cells), 2):
+
                     if i + 1 < len(cells):
+
                         key = cells[i].text.strip()
-                        value = cells[i+1].text.strip()
-                        data[key] = value
-        
+                        val = cells[i + 1].text.strip()
+
+                        data[key] = val
+
         return data
-    except Exception as e:
-        # Silent fail for finviz data - we have yfinance as backup
+
+    except:
         return {}
 
-@st.cache_data(ttl=3600)
+
+# ─────────────────────────────────────────────────────────────
+# STOCK DATA
+# ─────────────────────────────────────────────────────────────
+
+@st.cache_data(ttl=1800)
 def fetch_stock_data(ticker: str) -> Optional[Dict]:
-    """Fetch stock data from yfinance and Finviz with improved error handling"""
+
     try:
-        yf_ticker = yf.Ticker(ticker)
-        info = yf_ticker.info
-        
-        if not info or 'currentPrice' not in info:
+
+        stock = yf.Ticker(ticker)
+
+        info = stock.info
+
+        price = safe_float(
+            info.get("currentPrice")
+        )
+
+        if np.isnan(price) or price <= 0:
             return None
-        
-        finviz_data = get_finviz_data(ticker)
-        
+
+        finviz = get_finviz_data(ticker)
+
+        market_cap = safe_float(
+            info.get("marketCap")
+        )
+
+        shares = safe_float(
+            info.get("sharesOutstanding")
+        )
+
+        total_debt = safe_float(
+            info.get("totalDebt")
+        )
+
+        cash = safe_float(
+            info.get("totalCash")
+        )
+
+        fcf = safe_float(
+            info.get("freeCashflow")
+        )
+
+        sector = info.get(
+            "sector",
+            "N/A"
+        )
+
         data = {
             "Symbol": ticker,
-            "Price": info.get("currentPrice", np.nan),
-            "Market Cap (B)": info.get("marketCap", np.nan) / 1e9 if info.get("marketCap") else np.nan,
-            "Trailing P/E": info.get("trailingPE", np.nan),
-            "Forward P/E": info.get("forwardPE", np.nan),
-            "PEG Ratio": info.get("pegRatio", np.nan),
-            "Book Value": info.get("bookValue", np.nan),
-            "EPS (TTM)": info.get("trailingEps", np.nan),
-            "Forward EPS": info.get("forwardEps", np.nan),
-            "Beta": info.get("beta", np.nan),
-            "Dividend Yield (%)": info.get("dividendYield", 0) * 100 if info.get("dividendYield") else 0,
-            "ROE (%)": float(finviz_data.get("ROE", "0%").rstrip('%')) if finviz_data.get("ROE") else np.nan,
-            "Revenue Growth (%)": float(finviz_data.get("Sales Y/Y", "0%").rstrip('%')) if finviz_data.get("Sales Y/Y") else np.nan,
-            "Earnings Growth (%)": float(finviz_data.get("EPS Y/Y", "0%").rstrip('%')) if finviz_data.get("EPS Y/Y") else np.nan,
-            "Free Cash Flow (B)": info.get("freeCashflow", np.nan) / 1e9 if info.get("freeCashflow") else np.nan,
-            "Debt to Equity": info.get("debtToEquity", np.nan) / 100 if info.get("debtToEquity") else np.nan,
-            "Current Ratio": info.get("currentRatio", np.nan),
-            "Sector": info.get("sector", "N/A"),
-            "Industry": info.get("industry", "N/A"),
+            "Price": price,
+            "EPS": safe_float(
+                info.get("trailingEps")
+            ),
+            "Book Value": safe_float(
+                info.get("bookValue")
+            ),
+            "Forward EPS": safe_float(
+                info.get("forwardEps")
+            ),
+            "Shares": shares,
+            "Market Cap": market_cap,
+            "Debt": total_debt,
+            "Cash": cash,
+            "FCF": fcf,
+            "Sector": sector,
+            "Industry": info.get(
+                "industry",
+                "N/A"
+            ),
+            "PE": safe_float(
+                info.get("trailingPE")
+            ),
+            "PEG": safe_float(
+                info.get("pegRatio")
+            ),
+            "Dividend Yield": (
+                safe_float(
+                    info.get("dividendYield")
+                ) * 100
+                if info.get("dividendYield")
+                else 0
+            ),
+            "ROE": safe_float(
+                finviz.get("ROE")
+            ),
         }
-        
-        # Fetch historical EPS growth if available
+
+        # EPS CAGR
+
+        growth = 0.05
+
         try:
-            income = yf_ticker.get_income_stmt()
-            if not income.empty:
-                if "BasicEPS" in income.index:
-                    eps_series = income.loc["BasicEPS"]
-                elif "DilutedEPS" in income.index:
-                    eps_series = income.loc["DilutedEPS"]
-                else:
-                    eps_series = None
-                    
-                if eps_series is not None and len(eps_series) > 1:
-                    eps_growth = eps_series.pct_change().mean() * 100
-                    data["Hist EPS Growth (%)"] = eps_growth
-                else:
-                    data["Hist EPS Growth (%)"] = data["Earnings Growth (%)"]
+
+            income = stock.get_income_stmt()
+
+            eps_series = None
+
+            if "DilutedEPS" in income.index:
+                eps_series = income.loc["DilutedEPS"]
+
+            elif "BasicEPS" in income.index:
+                eps_series = income.loc["BasicEPS"]
+
+            if eps_series is not None:
+
+                eps_series = (
+                    eps_series
+                    .dropna()
+                    [::-1]
+                )
+
+                if len(eps_series) >= 2:
+
+                    start_eps = eps_series.iloc[0]
+                    end_eps = eps_series.iloc[-1]
+
+                    years = len(eps_series) - 1
+
+                    if (
+                        start_eps > 0
+                        and end_eps > 0
+                    ):
+
+                        growth = (
+                            (
+                                end_eps
+                                / start_eps
+                            ) ** (
+                                1 / years
+                            ) - 1
+                        )
+
         except:
-            data["Hist EPS Growth (%)"] = data["Earnings Growth (%)"]
-        
+            pass
+
+        growth = clamp_growth(growth)
+
+        data["Growth"] = growth
+
         return data
-    except Exception as e:
+
+    except:
         return None
 
-def calculate_graham_intrinsic(data: Dict, risk_free_rate: float = DEFAULT_RISK_FREE_RATE) -> Tuple[float, str]:
-    """Graham Formula: sqrt(22.5 * EPS * BVPS) adjusted for risk-free rate"""
-    eps = data.get("EPS (TTM)", 0)
-    bvps = data.get("Book Value", 0)
-    
-    if eps <= 0 or bvps <= 0:
-        return np.nan, "Missing or invalid EPS/Book Value"
-    
-    adjustment = (4.4 / risk_free_rate) if risk_free_rate > 0 else 1
-    value = np.sqrt(22.5 * eps * bvps) * adjustment
-    return value, "Success"
 
-def calculate_lynch_intrinsic(data: Dict, growth_years: int = DEFAULT_EPS_GROWTH_YEARS) -> Tuple[float, str]:
-    """Lynch PEG-based: Fair PE = Growth Rate, then Price = EPS * Fair PE"""
-    eps = data.get("EPS (TTM)", 0)
-    growth = data.get("Hist EPS Growth (%)", 0)
-    
-    if eps <= 0:
-        return np.nan, "Missing or invalid EPS"
-    if growth <= 0:
-        return np.nan, "Missing or negative growth rate"
-    
-    # Lynch's fair value PE = growth rate
-    fair_pe = growth
-    value = eps * fair_pe
-    return value, "Success"
+# ─────────────────────────────────────────────────────────────
+# VALUATION METHODS
+# ─────────────────────────────────────────────────────────────
 
-def calculate_dcf_intrinsic(data: Dict, discount_rate: float = DEFAULT_DISCOUNT_RATE,
-                            growth_rate: float = DEFAULT_GROWTH_RATE,
-                            terminal_multiple: float = DEFAULT_TERMINAL_MULTIPLE) -> Tuple[float, str]:
-    """Simple DCF: Project FCF for 5 years, then terminal value"""
-    fcf = data.get("Free Cash Flow (B)", 0) * 1e9  # Convert back to full value
-    eps_growth = data.get("Hist EPS Growth (%)", 0) / 100
-    
-    if fcf <= 0:
-        return np.nan, "Missing or negative FCF"
-    
-    if discount_rate <= growth_rate:
-        return np.nan, "Discount rate must be > growth rate"
-    
-    # Project FCF for 5 years using EPS growth as proxy
-    projected_fcf = [fcf * (1 + eps_growth) ** y for y in range(1, 6)]
-    
-    # Discount projected FCF
-    pv_fcf = sum(p / (1 + discount_rate) ** y for y, p in enumerate(projected_fcf, 1))
-    
-    # Terminal value
-    terminal_fcf = projected_fcf[-1] * (1 + growth_rate)
-    terminal_value = terminal_fcf / (discount_rate - growth_rate)
-    pv_terminal = terminal_value / (1 + discount_rate) ** 5
-    
-    # Total value / shares (approx using market cap / price for shares outstanding)
-    price = data.get("Price", 1)
-    mc = data.get("Market Cap (B)", 0) * 1e9
-    
-    if price <= 0 or mc <= 0:
-        return np.nan, "Missing market cap or price data"
-    
-    shares = mc / price
-    total_value = pv_fcf + pv_terminal
-    value = total_value / shares
-    
-    return value, "Success"
+def graham_number(data):
 
-def calculate_pe_intrinsic(data: Dict) -> Tuple[float, str]:
-    """PE-based: Current Price (assumes current PE is fair value)"""
-    price = data.get("Price", 0)
-    if price <= 0:
-        return np.nan, "Missing price data"
-    return price, "Success"
+    eps = data["EPS"]
+    bv = data["Book Value"]
 
-def calculate_forward_pe_intrinsic(data: Dict) -> Tuple[float, str]:
-    """Forward PE: Forward EPS * Forward PE"""
-    forward_eps = data.get("Forward EPS", 0)
-    forward_pe = data.get("Forward P/E", np.nan)
-    
-    if forward_eps <= 0 or np.isnan(forward_pe):
-        return np.nan, "Missing Forward EPS or PE"
-    
-    value = forward_eps * forward_pe
-    return value, "Success"
+    if (
+        np.isnan(eps)
+        or np.isnan(bv)
+        or eps <= 0
+        or bv <= 0
+    ):
+        return np.nan
 
-def calculate_all_intrinsic_values(data: Dict, discount_rate: float, growth_rate: float,
-                                   terminal_multiple: float, risk_free_rate: float,
-                                   growth_years: int) -> Dict:
-    """Calculate all intrinsic values and return detailed breakdown"""
+    return np.sqrt(
+        22.5 * eps * bv
+    )
+
+
+def lynch_value(data):
+
+    eps = data["EPS"]
+    growth = data["Growth"] * 100
+    div_yield = data["Dividend Yield"]
+
+    if (
+        np.isnan(eps)
+        or eps <= 0
+    ):
+        return np.nan
+
+    fair_pe = np.clip(
+        growth + div_yield,
+        8,
+        30
+    )
+
+    return eps * fair_pe
+
+
+def dcf_value(
+    data,
+    discount_rate,
+    terminal_growth
+):
+
+    fcf = data["FCF"]
+    shares = data["Shares"]
+
+    if (
+        np.isnan(fcf)
+        or np.isnan(shares)
+        or fcf <= 0
+        or shares <= 0
+    ):
+        return np.nan
+
+    spread = (
+        discount_rate
+        - terminal_growth
+    )
+
+    if spread < 0.03:
+        return np.nan
+
+    growth = clamp_growth(
+        data["Growth"]
+    )
+
+    projected = []
+
+    current = fcf
+
+    for year in range(1, DCF_YEARS + 1):
+
+        current *= (1 + growth)
+
+        pv = current / (
+            (1 + discount_rate) ** year
+        )
+
+        projected.append(pv)
+
+    terminal_fcf = (
+        current
+        * (1 + terminal_growth)
+    )
+
+    terminal = (
+        terminal_fcf / spread
+    )
+
+    pv_terminal = terminal / (
+        (1 + discount_rate)
+        ** DCF_YEARS
+    )
+
+    enterprise_value = (
+        sum(projected)
+        + pv_terminal
+    )
+
+    debt = (
+        data["Debt"]
+        if not np.isnan(data["Debt"])
+        else 0
+    )
+
+    cash = (
+        data["Cash"]
+        if not np.isnan(data["Cash"])
+        else 0
+    )
+
+    equity_value = (
+        enterprise_value
+        - debt
+        + cash
+    )
+
+    intrinsic = (
+        equity_value / shares
+    )
+
+    return intrinsic
+
+
+# ─────────────────────────────────────────────────────────────
+# SCENARIO DCF
+# ─────────────────────────────────────────────────────────────
+
+def scenario_dcf(data):
+
+    scenarios = {
+        "Bear": {
+            "discount": 0.12,
+            "terminal": 0.02
+        },
+        "Base": {
+            "discount": 0.10,
+            "terminal": 0.03
+        },
+        "Bull": {
+            "discount": 0.08,
+            "terminal": 0.04
+        }
+    }
+
     results = {}
-    
-    graham_val, graham_msg = calculate_graham_intrinsic(data, risk_free_rate)
-    results["Graham"] = {"value": graham_val, "status": graham_msg}
-    
-    lynch_val, lynch_msg = calculate_lynch_intrinsic(data, int(growth_years))
-    results["Lynch"] = {"value": lynch_val, "status": lynch_msg}
-    
-    dcf_val, dcf_msg = calculate_dcf_intrinsic(data, discount_rate, growth_rate, terminal_multiple)
-    results["DCF"] = {"value": dcf_val, "status": dcf_msg}
-    
-    pe_val, pe_msg = calculate_pe_intrinsic(data)
-    results["PE"] = {"value": pe_val, "status": pe_msg}
-    
-    fwd_pe_val, fwd_pe_msg = calculate_forward_pe_intrinsic(data)
-    results["Forward PE"] = {"value": fwd_pe_val, "status": fwd_pe_msg}
-    
+
+    for name, params in scenarios.items():
+
+        results[name] = dcf_value(
+            data,
+            params["discount"],
+            params["terminal"]
+        )
+
     return results
 
-def calculate_average_intrinsic(data: Dict, methods: List[str],
-                                discount_rate: float, growth_rate: float,
-                                terminal_multiple: float, risk_free_rate: float,
-                                growth_years: int) -> float:
-    """Average of selected methods"""
-    all_results = calculate_all_intrinsic_values(
-        data, discount_rate, growth_rate, terminal_multiple, risk_free_rate, growth_years
+
+# ─────────────────────────────────────────────────────────────
+# COMBINED VALUE
+# ─────────────────────────────────────────────────────────────
+
+def intrinsic_value(data):
+
+    methods = {}
+
+    methods["Graham"] = graham_number(data)
+
+    methods["Lynch"] = lynch_value(data)
+
+    if (
+        data["Sector"]
+        not in [
+            "Financial Services",
+            "Banks"
+        ]
+    ):
+
+        methods["DCF"] = dcf_value(
+            data,
+            BASE_DISCOUNT,
+            BASE_TERMINAL
+        )
+
+    values = list(methods.values())
+
+    values = remove_outliers(
+        values,
+        data["Price"]
     )
-    
-    values = []
-    for method in methods:
-        if method in all_results and not np.isnan(all_results[method]["value"]):
-            values.append(all_results[method]["value"])
-    
-    return np.mean(values) if values else np.nan
 
-# ── Visualization Functions ────────────────────────────────────────────────
+    if not values:
+        intrinsic = np.nan
+    else:
+        intrinsic = np.median(values)
 
-def create_valuation_chart(data: Dict, intrinsic_values: Dict, current_price: float):
-    """Create a bar chart comparing different valuation methods"""
-    methods = []
-    values = []
+    return intrinsic, methods
+
+
+# ─────────────────────────────────────────────────────────────
+# VISUALS
+# ─────────────────────────────────────────────────────────────
+
+def valuation_chart(
+    current_price,
+    methods
+):
+
+    names = []
+    vals = []
     colors = []
-    
-    for method, result in intrinsic_values.items():
-        if not np.isnan(result["value"]):
-            methods.append(method)
-            values.append(result["value"])
-            # Color based on over/undervaluation
-            if result["value"] > current_price:
-                colors.append('green')
-            else:
-                colors.append('red')
-    
-    if not methods:
-        return None
-    
+
+    for k, v in methods.items():
+
+        if not np.isnan(v):
+
+            names.append(k)
+            vals.append(v)
+
+            colors.append(
+                "green"
+                if v > current_price
+                else "red"
+            )
+
     fig = go.Figure()
-    
-    # Add intrinsic value bars
-    fig.add_trace(go.Bar(
-        x=methods,
-        y=values,
-        name='Intrinsic Value',
-        marker_color=colors,
-        text=[f'${v:.2f}' for v in values],
-        textposition='outside'
-    ))
-    
-    # Add current price line
+
+    fig.add_trace(
+        go.Bar(
+            x=names,
+            y=vals,
+            marker_color=colors,
+            text=[
+                f"${x:.2f}"
+                for x in vals
+            ],
+            textposition="outside"
+        )
+    )
+
     fig.add_hline(
         y=current_price,
         line_dash="dash",
         line_color="blue",
-        annotation_text=f"Current Price: ${current_price:.2f}",
-        annotation_position="right"
+        annotation_text=(
+            f"Price ${current_price:.2f}"
+        )
     )
-    
+
     fig.update_layout(
-        title="Intrinsic Value Comparison",
-        xaxis_title="Valuation Method",
-        yaxis_title="Price ($)",
-        showlegend=False,
-        height=400
+        title="Valuation Methods",
+        height=450
     )
-    
+
     return fig
 
-def create_screening_scatter(df: pd.DataFrame):
-    """Create scatter plot for screening results"""
-    fig = px.scatter(
-        df,
-        x="Market Cap (B)",
-        y="Premium %",
-        size="Market Cap (B)",
-        color="Premium %",
-        hover_data=["Symbol", "Price", "Intrinsic", "Trailing P/E"],
-        color_continuous_scale=["green", "yellow", "red"],
-        title="Valuation Overview: Premium vs Market Cap"
-    )
-    
-    fig.add_hline(y=0, line_dash="dash", line_color="gray")
-    fig.update_layout(height=500)
-    
-    return fig
 
-# ── Universe Fetchers ──────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────
+# UNIVERSES
+# ─────────────────────────────────────────────────────────────
 
-@st.cache_data(ttl=3600)
-def get_finviz_tickers(sector: str) -> List[str]:
-    """Fetch all tickers from a Finviz sector"""
-    sector_map = {
-        "Technology": "sec_technology",
-        "Healthcare": "sec_healthcare",
-        "Financials": "sec_financial",
-        "Energy": "sec_energy",
-        "Consumer Discretionary": "sec_consumercyclical",
-        "Consumer Staples": "sec_consumernoncyclical",
-        "Industrials": "sec_industrials",
-        "Basic Materials": "sec_basicmaterials",
-        "Communication Services": "sec_communicationservices",
-        "Utilities": "sec_utilities",
-        "Real Estate": "sec_realestate"
-    }
-    
-    if sector not in sector_map:
-        return []
-    
-    tickers = []
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-    }
-    
-    for page_num in range(1, 51):
-        start = (page_num - 1) * 20 + 1
-        url = f"https://finviz.com/screener.ashx?v=111&f={sector_map[sector]}&r={start}"
-        
-        try:
-            response = requests.get(url, headers=headers, timeout=15)
-            soup = BeautifulSoup(response.text, 'html.parser')
-            found = False
-            for link in soup.find_all('a', {'class': 'tab-link'}):
-                ticker = link.text.strip()
-                if ticker and len(ticker) <= 5:
-                    tickers.append(ticker)
-                    found = True
-            if not found:
-                break
-            time.sleep(0.3)
-        except:
-            break
-    
-    return list(set(tickers))
+@st.cache_data(ttl=86400)
+def get_sp500():
 
-@st.cache_data(ttl=3600)
-def get_sp500_tickers() -> List[str]:
-    """Fetch S&P 500 tickers"""
-    try:
-        tables = pd.read_html("https://en.wikipedia.org/wiki/List_of_S%26P_500_companies")
-        df = tables[0]
-        return df["Symbol"].str.replace(".", "-", regex=False).tolist()
-    except:
-        return []
-
-@st.cache_data(ttl=3600)
-def get_nasdaq100_tickers() -> List[str]:
-    """Fetch NASDAQ 100 tickers"""
-    try:
-        tables = pd.read_html("https://en.wikipedia.org/wiki/Nasdaq-100")
-        for table in tables:
-            if 'Ticker' in table.columns:
-                return table['Ticker'].tolist()
-        return []
-    except:
-        return []
-
-# ── Main Render Function ───────────────────────────────────────────────────
-
-def render_intrinsic_value():
-    st.title("📊 Intrinsic Value Calculator & Stock Screener")
-    st.markdown("""
-    Calculate fair value estimates using multiple valuation methods and screen for 
-    mis-priced opportunities. Choose between analyzing a single stock or screening multiple stocks.
-    """)
-    
-    # Disclaimer
-    with st.expander("⚠️ Important Disclaimer"):
-        st.warning("""
-        **This tool is for educational purposes only and does not constitute financial advice.**
-        
-        - Intrinsic value calculations are estimates based on assumptions and historical data
-        - Past performance does not guarantee future results
-        - All investments carry risk - consult a financial advisor before making investment decisions
-        - Data accuracy depends on external sources and may contain errors
-        """)
-
-    # ── Mode Selection ─────────────────────────────────────────────────────
-    mode = st.radio(
-        "Select Mode",
-        ["🔍 Single Stock Calculator", "📈 Multi-Stock Screener"],
-        index=0,
-        horizontal=True
+    tables = pd.read_html(
+        "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
     )
 
-    # ── Common Parameters ──────────────────────────────────────────────────
-    with st.expander("⚙️ Valuation Assumptions", expanded=False):
-        st.markdown("**DCF Parameters**")
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            discount_rate = st.number_input(
-                "Discount Rate (WACC) %",
-                value=DEFAULT_DISCOUNT_RATE * 100,
-                min_value=0.0,
-                max_value=20.0,
-                step=0.5,
-                help="Weighted Average Cost of Capital - typical range 8-12%"
-            ) / 100
-        with col2:
-            growth_rate = st.number_input(
-                "Terminal Growth %",
-                value=DEFAULT_GROWTH_RATE * 100,
-                min_value=0.0,
-                max_value=10.0,
-                step=0.5,
-                help="Long-term growth rate - typically 2-5% (GDP growth)"
-            ) / 100
-        with col3:
-            terminal_multiple = st.number_input(
-                "Terminal Multiple",
-                value=DEFAULT_TERMINAL_MULTIPLE,
-                min_value=5.0,
-                max_value=30.0,
-                step=1.0,
-                help="Terminal P/E multiple - typical range 12-18"
-            )
-        
-        st.markdown("**Other Parameters**")
-        col4, col5 = st.columns(2)
-        with col4:
-            risk_free_rate = st.number_input(
-                "Risk-Free Rate %",
-                value=DEFAULT_RISK_FREE_RATE * 100,
-                min_value=0.0,
-                max_value=10.0,
-                step=0.5,
-                help="10-year Treasury yield - used in Graham formula"
-            ) / 100
-        with col5:
-            growth_years = st.number_input(
-                "Growth Years (Lynch)",
-                value=DEFAULT_EPS_GROWTH_YEARS,
-                min_value=1.0,
-                max_value=10.0,
-                step=1.0,
-                help="Years to project growth - Lynch uses 5 years typically"
+    df = tables[0]
+
+    return (
+        df["Symbol"]
+        .str.replace(".", "-", regex=False)
+        .tolist()
+    )
+
+
+@st.cache_data(ttl=86400)
+def get_nasdaq100():
+
+    tables = pd.read_html(
+        "https://en.wikipedia.org/wiki/Nasdaq-100"
+    )
+
+    for table in tables:
+
+        if "Ticker" in table.columns:
+
+            return (
+                table["Ticker"]
+                .tolist()
             )
 
-    methods = st.multiselect(
-        "Select Valuation Methods",
-        ["Graham", "Lynch", "DCF", "PE", "Forward PE"],
-        default=["Graham", "Lynch", "DCF"],
-        help="Multiple methods provide a range of estimates"
+    return []
+
+
+# ─────────────────────────────────────────────────────────────
+# SINGLE STOCK UI
+# ─────────────────────────────────────────────────────────────
+
+def single_stock_ui():
+
+    st.header("Single Stock")
+
+    ticker = st.text_input(
+        "Ticker",
+        "AAPL"
+    ).upper().strip()
+
+    if st.button(
+        "Calculate",
+        type="primary"
+    ):
+
+        with st.spinner(
+            "Analyzing..."
+        ):
+
+            data = fetch_stock_data(
+                ticker
+            )
+
+            if not data:
+
+                st.error(
+                    "Could not fetch data."
+                )
+
+                return
+
+            intrinsic, methods = (
+                intrinsic_value(data)
+            )
+
+            price = data["Price"]
+
+            premium = (
+                (price - intrinsic)
+                / intrinsic
+            ) * 100
+
+            mos_price = (
+                intrinsic * 0.7
+            )
+
+            c1, c2, c3, c4 = st.columns(4)
+
+            c1.metric(
+                "Price",
+                f"${price:.2f}"
+            )
+
+            c2.metric(
+                "Intrinsic",
+                f"${intrinsic:.2f}"
+            )
+
+            c3.metric(
+                "Premium",
+                f"{premium:+.1f}%"
+            )
+
+            c4.metric(
+                "Margin of Safety",
+                f"${mos_price:.2f}"
+            )
+
+            fig = valuation_chart(
+                price,
+                methods
+            )
+
+            st.plotly_chart(
+                fig,
+                use_container_width=True
+            )
+
+            st.subheader(
+                "Scenario DCF"
+            )
+
+            scenarios = scenario_dcf(
+                data
+            )
+
+            scenario_df = pd.DataFrame({
+                "Scenario":
+                list(scenarios.keys()),
+                "DCF":
+                list(scenarios.values())
+            })
+
+            st.dataframe(
+                scenario_df.style.format({
+                    "DCF": "${:.2f}"
+                }),
+                use_container_width=True
+            )
+
+            st.subheader(
+                "Company Data"
+            )
+
+            raw = {
+                k: (
+                    round(v, 4)
+                    if isinstance(v, float)
+                    else v
+                )
+                for k, v in data.items()
+            }
+
+            st.json(raw)
+
+
+# ─────────────────────────────────────────────────────────────
+# SCREENER
+# ─────────────────────────────────────────────────────────────
+
+def process_stock(symbol):
+
+    data = fetch_stock_data(
+        symbol
     )
-    
-    if not methods:
-        st.warning("⚠️ Please select at least one valuation method")
-        return
 
-    # ── Single Stock Mode ──────────────────────────────────────────────────
-    if "Single" in mode:
-        col1, col2 = st.columns([3, 1])
-        with col1:
-            ticker = st.text_input("Enter Stock Ticker Symbol", value="AAPL", max_chars=10).upper().strip()
-        with col2:
-            st.write("")
-            st.write("")
-            calculate_btn = st.button("📊 Calculate Value", type="primary", use_container_width=True)
-        
-        if calculate_btn and ticker:
-            with st.spinner(f"Analyzing {ticker}..."):
-                data = fetch_stock_data(ticker)
-                
-                if not data:
-                    st.error(f"❌ Could not fetch data for {ticker}. Please verify the ticker symbol.")
-                    return
-                
-                # Calculate all values
-                intrinsic_results = calculate_all_intrinsic_values(
-                    data, discount_rate, growth_rate,
-                    terminal_multiple, risk_free_rate, int(growth_years)
-                )
-                
-                # Calculate average of selected methods
-                intrinsic_avg = calculate_average_intrinsic(
-                    data, methods, discount_rate, growth_rate,
-                    terminal_multiple, risk_free_rate, int(growth_years)
-                )
-                
-                price = data["Price"]
-                
-                # Display Results
-                st.markdown("---")
-                st.subheader(f"📈 {ticker} Valuation Analysis")
-                
-                # Key Metrics
-                col1, col2, col3, col4 = st.columns(4)
-                with col1:
-                    st.metric("Current Price", f"${price:.2f}")
-                with col2:
-                    if not np.isnan(intrinsic_avg):
-                        st.metric("Avg Intrinsic Value", f"${intrinsic_avg:.2f}")
-                    else:
-                        st.metric("Avg Intrinsic Value", "N/A")
-                with col3:
-                    if not np.isnan(intrinsic_avg) and intrinsic_avg > 0:
-                        premium = ((price - intrinsic_avg) / intrinsic_avg * 100)
-                        delta_color = "inverse" if premium > 0 else "normal"
-                        st.metric("Valuation", f"{premium:+.1f}%", delta=None)
-                    else:
-                        st.metric("Valuation", "N/A")
-                with col4:
-                    if not np.isnan(intrinsic_avg):
-                        if price < intrinsic_avg * 0.9:
-                            st.success("🟢 Undervalued")
-                        elif price > intrinsic_avg * 1.1:
-                            st.error("🔴 Overvalued")
-                        else:
-                            st.info("🟡 Fair Value")
-                
-                # Detailed Breakdown
-                st.markdown("### 📊 Method Breakdown")
-                method_cols = st.columns(len(methods))
-                for idx, method in enumerate(methods):
-                    with method_cols[idx]:
-                        if method in intrinsic_results:
-                            result = intrinsic_results[method]
-                            if not np.isnan(result["value"]):
-                                st.metric(
-                                    method,
-                                    f"${result['value']:.2f}",
-                                    delta=f"{((price - result['value']) / result['value'] * 100):+.1f}%"
-                                )
-                            else:
-                                st.metric(method, "N/A")
-                                st.caption(f"⚠️ {result['status']}")
-                
-                # Visualization
-                if not np.isnan(intrinsic_avg):
-                    fig = create_valuation_chart(data, intrinsic_results, price)
-                    if fig:
-                        st.plotly_chart(fig, use_container_width=True)
-                
-                # Company Information
-                st.markdown("### 🏢 Company Information")
-                info_col1, info_col2, info_col3 = st.columns(3)
-                with info_col1:
-                    st.write(f"**Sector:** {data.get('Sector', 'N/A')}")
-                    st.write(f"**Industry:** {data.get('Industry', 'N/A')}")
-                    st.write(f"**Market Cap:** ${data.get('Market Cap (B)', 0):.2f}B")
-                with info_col2:
-                    st.write(f"**P/E Ratio:** {data.get('Trailing P/E', np.nan):.2f}" if not np.isnan(data.get('Trailing P/E', np.nan)) else "**P/E Ratio:** N/A")
-                    st.write(f"**PEG Ratio:** {data.get('PEG Ratio', np.nan):.2f}" if not np.isnan(data.get('PEG Ratio', np.nan)) else "**PEG Ratio:** N/A")
-                    st.write(f"**Beta:** {data.get('Beta', np.nan):.2f}" if not np.isnan(data.get('Beta', np.nan)) else "**Beta:** N/A")
-                with info_col3:
-                    st.write(f"**ROE:** {data.get('ROE (%)', np.nan):.1f}%" if not np.isnan(data.get('ROE (%)', np.nan)) else "**ROE:** N/A")
-                    st.write(f"**Debt/Equity:** {data.get('Debt to Equity', np.nan):.2f}" if not np.isnan(data.get('Debt to Equity', np.nan)) else "**Debt/Equity:** N/A")
-                    st.write(f"**Div Yield:** {data.get('Dividend Yield (%)', 0):.2f}%")
-                
-                # Raw Data
-                with st.expander("📋 View Raw Data"):
-                    st.json(data)
+    if not data:
+        return None
 
-    # ── Screener Mode ──────────────────────────────────────────────────────
+    intrinsic, methods = (
+        intrinsic_value(data)
+    )
+
+    if np.isnan(intrinsic):
+        return None
+
+    price = data["Price"]
+
+    premium = (
+        (price - intrinsic)
+        / intrinsic
+    ) * 100
+
+    return {
+        "Symbol": symbol,
+        "Price": price,
+        "Intrinsic": intrinsic,
+        "Premium %": premium,
+        "Sector": data["Sector"],
+        "PE": data["PE"],
+        "Growth %": (
+            data["Growth"] * 100
+        ),
+        "ROE": data["ROE"],
+    }
+
+
+def screener_ui():
+
+    st.header("Multi-Stock Screener")
+
+    universe = st.selectbox(
+        "Universe",
+        [
+            "S&P 500",
+            "NASDAQ 100",
+            "Custom"
+        ]
+    )
+
+    if universe == "S&P 500":
+        tickers = get_sp500()
+
+    elif universe == "NASDAQ 100":
+        tickers = get_nasdaq100()
+
     else:
-        with st.form("screener_form"):
-            st.subheader("🔍 Screener Configuration")
-            
-            col1, col2 = st.columns(2)
-            
-            with col1:
-                universe_type = st.selectbox(
-                    "Stock Universe",
-                    ["S&P 500", "NASDAQ 100", "Sector", "Custom List"]
-                )
-                
-                universe = []
-                if universe_type == "S&P 500":
-                    universe = get_sp500_tickers()
-                elif universe_type == "NASDAQ 100":
-                    universe = get_nasdaq100_tickers()
-                elif universe_type == "Sector":
-                    sector = st.selectbox(
-                        "Select Sector",
-                        ["Technology", "Healthcare", "Financials", "Energy", "Consumer Discretionary",
-                         "Consumer Staples", "Industrials", "Basic Materials", "Communication Services",
-                         "Utilities", "Real Estate"]
-                    )
-                    universe = get_finviz_tickers(sector)
-                elif universe_type == "Custom List":
-                    custom_tickers = st.text_area(
-                        "Enter Tickers (comma-separated)",
-                        value="AAPL,MSFT,GOOGL,AMZN,TSLA",
-                        height=100
-                    )
-                    universe = [t.strip().upper() for t in custom_tickers.split(",") if t.strip()]
-                
-                max_stocks = st.slider(
-                    "Max Stocks to Screen",
-                    min_value=10,
-                    max_value=500,
-                    value=50,
-                    step=10,
-                    help="More stocks = longer processing time"
-                )
-            
-            with col2:
-                screen_type = st.radio(
-                    "Screen For",
-                    ["Overvalued (Price > Intrinsic)", "Undervalued (Price < Intrinsic)", "All Stocks"],
-                    help="Filter results by valuation"
-                )
-                
-                mc_min = st.number_input(
-                    "Min Market Cap (B)",
-                    value=1.0,
-                    min_value=0.0,
-                    help="Filter out small-cap stocks"
-                )
-                
-                mc_max = st.number_input(
-                    "Max Market Cap (B)",
-                    value=None,
-                    min_value=0.0,
-                    help="Optional: Filter out mega-cap stocks"
-                )
-                
-                sort_by = st.selectbox(
-                    "Sort By",
-                    ["Premium %", "Market Cap (B)", "Intrinsic Value", "Price"],
-                    index=0
-                )
-                
-                ascending = st.checkbox("Ascending Order", value=False)
-            
-            run = st.form_submit_button("🚀 RUN SCREENER", type="primary", use_container_width=True)
 
-        if not run:
-            return
+        custom = st.text_area(
+            "Tickers",
+            "AAPL,MSFT,GOOGL"
+        )
 
-        # Limit universe
-        universe = universe[:max_stocks]
-        
-        if not universe:
-            st.error("❌ No stocks found in selected universe")
-            return
+        tickers = [
+            x.strip().upper()
+            for x in custom.split(",")
+        ]
 
-        st.markdown("---")
-        st.markdown(f"### 📈 Screening {len(universe)} Stocks...")
-        
+    max_stocks = st.slider(
+        "Max Stocks",
+        10,
+        300,
+        50
+    )
+
+    tickers = tickers[:max_stocks]
+
+    screen = st.selectbox(
+        "Screen",
+        [
+            "Undervalued",
+            "Overvalued",
+            "All"
+        ]
+    )
+
+    if st.button(
+        "Run Screener",
+        type="primary"
+    ):
+
         results = []
-        progress_bar = st.progress(0)
-        status_text = st.empty()
-        error_count = 0
-        
-        for i, symbol in enumerate(universe):
-            progress_bar.progress((i + 1) / len(universe))
-            status_text.text(f"Analyzing {symbol}... ({i+1}/{len(universe)}) | Errors: {error_count}")
-            
-            data = fetch_stock_data(symbol)
-            if data:
-                # Apply market cap filter early
-                mc = data["Market Cap (B)"]
-                if np.isnan(mc) or (mc_min and mc < mc_min) or (mc_max and mc > mc_max):
-                    continue
-                
-                intrinsic = calculate_average_intrinsic(
-                    data, methods, discount_rate, growth_rate,
-                    terminal_multiple, risk_free_rate, int(growth_years)
-                )
-                price = data["Price"]
-                
-                if not np.isnan(intrinsic) and intrinsic > 0:
-                    premium = (price - intrinsic) / intrinsic * 100
-                    
-                    # Apply screening filter
-                    include = False
-                    if "Overvalued" in screen_type and premium > 0:
-                        include = True
-                    elif "Undervalued" in screen_type and premium < 0:
-                        include = True
-                    elif "All" in screen_type:
-                        include = True
-                    
-                    if include:
-                        result = {
-                            "Symbol": symbol,
-                            "Price": price,
-                            "Intrinsic": intrinsic,
-                            "Premium %": premium,
-                            "Market Cap (B)": mc,
-                            "Trailing P/E": data.get("Trailing P/E"),
-                            "PEG Ratio": data.get("PEG Ratio"),
-                            "ROE (%)": data.get("ROE (%)"),
-                            "EPS Growth (%)": data.get("Hist EPS Growth (%)"),
-                            "Sector": data.get("Sector", "N/A")
-                        }
-                        results.append(result)
-            else:
-                error_count += 1
-            
-            # Rate limiting
-            if (i + 1) % 10 == 0:
-                time.sleep(0.5)
 
-        progress_bar.empty()
-        status_text.empty()
+        progress = st.progress(0)
+
+        with ThreadPoolExecutor(
+            max_workers=MAX_THREADS
+        ) as executor:
+
+            futures = {
+                executor.submit(
+                    process_stock,
+                    t
+                ): t
+                for t in tickers
+            }
+
+            completed = 0
+
+            for future in as_completed(
+                futures
+            ):
+
+                completed += 1
+
+                progress.progress(
+                    completed / len(tickers)
+                )
+
+                result = future.result()
+
+                if result:
+
+                    premium = (
+                        result["Premium %"]
+                    )
+
+                    include = False
+
+                    if (
+                        screen
+                        == "Undervalued"
+                        and premium < 0
+                    ):
+                        include = True
+
+                    elif (
+                        screen
+                        == "Overvalued"
+                        and premium > 0
+                    ):
+                        include = True
+
+                    elif screen == "All":
+                        include = True
+
+                    if include:
+                        results.append(
+                            result
+                        )
 
         if not results:
-            st.error(f"❌ No stocks found matching criteria. ({error_count} errors)")
+
+            st.warning(
+                "No stocks found."
+            )
+
             return
 
         df = pd.DataFrame(results)
-        df = df.sort_values(sort_by, ascending=ascending, na_position='last')
 
-        # Display Summary
-        st.markdown("---")
-        col1, col2, col3, col4 = st.columns(4)
-        with col1:
-            st.metric("Stocks Found", len(df))
-        with col2:
-            st.metric("Avg Premium", f"{df['Premium %'].mean():.1f}%")
-        with col3:
-            overvalued = len(df[df['Premium %'] > 0])
-            st.metric("Overvalued", overvalued)
-        with col4:
-            undervalued = len(df[df['Premium %'] < 0])
-            st.metric("Undervalued", undervalued)
+        df = df.sort_values(
+            "Premium %",
+            ascending=True
+        )
 
-        # Visualization
-        if len(df) > 0:
-            fig = create_screening_scatter(df)
-            st.plotly_chart(fig, use_container_width=True)
+        st.subheader(
+            "Results"
+        )
 
-        # Results Table
-        st.markdown("### 📊 Detailed Results")
         st.dataframe(
             df.style.format({
                 "Price": "${:.2f}",
                 "Intrinsic": "${:.2f}",
                 "Premium %": "{:.1f}%",
-                "Market Cap (B)": "{:.1f}",
-                "Trailing P/E": "{:.2f}",
-                "PEG Ratio": "{:.2f}",
-                "ROE (%)": "{:.1f}",
-                "EPS Growth (%)": "{:.1f}"
-            }).background_gradient(subset=['Premium %'], cmap='RdYlGn_r'),
-            use_container_width=True,
-            height=400
-        )
-
-        # Download
-        csv = df.to_csv(index=False)
-        st.download_button(
-            label="📥 Download Results as CSV",
-            data=csv,
-            file_name=f"stock_screener_{screen_type.lower().replace(' ', '_')}_{datetime.now().strftime('%Y%m%d_%H%M')}.csv",
-            mime="text/csv",
+                "PE": "{:.1f}",
+                "Growth %": "{:.1f}%",
+                "ROE": "{:.1f}"
+            }),
             use_container_width=True
         )
 
-# For local testing
-if __name__ == "__main__":
+        fig = px.scatter(
+            df,
+            x="Growth %",
+            y="Premium %",
+            size="PE",
+            hover_name="Symbol",
+            color="Premium %"
+        )
+
+        st.plotly_chart(
+            fig,
+            use_container_width=True
+        )
+
+        csv = df.to_csv(
+            index=False
+        )
+
+        st.download_button(
+            "Download CSV",
+            csv,
+            file_name=(
+                f"screener_"
+                f"{datetime.now().strftime('%Y%m%d')}.csv"
+            ),
+            mime="text/csv"
+        )
+
+
+# ─────────────────────────────────────────────────────────────
+# MAIN
+# ─────────────────────────────────────────────────────────────
+
+def main():
+
     st.set_page_config(
-        page_title="Intrinsic Value Calculator",
-        page_icon="📊",
-        layout="wide",
-        initial_sidebar_state="collapsed"
+        page_title=(
+            "Intrinsic Value Pro"
+        ),
+        page_icon="📈",
+        layout="wide"
     )
-    render_intrinsic_value()
+
+    st.title(
+        "📈 Intrinsic Value Pro"
+    )
+
+    st.markdown("""
+    Professional intrinsic value calculator
+    using stabilized valuation models.
+
+    Educational purposes only.
+    """)
+
+    mode = st.radio(
+        "Mode",
+        [
+            "Single Stock",
+            "Screener"
+        ],
+        horizontal=True
+    )
+
+    if mode == "Single Stock":
+        single_stock_ui()
+
+    else:
+        screener_ui()
+
+
+if __name__ == "__main__":
+    main()
