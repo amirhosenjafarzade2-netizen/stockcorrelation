@@ -1,4 +1,3 @@
-
 # advanced_valuation.py
 # FIXED VERSION
 # Major fixes:
@@ -756,4 +755,3 @@ if __name__ == "__main__":
     )
 
     render_advanced_valuation()
-
