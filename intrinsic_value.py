@@ -988,3 +988,6 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+def render_intrinsic_value():
+    main()
