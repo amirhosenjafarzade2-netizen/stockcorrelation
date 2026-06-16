@@ -208,7 +208,7 @@ def get_available_modules() -> Dict[str, dict]:
     # ── NEW: Intrinsic Value Calculator ──────────────────────────────────────
     try:
         from intrinsic_value import render_intrinsic_value
-        modules["💰 valuation & screener"] = {
+        modules["💰 intrinsic value & screener"] = {
             "func": render_intrinsic_value,
             "desc": "Calculate fair/intrinsic value (Graham, PEG, DCF, P/E) + screen overvalued stocks",
             "uses_context": False
