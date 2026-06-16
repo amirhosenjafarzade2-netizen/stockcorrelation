@@ -1226,16 +1226,16 @@ def get_recession_indicators(data_dict: Dict[str, pd.DataFrame], spreads: pd.Dat
             weights[col] = 3.0 if col in high_weight else 2.0 if col in medium_weight else 1.0
 
         weighted_sum = None
-total_weight = 0.0
+        total_weight = 0.0
 
-for col in indicators.columns:
-    w = weights.get(col, 1.0)
-    weighted_col = indicators[col] * w
+        for col in indicators.columns:
+        w = weights.get(col, 1.0)
+        weighted_col = indicators[col] * w
     if weighted_sum is None:
         weighted_sum = weighted_col
     else:
         weighted_sum = weighted_sum.add(weighted_col, fill_value=0)
-    total_weight += w
+        total_weight += w
 
 if weighted_sum is not None and total_weight > 0:
     indicators['Recession_Probability'] = (weighted_sum / total_weight * 100).clip(0, 100)
@@ -2143,7 +2143,7 @@ def economics_module(analysis_context: Optional[Dict] = None):
                 delta = None
                 if len(recession_indicators) > 30:
                     past_prob = recession_indicators['Recession_Probability'].iloc[-30]
-delta = f"{current_prob - past_prob:+.1f}%" if pd.notna(past_prob) and pd.notna(current_prob) else None
+                    delta = f"{current_prob - past_prob:+.1f}%" if pd.notna(past_prob) and pd.notna(current_prob) else None
                 st.metric("Recession Probability", f"{current_prob:.1f}%", delta=delta)
 
             with c2:
