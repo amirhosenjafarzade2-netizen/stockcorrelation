@@ -193,15 +193,6 @@ def get_available_modules() -> Dict[str, dict]:
     except ImportError:
         pass
  
-    try:
-        from screener import render_screener
-        modules["🔍 Stock Screener"] = {
-            "func": render_screener,
-            "desc": "Screen stocks based on fundamental criteria",
-            "uses_context": False
-        }
-    except ImportError:
-        pass
  
     try:
         from excel_export import render_excel_export
@@ -213,17 +204,7 @@ def get_available_modules() -> Dict[str, dict]:
     except ImportError:
         pass
  
-    # ── New module: Advanced Valuation + S&P 500 Undervalued Screener ────────
-    try:
-        from advanced_valuation import render_advanced_valuation
-        modules["💹 Advanced Valuation & Screener"] = {
-            "func": render_advanced_valuation,
-            "desc": "Multi-model intrinsic value, Monte Carlo, sensitivity + S&P 500 undervalued screener (Yahoo + Finviz)",
-            "uses_context": False
-        }
-    except ImportError as e:
-        st.warning(f"Could not load Advanced Valuation module: {e}")
- 
+
     # ── NEW: Intrinsic Value Calculator ──────────────────────────────────────
     try:
         from intrinsic_value import render_intrinsic_value
