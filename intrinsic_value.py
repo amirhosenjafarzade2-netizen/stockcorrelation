@@ -1778,5 +1778,3 @@ render_intrinsic_value = main
 
 if __name__ == "__main__":
     main()
-ENDOFFILE
-echo "Written: $(wc -l < /mnt/user-data/outputs/intrinsic_value.py) lines"
