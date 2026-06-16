@@ -1206,7 +1206,7 @@ def render_fundamental_comparison(tickers: List[str] = None) -> None:
                         "Market Cap": "${:,.0f}",
                         "Revenue Growth %": "{:.2f}"
                     }, na_rep="-")
-                    .applymap(color_valuation, subset=["P/E", "P/B", "P/S", "EV/EBITDA", "PEG"]),
+                    .map(color_valuation, subset=["P/E", "P/B", "P/S", "EV/EBITDA", "PEG"]),
                     use_container_width=True
                 )
                 
