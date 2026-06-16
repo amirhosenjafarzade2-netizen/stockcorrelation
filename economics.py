@@ -213,7 +213,7 @@ MIN_YEARS_FOR_CYCLE = 5
 CYCLE_PLAYBOOK = {
     "Early Expansion": {
         "description": "Economy emerging from trough. Growth accelerating, unemployment falling, credit loosening.",
-        "typical_duration": "12–18 months",
+        "typical_duration": "12-18 months",
         "next_phase": "Late Expansion",
         "next_phase_signals": [
             "Unemployment approaches multi-decade lows",
@@ -255,7 +255,7 @@ CYCLE_PLAYBOOK = {
     },
     "Late Expansion": {
         "description": "Peak growth. Labor markets tight, inflation rising, Fed tightening. Economy running hot.",
-        "typical_duration": "12–24 months",
+        "typical_duration": "12-24 months",
         "next_phase": "Early Contraction",
         "next_phase_signals": [
             "Yield curve inverts (10Y-2Y < 0)",
@@ -298,7 +298,7 @@ CYCLE_PLAYBOOK = {
     },
     "Early Contraction": {
         "description": "Growth decelerating sharply. Credit tightening, layoffs beginning. Possible recession ahead.",
-        "typical_duration": "6–12 months",
+        "typical_duration": "6-12 months",
         "next_phase": "Late Contraction",
         "next_phase_signals": [
             "GDP growth turns negative",
@@ -341,7 +341,7 @@ CYCLE_PLAYBOOK = {
     },
     "Late Contraction": {
         "description": "Recession underway. Maximum pessimism. Unemployment high, GDP negative, but leading indicators may be bottoming.",
-        "typical_duration": "6–12 months",
+        "typical_duration": "6-12 months",
         "next_phase": "Early Expansion",
         "next_phase_signals": [
             "LEI starts recovering for 2+ consecutive months",
@@ -384,13 +384,13 @@ CYCLE_PLAYBOOK = {
     },
     "Expansion": {
         "description": "Economic expansion phase. GDP growing, unemployment falling, positive business conditions.",
-        "typical_duration": "24–48 months",
+        "typical_duration": "24-48 months",
         "next_phase": "Contraction",
         "next_phase_signals": [
             "Yield curve inversion",
             "Leading indicators turning negative",
             "Unemployment bottoming",
-            "Fed policy tightening",
+            "Fed policy tightening"
         ],
         "macro_backdrop": "Growth positive, credit available, confidence elevated.",
         "asset_recommendations": {
@@ -406,7 +406,7 @@ CYCLE_PLAYBOOK = {
     },
     "Contraction": {
         "description": "Economic contraction phase. Growth slowing or negative, rising unemployment, tightening financial conditions.",
-        "typical_duration": "6–18 months",
+        "typical_duration": "6-18 months",
         "next_phase": "Expansion",
         "next_phase_signals": [
             "Leading indicators bottoming",
@@ -506,7 +506,6 @@ def resample_to_monthly(series: pd.Series) -> pd.Series:
     if freq == 'daily' or freq == 'weekly':
         return series.resample('ME').mean()
     elif freq == 'quarterly':
-        # Forward-fill quarterly data to monthly
         return series.resample('ME').ffill()
     return series.resample('ME').last()
 
@@ -545,7 +544,6 @@ def calculate_correlations(data_dict: Dict[str, pd.DataFrame]) -> pd.DataFrame:
     for metric, df in data_dict.items():
         if not df.empty and len(df.columns) > 0:
             s = df.iloc[:, 0]
-            # Resample to monthly for alignment
             combined[metric] = resample_to_monthly(s)
 
     if not combined.empty and len(combined.columns) > 1:
@@ -581,14 +579,12 @@ def compute_health_scorecard(data_dict: Dict[str, pd.DataFrame], spreads: pd.Dat
         if m in data_dict and not data_dict[m].empty:
             inf = data_dict[m].iloc[:, 0]
             yoy = calculate_growth_rate(inf, 12).iloc[-1] if len(inf) > 12 else 3
-            # Score peaks at 2%, falls off for high or low inflation
             scores['Inflation'] = min(100, max(0, 100 - abs(yoy - 2) * 18))
             break
 
     # Yield curve health (0-100)
     if not spreads.empty and '10Y-2Y' in spreads.columns:
         sp = spreads['10Y-2Y'].iloc[-1]
-        # Positive steep curve = good, flat/inverted = bad
         scores['Yield Curve'] = min(100, max(0, (sp + 1) / 3 * 100))
 
     # Consumer confidence (0-100)
@@ -616,7 +612,6 @@ def plot_health_scorecard(scores: Dict) -> go.Figure:
     dims = [k for k in scores if k != 'Overall']
     vals = [scores[k] for k in dims]
 
-    # Close the polygon
     dims_closed = dims + [dims[0]]
     vals_closed = vals + [vals[0]]
 
@@ -632,7 +627,6 @@ def plot_health_scorecard(scores: Dict) -> go.Figure:
         marker=dict(size=7)
     ))
 
-    # Reference ring at 50
     ref_vals = [50] * len(dims_closed)
     fig.add_trace(go.Scatterpolar(
         r=ref_vals,
@@ -834,16 +828,11 @@ def plot_yield_spreads(spreads: pd.DataFrame, inversions: Dict) -> go.Figure:
 def detect_economic_cycle(data_dict: Dict[str, pd.DataFrame]) -> Tuple[pd.Series, Dict]:
     """
     Detect economic cycle phases using multiple indicators.
-
-    Key fix: All series are resampled to monthly frequency before alignment,
-    avoiding the 'only 11 data points' problem caused by quarterly GDP data
-    dominating the intersection of date ranges.
+    All series are resampled to monthly frequency before alignment.
     """
 
     indicators = pd.DataFrame()
     available_indicators = []
-
-    # --- Resample everything to monthly first ---
 
     def add_monthly(name: str, series: pd.Series):
         """Add a series to indicators after resampling to monthly."""
@@ -883,7 +872,6 @@ def detect_economic_cycle(data_dict: Dict[str, pd.DataFrame]) -> Tuple[pd.Series
         if len(lei_growth) > 0:
             add_monthly('LEI_Growth', lei_growth)
         else:
-            # Fallback: use level if we don't have enough for YoY
             add_monthly('LEI_Level', lei)
 
     # Payrolls (YoY growth)
@@ -1079,7 +1067,6 @@ def plot_economic_cycle(phases: pd.Series, analysis: Dict) -> go.Figure:
         'Unknown': '#D3D3D3'
     }
 
-    # Draw filled phase segments
     current_phase = None
     segment_start = None
     composite_full = analysis['composite_index']
@@ -1216,30 +1203,28 @@ def get_recession_indicators(data_dict: Dict[str, pd.DataFrame], spreads: pd.Dat
             indicators['Housing_Declining'] = (housing_6m_change < -10).astype(int)
 
     if not indicators.empty:
-        weights = {}
         high_weight = ['Sahm_Rule', 'Yield_Curve_Inverted', 'GDP_Declining', 'GDP_Growth_Negative']
         medium_weight = ['LEI_Declining', 'IP_Declining', 'Unemployment_Rising', 'Payrolls_Declining']
-        low_weight = ['Sentiment_Collapse', 'Retail_Declining', 'Housing_Declining', 'Claims_Elevated',
-                      'LEI_3M_Declining', 'IP_3M_Declining', 'Sentiment_Low', 'Yield_10Y3M_Inverted']
 
+        weights = {}
         for col in indicators.columns:
             weights[col] = 3.0 if col in high_weight else 2.0 if col in medium_weight else 1.0
 
-       # AFTER (fixed):
-weighted_sum = None
-total_weight = 0.0
+        # Fixed weighted sum — avoids Python sum() starting from int 0 which breaks pandas alignment
+        weighted_sum = None
+        total_weight = 0.0
 
-for col in indicators.columns:
-    w = weights.get(col, 1.0)
-    weighted_col = indicators[col] * w
-    if weighted_sum is None:
-        weighted_sum = weighted_col
-    else:
-        weighted_sum = weighted_sum.add(weighted_col, fill_value=0)
-    total_weight += w
+        for col in indicators.columns:
+            w = weights.get(col, 1.0)
+            weighted_col = indicators[col] * w
+            if weighted_sum is None:
+                weighted_sum = weighted_col
+            else:
+                weighted_sum = weighted_sum.add(weighted_col, fill_value=0)
+            total_weight += w
 
-    if weighted_sum is not None and total_weight > 0:
-    indicators['Recession_Probability'] = (weighted_sum / total_weight * 100).clip(0, 100)
+        if weighted_sum is not None and total_weight > 0:
+            indicators['Recession_Probability'] = (weighted_sum / total_weight * 100).clip(0, 100)
 
     return indicators
 
@@ -1278,27 +1263,28 @@ def generate_interpretation(
         indicator_cols = [c for c in recession_indicators.columns if c != 'Recession_Probability']
         active_signals = sum(recession_indicators[col].iloc[-1] == 1 for col in indicator_cols)
 
-        if recession_prob >= 60:
-            interpretation['warnings'].append(
-                f"🔴 **High Recession Risk ({recession_prob:.0f}%)**: {active_signals} of {len(indicator_cols)} indicators flashing warning signs."
-            )
-        elif recession_prob >= 40:
-            interpretation['warnings'].append(
-                f"🟠 **Elevated Recession Risk ({recession_prob:.0f}%)**: Multiple indicators signaling stress. Caution warranted."
-            )
-        elif recession_prob >= 20:
-            interpretation['key_findings'].append(
-                f"🟡 **Moderate Recession Risk ({recession_prob:.0f}%)**: Some warning signs but not widespread."
-            )
-        else:
-            interpretation['positives'].append(
-                f"🟢 **Low Recession Risk ({recession_prob:.0f}%)**: Most indicators remain healthy."
-            )
+        if pd.notna(recession_prob):
+            if recession_prob >= 60:
+                interpretation['warnings'].append(
+                    f"🔴 **High Recession Risk ({recession_prob:.0f}%)**: {active_signals} of {len(indicator_cols)} indicators flashing warning signs."
+                )
+            elif recession_prob >= 40:
+                interpretation['warnings'].append(
+                    f"🟠 **Elevated Recession Risk ({recession_prob:.0f}%)**: Multiple indicators signaling stress. Caution warranted."
+                )
+            elif recession_prob >= 20:
+                interpretation['key_findings'].append(
+                    f"🟡 **Moderate Recession Risk ({recession_prob:.0f}%)**: Some warning signs but not widespread."
+                )
+            else:
+                interpretation['positives'].append(
+                    f"🟢 **Low Recession Risk ({recession_prob:.0f}%)**: Most indicators remain healthy."
+                )
 
         if 'Sahm_Rule' in recession_indicators.columns and recession_indicators['Sahm_Rule'].iloc[-1] == 1:
             interpretation['warnings'].append("⚡ **Sahm Rule Triggered**: Unemployment has risen 0.5%+ above its 3-month low — historically a recession signal.")
         if 'Yield_Curve_Inverted' in recession_indicators.columns and recession_indicators['Yield_Curve_Inverted'].iloc[-1] == 1:
-            interpretation['warnings'].append("📉 **Yield Curve Inverted (10Y-2Y)**: Inverted curve has preceded every US recession since 1955 — typically 6–24 month lag.")
+            interpretation['warnings'].append("📉 **Yield Curve Inverted (10Y-2Y)**: Inverted curve has preceded every US recession since 1955 — typically 6-24 month lag.")
         if 'LEI_Declining' in recession_indicators.columns and recession_indicators['LEI_Declining'].iloc[-1] == 1:
             interpretation['warnings'].append("🔻 **Leading Economic Index Declining**: LEI fell >2% over 6 months, signaling forward weakness.")
         if 'GDP_Growth_Negative' in recession_indicators.columns and recession_indicators['GDP_Growth_Negative'].iloc[-1] == 1:
@@ -1774,7 +1760,6 @@ def economics_module(analysis_context: Optional[Dict] = None):
 
         st.subheader("📅 Date Range")
 
-        # Warn if date range is too short for cycle detection
         default_start = datetime.now() - timedelta(days=365 * 15)
 
         col1, col2 = st.columns(2)
@@ -1836,7 +1821,6 @@ def economics_module(analysis_context: Optional[Dict] = None):
     if show_indicators and data_dict:
         st.header("📊 Economic Indicators")
 
-        # Snapshot metrics
         n_display = min(len(data_dict), 4)
         snapshot_metrics = list(data_dict.items())
         cols = st.columns(n_display)
@@ -1900,12 +1884,6 @@ def economics_module(analysis_context: Optional[Dict] = None):
                 stats = calculate_statistics(df)
                 if not stats.empty:
                     st.dataframe(stats.style.format("{:.2f}"), use_container_width=True)
-
-    # ===================== HEALTH SCORECARD =====================
-
-    if show_health and (data_dict or not (spreads := pd.DataFrame()).empty):
-        st.header("🏥 Economic Health Scorecard")
-        # We'll compute after yield curve is available — moved below
 
     # ===================== YIELD CURVE =====================
 
@@ -2127,44 +2105,47 @@ def economics_module(analysis_context: Optional[Dict] = None):
             active_signals = sum(recession_indicators[col].iloc[-1] == 1 for col in indicator_cols)
             current_prob = recession_indicators['Recession_Probability'].iloc[-1]
 
-            if current_prob < 20:
-                risk_level, risk_color = "🟢 LOW", "green"
-            elif current_prob < 40:
-                risk_level, risk_color = "🟡 MODERATE", "orange"
-            elif current_prob < 60:
-                risk_level, risk_color = "🟠 ELEVATED", "darkorange"
+            if pd.isna(current_prob):
+                st.warning("⚠️ Recession probability could not be calculated with current data.")
             else:
-                risk_level, risk_color = "🔴 HIGH", "red"
+                if current_prob < 20:
+                    risk_level, risk_color = "🟢 LOW", "green"
+                elif current_prob < 40:
+                    risk_level, risk_color = "🟡 MODERATE", "orange"
+                elif current_prob < 60:
+                    risk_level, risk_color = "🟠 ELEVATED", "darkorange"
+                else:
+                    risk_level, risk_color = "🔴 HIGH", "red"
 
-            st.subheader(f"Recession Risk: {risk_level}")
-            st.caption(f"Active Signals: {active_signals}/{len(indicator_cols)}")
+                st.subheader(f"Recession Risk: {risk_level}")
+                st.caption(f"Active Signals: {active_signals}/{len(indicator_cols)}")
 
-            c1, c2 = st.columns([1, 2])
-            with c1:
-                delta = None
-                if len(recession_indicators) > 30:
-                    past_prob = recession_indicators['Recession_Probability'].iloc[-30]
-                    delta = f"{current_prob - past_prob:+.1f}%" if pd.notna(past_prob) and pd.notna(current_prob) else None
-                st.metric("Recession Probability", f"{current_prob:.1f}%", delta=delta)
+                c1, c2 = st.columns([1, 2])
+                with c1:
+                    delta = None
+                    if len(recession_indicators) > 30:
+                        past_prob = recession_indicators['Recession_Probability'].iloc[-30]
+                        delta = f"{current_prob - past_prob:+.1f}%" if pd.notna(past_prob) and pd.notna(current_prob) else None
+                    st.metric("Recession Probability", f"{current_prob:.1f}%", delta=delta)
 
-            with c2:
-                fig_gauge = go.Figure(go.Indicator(
-                    mode="gauge+number", value=current_prob,
-                    title={'text': "Recession Probability"},
-                    gauge={
-                        'axis': {'range': [None, 100]},
-                        'bar': {'color': risk_color},
-                        'steps': [
-                            {'range': [0, 20], 'color': "lightgreen"},
-                            {'range': [20, 40], 'color': "lightyellow"},
-                            {'range': [40, 60], 'color': "orange"},
-                            {'range': [60, 100], 'color': "lightcoral"}
-                        ],
-                        'threshold': {'line': {'color': "red", 'width': 4}, 'thickness': 0.75, 'value': 50}
-                    }
-                ))
-                fig_gauge.update_layout(height=280)
-                st.plotly_chart(fig_gauge, use_container_width=True)
+                with c2:
+                    fig_gauge = go.Figure(go.Indicator(
+                        mode="gauge+number", value=current_prob,
+                        title={'text': "Recession Probability"},
+                        gauge={
+                            'axis': {'range': [None, 100]},
+                            'bar': {'color': risk_color},
+                            'steps': [
+                                {'range': [0, 20], 'color': "lightgreen"},
+                                {'range': [20, 40], 'color': "lightyellow"},
+                                {'range': [40, 60], 'color': "orange"},
+                                {'range': [60, 100], 'color': "lightcoral"}
+                            ],
+                            'threshold': {'line': {'color': "red", 'width': 4}, 'thickness': 0.75, 'value': 50}
+                        }
+                    ))
+                    fig_gauge.update_layout(height=280)
+                    st.plotly_chart(fig_gauge, use_container_width=True)
 
             st.subheader("Individual Indicators")
             ind_cols = st.columns(min(len(indicator_cols), 4))
@@ -2177,21 +2158,22 @@ def economics_module(analysis_context: Optional[Dict] = None):
                         delta="⚠️" if is_sig else "✅"
                     )
 
-            st.subheader("Historical Recession Probability")
-            fig_prob = go.Figure()
-            fig_prob.add_trace(go.Scatter(
-                x=recession_indicators.index, y=recession_indicators['Recession_Probability'],
-                fill='tozeroy', name='Recession Probability',
-                line=dict(color='darkred', width=2), fillcolor='rgba(220, 20, 60, 0.3)'
-            ))
-            fig_prob.add_hline(y=50, line_dash="dash", line_color="red", annotation_text="High Risk Threshold")
-            fig_prob.update_layout(
-                title='Recession Probability Over Time',
-                xaxis_title='Date', yaxis_title='Probability (%)',
-                template='plotly_white', hovermode='x unified', height=400,
-                yaxis=dict(range=[0, 100])
-            )
-            st.plotly_chart(fig_prob, use_container_width=True)
+            if 'Recession_Probability' in recession_indicators.columns:
+                st.subheader("Historical Recession Probability")
+                fig_prob = go.Figure()
+                fig_prob.add_trace(go.Scatter(
+                    x=recession_indicators.index, y=recession_indicators['Recession_Probability'],
+                    fill='tozeroy', name='Recession Probability',
+                    line=dict(color='darkred', width=2), fillcolor='rgba(220, 20, 60, 0.3)'
+                ))
+                fig_prob.add_hline(y=50, line_dash="dash", line_color="red", annotation_text="High Risk Threshold")
+                fig_prob.update_layout(
+                    title='Recession Probability Over Time',
+                    xaxis_title='Date', yaxis_title='Probability (%)',
+                    template='plotly_white', hovermode='x unified', height=400,
+                    yaxis=dict(range=[0, 100])
+                )
+                st.plotly_chart(fig_prob, use_container_width=True)
 
         else:
             st.warning("⚠️ No recession indicators could be calculated with current data.")
