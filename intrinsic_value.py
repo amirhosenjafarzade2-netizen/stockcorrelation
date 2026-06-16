@@ -852,7 +852,7 @@ def single_stock_ui():
         st.subheader("🌡️ DCF Sensitivity (Discount Rate × Terminal Growth)")
         st.caption("Rows = discount rate · Columns = terminal growth rate")
         sens = sensitivity_table(data)
-        price_mask = sens.applymap(lambda v: not np.isnan(v) and v > price)
+        price_mask = sens.map(lambda v: not np.isnan(v) and v > price)
         styled = (
             sens.style
             .background_gradient(cmap="RdYlGn", axis=None, vmin=price*0.4, vmax=price*2)
@@ -896,18 +896,13 @@ def _process_screener_row(
     if not data:
         return None, "No data"
     try:
-        result = run_valuation(data, selected_models, mos_pct=mos_pct, growth_override=growth_override)
+        # Base row — always populated from live market data, no valuation required
         row = {
             "Symbol":            data["Symbol"],
             "Name":              data["Name"],
             "Sector":            data["Sector"],
             "Price ($)":         data["Price ($)"],
             "Market Cap (B)":    data["Market Cap (B)"],
-            "Intrinsic ($)":     round(result["intrinsic"], 2) if not np.isnan(result["intrinsic"]) else None,
-            "Safe Buy ($)":      round(result["safe_buy"],  2) if not np.isnan(result["safe_buy"])  else None,
-            "Premium/Discount (%)": round(result["premium"], 1) if not np.isnan(result["premium"]) else None,
-            "Undervaluation (%)":   round(result["undervaluation"], 1) if not np.isnan(result["undervaluation"]) else None,
-            "Verdict":           result["verdict"],
             "Trailing P/E":      data["Trailing P/E"],
             "Forward P/E":       data["Forward P/E"],
             "PEG":               data["PEG"],
@@ -934,6 +929,14 @@ def _process_screener_row(
             "52W Change (%)":    data["52W Change (%)"],
             "% off 52W High":    data["% off 52W High"],
         }
+        # Valuation columns — only computed when the user selected models
+        if selected_models:
+            result = run_valuation(data, selected_models, mos_pct=mos_pct, growth_override=growth_override)
+            row["Intrinsic ($)"]        = round(result["intrinsic"], 2)      if not np.isnan(result["intrinsic"])       else None
+            row["Safe Buy ($)"]         = round(result["safe_buy"],  2)      if not np.isnan(result["safe_buy"])        else None
+            row["Premium/Discount (%)"] = round(result["premium"],   1)      if not np.isnan(result["premium"])         else None
+            row["Undervaluation (%)"]   = round(result["undervaluation"], 1) if not np.isnan(result["undervaluation"])  else None
+            row["Verdict"]              = result["verdict"]
         return row, None
     except Exception as e:
         return None, str(e)
@@ -1025,24 +1028,34 @@ def screener_ui():
         return
 
     # ── 2. Valuation ───────────────────────────────────────────────────────
-    with st.expander("💡 2. Valuation Settings", expanded=True):
-        selected_models = st.multiselect(
-            "Models to use",
-            ALL_MODELS,
-            default=["Graham Number", "Lynch Method", "Two-Stage DCF", "Core Valuation (PE-based)"],
+    with st.expander("💡 2. Valuation Settings (optional)", expanded=False):
+        st.caption(
+            "Enable this to add intrinsic value columns (Intrinsic $, Safe Buy, Verdict). "
+            "You can also screen purely on fundamentals — no models required."
         )
-        mos = st.slider("Margin of Safety (%)", 0, 50, 25, 5)
-        override_g = st.number_input(
-            "Custom Growth Override (% — leave 0 to use historical)",
-            min_value=0.0, max_value=50.0, value=0.0, step=0.5,
-        )
+        enable_valuation = st.checkbox("Enable intrinsic value calculation", value=False)
+        if enable_valuation:
+            selected_models = st.multiselect(
+                "Models to use",
+                ALL_MODELS,
+                default=["Graham Number", "Lynch Method", "Two-Stage DCF", "Core Valuation (PE-based)"],
+            )
+            mos = st.slider("Margin of Safety (%)", 0, 50, 25, 5)
+            override_g = st.number_input(
+                "Custom Growth Override (% — leave 0 to use historical)",
+                min_value=0.0, max_value=50.0, value=0.0, step=0.5,
+            )
+        else:
+            selected_models = []
+            mos = 25
+            override_g = 0.0
 
     # ── 3. Filters ─────────────────────────────────────────────────────────
     with st.expander("⚙️ 3. Filters", expanded=False):
         st.caption("Leave fields blank to skip that filter.")
         fc1, fc2 = st.columns(2)
         with fc1:
-            f_verdict  = st.multiselect("Verdict", ["Strong Buy","Buy","Hold","Sell"], default=["Strong Buy","Buy"])
+            f_verdict  = st.multiselect("Verdict (requires valuation enabled)", ["Strong Buy","Buy","Hold","Sell"], default=[])
             f_pe_max   = st.number_input("P/E ≤", value=None, format="%.1f")
             f_roe_min  = st.number_input("ROE (%) ≥", value=None, format="%.1f")
             f_de_max   = st.number_input("Debt/Equity ≤", value=None, format="%.2f")
@@ -1064,10 +1077,6 @@ def screener_ui():
 
     # ── Run ─────────────────────────────────────────────────────────────────
     if not st.button("🚀 Run Screener", type="primary"):
-        return
-
-    if not selected_models:
-        st.warning("Select at least one valuation model.")
         return
 
     g_override = (override_g / 100) if override_g > 0 else None
@@ -1118,7 +1127,8 @@ def screener_ui():
     # ── Apply filters ───────────────────────────────────────────────────────
     mask = pd.Series([True] * len(df))
 
-    if f_verdict:
+    # Verdict only available when valuation models were run
+    if f_verdict and "Verdict" in df.columns:
         mask &= df["Verdict"].isin(f_verdict)
 
     def apply_filter(col, lo=None, hi=None):
