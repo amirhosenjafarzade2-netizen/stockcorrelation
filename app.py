@@ -303,6 +303,7 @@ def get_available_modules() -> Dict[str, dict]:
     except Exception as e:
         if 'st' in dir():
             st.sidebar.error(f"❌ Error loading Commodities: {str(e)}")
+
     # ── NEW MODULE: Sentiment Analysis ───────────────────────────────────────
     try:
         from sentiment_analysis import render_sentiment_analysis
@@ -314,7 +315,7 @@ def get_available_modules() -> Dict[str, dict]:
     except ImportError:
         pass
     
-    # ── NEW MODULE: etf Analysis ───────────────────────────────────────
+    # ── NEW MODULE: ETF Analysis ─────────────────────────────────────────────
     try:
         from etf_analyzer import render_etf_analyzer
         modules["📈 ETF Analyzer & Screener"] = {
@@ -335,7 +336,18 @@ def get_available_modules() -> Dict[str, dict]:
         }
     except ImportError:
         pass
-    
+
+    # ── NEW MODULE: Forex Fundamental Scanner ────────────────────────────────
+    try:
+        from forex_fundamentals import main as forex_main
+        modules["💱 Forex Fundamental Scanner"] = {
+            "func": forex_main,
+            "desc": "Macro fundamental analysis & bias scanner: COT, IXL themes, carry, pre-meeting trades",
+            "uses_context": False
+        }
+    except ImportError:
+        pass
+
     return modules
 # ────────────────────────────────────────────────
 # Session State Initialization
