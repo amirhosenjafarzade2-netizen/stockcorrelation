@@ -2,13 +2,12 @@ import logging
 from dataclasses import dataclass
 from enum import Enum
 from functools import cached_property
-from typing import Dict, List, Optional
+from typing import List
 
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
-from plotly.subplots import make_subplots
 from scipy import stats
 from scipy.optimize import minimize
 
@@ -387,11 +386,13 @@ class PerformanceAnalyzer:
             cagr=cagr,
             best_day=returns.max(),
             worst_day=returns.min(),
-            best_month=monthly_returns.max(),
-            worst_month=monthly_returns.min(),
-            max_gain_streak=int(gain_streaks.max()),
-            max_loss_streak=int(loss_streaks.max()),
-            monthly_consistency=(monthly_returns > 0).mean(),
+            best_month=monthly_returns.max() if len(monthly_returns) else np.nan,
+            worst_month=monthly_returns.min() if len(monthly_returns) else np.nan,
+            max_gain_streak=int(gain_streaks.max()) if len(gain_streaks) else 0,
+            max_loss_streak=int(loss_streaks.max()) if len(loss_streaks) else 0,
+            monthly_consistency=(
+                (monthly_returns > 0).mean() if len(monthly_returns) else np.nan
+            ),
             ulcer_index=ulcer_index,
         )
 
@@ -485,16 +486,13 @@ def create_line_chart(
 
 
 # =============================================================================
-# MAIN UI
+# DASHBOARD (renders into the host app's content area)
 # =============================================================================
 
 
-def render_dashboard(
-    analyzer: PerformanceAnalyzer,
-    benchmark_ticker: str,
-):
+def render_dashboard(analyzer: PerformanceAnalyzer):
 
-    st.title("Advanced Portfolio Analytics")
+    st.title("Additional Metrics")
 
     tab1, tab2, tab3 = st.tabs(
         [
@@ -553,6 +551,37 @@ def render_dashboard(
 
         st.plotly_chart(fig, use_container_width=True)
 
+        with st.expander("📉 Drawdown Details"):
+            dd_rows = []
+            for ticker in analyzer.tickers:
+                dd = analyzer.calculate_drawdown_metrics(ticker)
+                dd_rows.append(
+                    {
+                        "Ticker": ticker,
+                        "Max Drawdown": dd.max_drawdown,
+                        "Current Drawdown": dd.current_drawdown,
+                        "Avg Drawdown": dd.avg_drawdown,
+                        "Max DD Duration (days)": dd.max_drawdown_duration,
+                        "Days Underwater": dd.days_underwater,
+                        "Calmar Ratio": dd.calmar_ratio,
+                        "Status": dd.recovery_status.value,
+                    }
+                )
+
+            dd_df = pd.DataFrame(dd_rows).set_index("Ticker")
+
+            st.dataframe(
+                dd_df.style.format(
+                    {
+                        "Max Drawdown": "{:.2%}",
+                        "Current Drawdown": "{:.2%}",
+                        "Avg Drawdown": "{:.2%}",
+                        "Calmar Ratio": "{:.2f}",
+                    }
+                ),
+                use_container_width=True,
+            )
+
     # -------------------------------------------------------------------------
     # RISK TAB
     # -------------------------------------------------------------------------
@@ -590,9 +619,14 @@ def render_dashboard(
             use_container_width=True,
         )
 
+        rolling_window = min(
+            analyzer.config.rolling_window,
+            max(len(analyzer.returns) - 1, 1),
+        )
+
         rolling_vol = (
             analyzer.returns
-            .rolling(analyzer.config.rolling_window)
+            .rolling(rolling_window)
             .std()
             * np.sqrt(analyzer.config.trading_days)
             * 100
@@ -600,11 +634,45 @@ def render_dashboard(
 
         fig = create_line_chart(
             rolling_vol,
-            title="Rolling Volatility",
+            title=f"Rolling Volatility ({rolling_window}-day)",
             yaxis_title="Volatility %",
         )
 
         st.plotly_chart(fig, use_container_width=True)
+
+        with st.expander("🎯 Tail Risk & Distribution Details"):
+            tail_rows = []
+            for ticker in analyzer.tickers:
+                m = analyzer.calculate_risk_metrics(ticker)
+                tail_rows.append(
+                    {
+                        "Ticker": ticker,
+                        "VaR 99": m.var_99,
+                        "CVaR 99": m.cvar_99,
+                        "Skewness": m.skewness,
+                        "Kurtosis": m.kurtosis,
+                        "Win Rate": m.win_rate,
+                        "Profit Factor": m.profit_factor,
+                        "Gain/Pain": m.gain_to_pain,
+                    }
+                )
+
+            tail_df = pd.DataFrame(tail_rows).set_index("Ticker")
+
+            st.dataframe(
+                tail_df.style.format(
+                    {
+                        "VaR 99": "{:.2%}",
+                        "CVaR 99": "{:.2%}",
+                        "Skewness": "{:.2f}",
+                        "Kurtosis": "{:.2f}",
+                        "Win Rate": "{:.2%}",
+                        "Profit Factor": "{:.2f}",
+                        "Gain/Pain": "{:.2f}",
+                    }
+                ),
+                use_container_width=True,
+            )
 
     # -------------------------------------------------------------------------
     # PORTFOLIO THEORY TAB
@@ -612,135 +680,113 @@ def render_dashboard(
 
     with tab3:
 
-        frontier = analyzer.efficient_frontier()
-
-        fig = go.Figure()
-
-        frontier_x = [x[0] * 100 for x in frontier]
-        frontier_y = [x[1] * 100 for x in frontier]
-
-        fig.add_trace(
-            go.Scatter(
-                x=frontier_x,
-                y=frontier_y,
-                mode="lines",
-                name="Efficient Frontier",
+        if len(analyzer.tickers) < 2:
+            st.info(
+                "Add at least 2 tickers to compute an efficient frontier "
+                "and compare assets on a risk/return plot."
             )
-        )
+        else:
+            frontier = analyzer.efficient_frontier()
 
-        asset_vols = np.sqrt(np.diag(analyzer.covariance_matrix)) * 100
-        asset_returns = analyzer.annualized_returns * 100
+            fig = go.Figure()
 
-        fig.add_trace(
-            go.Scatter(
-                x=asset_vols,
-                y=asset_returns,
-                mode="markers+text",
-                text=analyzer.tickers,
-                textposition="top center",
-                name="Assets",
+            if frontier:
+                frontier_x = [x[0] * 100 for x in frontier]
+                frontier_y = [x[1] * 100 for x in frontier]
+
+                fig.add_trace(
+                    go.Scatter(
+                        x=frontier_x,
+                        y=frontier_y,
+                        mode="lines",
+                        name="Efficient Frontier",
+                    )
+                )
+            else:
+                st.warning(
+                    "Could not compute the efficient frontier for the "
+                    "current selection (optimizer did not converge)."
+                )
+
+            asset_vols = np.sqrt(np.diag(analyzer.covariance_matrix)) * 100
+            asset_returns = analyzer.annualized_returns * 100
+
+            fig.add_trace(
+                go.Scatter(
+                    x=asset_vols,
+                    y=asset_returns,
+                    mode="markers+text",
+                    text=analyzer.tickers,
+                    textposition="top center",
+                    name="Assets",
+                )
             )
-        )
 
-        fig.update_layout(
-            title="Efficient Frontier",
-            xaxis_title="Volatility %",
-            yaxis_title="Return %",
-            height=500,
-        )
+            fig.update_layout(
+                title="Efficient Frontier",
+                xaxis_title="Volatility %",
+                yaxis_title="Return %",
+                height=500,
+            )
 
-        st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(fig, use_container_width=True)
 
 
 # =============================================================================
-# MAIN APP
+# ENTRY POINT (called by app.py's module registry)
 # =============================================================================
 
-if __name__ == "__main__":
 
-    import yfinance as yf
-    from datetime import date, timedelta
+def render_additional_metrics(df_prices: pd.DataFrame, tickers: List[str]):
+    """
+    Entry point expected by app.py:
 
-    st.set_page_config(
-        page_title="Portfolio Analytics",
-        page_icon="📊",
-        layout="wide",
-    )
+        from additional_metrics import render_additional_metrics
+        module_info["func"](context.df_prices, context.tickers)
 
-    st.sidebar.header("Configuration")
+    df_prices: price DataFrame fetched by the host app (DatetimeIndex, one
+               column per successfully-fetched ticker).
+    tickers:   the ticker list the user requested in the sidebar. May include
+               tickers that failed to fetch and are therefore missing from
+               df_prices.columns, so we filter down to what's actually there.
+    """
 
-    default_tickers = [
-        "AAPL",
-        "MSFT",
-        "GOOGL",
-        "AMZN",
-        "SPY",
-    ]
+    if df_prices is None or df_prices.empty:
+        st.info("👈 Please fetch data from the sidebar to begin analysis.")
+        return
 
-    ticker_input = st.sidebar.text_input(
-        "Tickers",
-        value=", ".join(default_tickers),
-    )
+    # Only keep tickers that actually made it into df_prices.
+    available_tickers = [t for t in tickers if t in df_prices.columns]
 
-    tickers = [
-        t.strip().upper()
-        for t in ticker_input.split(",")
-    ]
+    missing = sorted(set(tickers) - set(available_tickers))
+    if missing:
+        st.warning(
+            f"⚠️ Skipping {', '.join(missing)} — no price data available "
+            "for these tickers."
+        )
 
-    end_date = date.today()
-    start_date = end_date - timedelta(days=365 * 3)
+    if not available_tickers:
+        st.error("❌ None of the selected tickers have usable price data.")
+        return
 
-    start_input = st.sidebar.date_input(
-        "Start Date",
-        value=start_date,
-    )
+    if len(df_prices) < 3:
+        st.warning(
+            "⚠️ Not enough trading days to compute returns-based metrics. "
+            "Please select a longer date range."
+        )
+        return
 
-    end_input = st.sidebar.date_input(
-        "End Date",
-        value=end_date,
-    )
+    try:
+        config = AnalyticsConfig()
 
-    benchmark = st.sidebar.selectbox(
-        "Benchmark",
-        tickers,
-    )
+        analyzer = PerformanceAnalyzer(
+            df=df_prices[available_tickers],
+            tickers=available_tickers,
+            config=config,
+        )
 
-    if st.sidebar.button("Run Analysis"):
+        render_dashboard(analyzer)
 
-        with st.spinner("Downloading data..."):
-
-            try:
-
-                df = yf.download(
-                    tickers,
-                    start=start_input,
-                    end=end_input,
-                    auto_adjust=True,
-                    progress=False,
-                )["Close"]
-
-                if isinstance(df, pd.Series):
-                    df = df.to_frame(name=tickers[0])
-
-                config = AnalyticsConfig(
-                    trading_days=252,
-                    risk_free_rate=0.04,
-                    rolling_window=60,
-                    frontier_points=50,
-                    random_seed=42,
-                )
-
-                analyzer = PerformanceAnalyzer(
-                    df=df,
-                    tickers=tickers,
-                    config=config,
-                )
-
-                render_dashboard(
-                    analyzer,
-                    benchmark_ticker=benchmark,
-                )
-
-            except Exception as e:
-                logger.exception("Application failed")
-                st.error(str(e))
+    except Exception as e:
+        logger.exception("Additional Metrics module failed")
+        st.error(f"❌ Could not compute additional metrics: {e}")
