@@ -944,7 +944,7 @@ def main():
                        "Neutral": "background-color:#2a2a1a;color:#ffff99"}.get(val, "")
             return colour
 
-        styled = ranked_df.style.applymap(colour_bias, subset=["Bias"])
+        styled = ranked_df.style.map(colour_bias, subset=["Bias"])
         st.dataframe(styled, use_container_width=True, hide_index=True)
 
         # Score chart
