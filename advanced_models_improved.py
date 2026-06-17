@@ -2,6 +2,7 @@
 # Comprehensive DuPont, Altman Z-Score, Piotroski F-Score, WACC, Graham Number,
 # Beneish M-Score, EV/EBITDA, Greenblatt Magic Formula, Red Flags, and more.
 
+import time
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -58,47 +59,222 @@ st.markdown("""
         padding: 12px;
         box-shadow: 0 1px 3px rgba(0,0,0,0.08);
     }
+    .data-warning {
+        background: #fff3cd;
+        border-left: 4px solid #f39c12;
+        padding: 8px 14px;
+        border-radius: 6px;
+        font-size: 0.88em;
+        color: #856404;
+        margin: 6px 0;
+    }
 </style>
 """, unsafe_allow_html=True)
 
 # ==================== DATA FETCHING ====================
+#
+# yfinance's `.info` property is the single most failure-prone call in the
+# library: it scrapes a heavy quoteSummary endpoint that Yahoo rate-limits
+# aggressively, and it can return an empty/partial dict even for valid
+# tickers. We treat it as "best effort" and build the things we actually
+# need (price, market cap, shares, beta) from sturdier sources with
+# fallbacks, instead of trusting .info alone and failing hard if it's thin.
+#
+# We also never cache an outright failure — st.cache_data would otherwise
+# happily cache "this ticker failed" for the full TTL, so a transient
+# rate-limit looks like the ticker is broken for the next hour.
 
-@st.cache_data(ttl=3600)
-def fetch_financial_data(ticker: str) -> Optional[Dict]:
-    """Fetch comprehensive financial data for analysis."""
+class DataFetchError(Exception):
+    """Raised with a human-readable reason so the UI can explain what happened."""
+    pass
+
+
+def _retry(fn, attempts: int = 3, base_delay: float = 0.6):
+    """Run fn() with a few retries + backoff to absorb transient rate limits."""
+    last_err = None
+    for i in range(attempts):
+        try:
+            return fn()
+        except Exception as e:
+            last_err = e
+            if i < attempts - 1:
+                time.sleep(base_delay * (2 ** i))
+    raise last_err
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def _fetch_raw(ticker: str) -> Dict:
+    """
+    Fetch raw yfinance objects for a ticker. Raises DataFetchError with a
+    specific reason on failure instead of returning None, so the caller can
+    show something more useful than "could not fetch data".
+
+    Only successful fetches are cached (cache_data caches the return value,
+    and we only return on success — exceptions are never cached by Streamlit).
+    """
+    ticker = ticker.upper().strip()
+    if not ticker:
+        raise DataFetchError("No ticker provided.")
+
+    stock = yf.Ticker(ticker)
+
+    # fast_info is cheap and far more reliable than .info for price/mcap/shares.
     try:
-        stock = yf.Ticker(ticker)
-        info = stock.info
-        if not info or info.get('regularMarketPrice') is None and info.get('currentPrice') is None:
-            return None
-        income_stmt = stock.financials
-        balance_sheet = stock.balance_sheet
-        cash_flow = stock.cashflow
-        hist_data = stock.history(period='5y')
-        return {
-            'info': info,
-            'income_statement': income_stmt,
-            'balance_sheet': balance_sheet,
-            'cash_flow': cash_flow,
-            'history': hist_data,
-            'ticker': ticker
-        }
-    except Exception as e:
-        st.error(f"Error fetching data for {ticker}: {str(e)}")
-        return None
-
-
-def safe_get(df: pd.DataFrame, key: str, col: int = 0, default: float = 0.0) -> float:
-    """Safely extract a float from a DataFrame by row name and column index."""
-    try:
-        if df is None or df.empty:
-            return default
-        if key in df.index:
-            val = df.loc[key].iloc[col]
-            return float(val) if pd.notna(val) else default
-        return default
+        fast = dict(stock.fast_info)
     except Exception:
+        fast = {}
+
+    # .info is best-effort: useful for sector, name, EPS, book value, beta,
+    # trailing PE, etc. that fast_info doesn't carry. Don't fail the whole
+    # fetch if this comes back thin or errors out.
+    info = {}
+    try:
+        info = _retry(lambda: stock.info, attempts=2, base_delay=0.5) or {}
+    except Exception:
+        info = {}
+
+    # Validate the ticker actually exists / has *some* usable data before
+    # going further. A bad ticker symbol typically yields empty info AND
+    # empty fast_info AND empty history.
+    has_price = (
+        info.get('currentPrice') or info.get('regularMarketPrice')
+        or fast.get('lastPrice') or fast.get('last_price')
+    )
+
+    try:
+        hist_data = _retry(lambda: stock.history(period='5y'), attempts=3)
+    except Exception as e:
+        hist_data = pd.DataFrame()
+
+    if not has_price and hist_data.empty:
+        raise DataFetchError(
+            f"'{ticker}' returned no price data from Yahoo Finance. "
+            "Double-check the ticker symbol, or Yahoo may be rate-limiting "
+            "requests right now — try again in a minute."
+        )
+
+    try:
+        income_stmt = _retry(lambda: stock.financials, attempts=2)
+    except Exception:
+        income_stmt = pd.DataFrame()
+
+    try:
+        balance_sheet = _retry(lambda: stock.balance_sheet, attempts=2)
+    except Exception:
+        balance_sheet = pd.DataFrame()
+
+    try:
+        cash_flow = _retry(lambda: stock.cashflow, attempts=2)
+    except Exception:
+        cash_flow = pd.DataFrame()
+
+    missing_statements = [
+        label for label, df in [
+            ('income statement', income_stmt),
+            ('balance sheet', balance_sheet),
+            ('cash flow statement', cash_flow),
+        ] if df is None or df.empty
+    ]
+
+    return {
+        'info': info,
+        'fast_info': fast,
+        'income_statement': income_stmt,
+        'balance_sheet': balance_sheet,
+        'cash_flow': cash_flow,
+        'history': hist_data,
+        'ticker': ticker,
+        'missing_statements': missing_statements,
+    }
+
+
+def fetch_financial_data(ticker: str) -> Tuple[Optional[Dict], Optional[str]]:
+    """
+    Returns (data, error_message). Exactly one of the two is None/empty.
+    Keeping this as a thin wrapper (rather than baking the try/except into
+    the cached function) means a failure is never itself cached.
+    """
+    try:
+        data = _fetch_raw(ticker)
+        return data, None
+    except DataFetchError as e:
+        return None, str(e)
+    except Exception as e:
+        return None, f"Unexpected error fetching '{ticker}': {e}"
+
+
+def get_price(info: Dict, fast: Dict) -> float:
+    for src, key in [(info, 'currentPrice'), (info, 'regularMarketPrice'),
+                      (fast, 'lastPrice'), (fast, 'last_price'),
+                      (fast, 'previousClose'), (fast, 'regularMarketPreviousClose')]:
+        val = src.get(key)
+        if val:
+            return float(val)
+    return 0.0
+
+
+def get_market_cap(info: Dict, fast: Dict, price: float) -> float:
+    for src, key in [(info, 'marketCap'), (fast, 'marketCap'), (fast, 'market_cap')]:
+        val = src.get(key)
+        if val:
+            return float(val)
+    shares = info.get('sharesOutstanding') or fast.get('shares')
+    if shares and price:
+        return float(shares) * price
+    return 0.0
+
+
+def get_shares_outstanding(info: Dict, fast: Dict) -> float:
+    for src, key in [(info, 'sharesOutstanding'), (fast, 'shares')]:
+        val = src.get(key)
+        if val:
+            return float(val)
+    return 0.0
+
+
+def get_beta(info: Dict) -> float:
+    beta = info.get('beta') or info.get('beta3Year')
+    try:
+        beta = float(beta)
+        if beta <= 0 or beta > 10:  # sanity bound; bad scrapes sometimes return junk
+            return 1.0
+        return beta
+    except (TypeError, ValueError):
+        return 1.0
+
+
+def safe_get(df: pd.DataFrame, key: str, col: int = 0, default: float = 0.0,
+             alt_keys: Optional[List[str]] = None) -> float:
+    """
+    Safely extract a float from a DataFrame by row name and column index.
+    Tries `key` first, then any `alt_keys` in order — Yahoo has renamed /
+    duplicated several line items over time (e.g. 'EBIT' vs
+    'Operating Income', 'Net PPE' vs 'Net Property Plant And Equipment'),
+    so a single hardcoded label silently returns 0.0 more often than it should.
+    """
+    if df is None or df.empty:
         return default
+    for k in [key] + (alt_keys or []):
+        try:
+            if k in df.index:
+                if col >= df.shape[1]:
+                    continue
+                val = df.loc[k].iloc[col]
+                if pd.notna(val):
+                    return float(val)
+        except Exception:
+            continue
+    return default
+
+
+def row_available(df: pd.DataFrame, key: str, alt_keys: Optional[List[str]] = None) -> bool:
+    """Whether any of the candidate row labels exist in this statement at all."""
+    if df is None or df.empty:
+        return False
+    for k in [key] + (alt_keys or []):
+        if k in df.index:
+            return True
+    return False
 
 
 def fmt_billions(val: float) -> str:
@@ -885,6 +1061,17 @@ def render_score_summary(title: str, score_str: str, assessment: str, color: str
     """, unsafe_allow_html=True)
 
 
+def render_data_warning(missing: List[str]):
+    if not missing:
+        return
+    st.markdown(
+        f'<div class="data-warning">⚠️ Yahoo Finance did not return the following for this ticker: '
+        f'<strong>{", ".join(missing)}</strong>. Models relying on those figures may show 0, N/A, '
+        f'or be skipped below.</div>',
+        unsafe_allow_html=True
+    )
+
+
 def render_red_flags(rf: Dict):
     """Render the full Red Flags section inside the Streamlit app."""
 
@@ -1024,96 +1211,149 @@ def advanced_models_module(analysis_context: Optional[Dict] = None):
 
         run_btn = st.button("🚀 Run Analysis", use_container_width=True, type="primary")
 
+        st.divider()
+        if st.button("🔄 Clear cached data", use_container_width=True,
+                     help="Force a fresh fetch if you suspect stale or rate-limited data."):
+            st.cache_data.clear()
+            st.success("Cache cleared.")
+
     if not run_btn:
         st.info("👈 Configure settings in the sidebar and press **Run Analysis**.")
         return
 
+    if not ticker:
+        st.error("Please enter a ticker symbol.")
+        return
+
     # ---- Fetch data ----
     with st.spinner(f"Fetching data for **{ticker}** …"):
-        data = fetch_financial_data(ticker)
+        data, fetch_error = fetch_financial_data(ticker)
 
-    if not data:
-        st.error(f"❌ Could not fetch data for **{ticker}**. Check the ticker and try again.")
+    if fetch_error:
+        st.error(f"❌ {fetch_error}")
+        st.caption(
+            "Common causes: an invalid/delisted ticker, Yahoo Finance rate-limiting "
+            "(wait a minute and retry), or a network/firewall blocking finance.yahoo.com. "
+            "Try the 'Clear cached data' button in the sidebar if you just fixed something "
+            "and want to retry the same ticker."
+        )
         return
 
     info = data['info']
+    fast = data['fast_info']
     inc  = data['income_statement']
     bs   = data['balance_sheet']
     cf   = data['cash_flow']
 
+    if data['missing_statements']:
+        render_data_warning(data['missing_statements'])
+
     # ---- Company header ----
-    name          = info.get('longName', ticker)
+    name          = info.get('longName') or info.get('shortName') or ticker
     sector        = info.get('sector', 'N/A')
-    current_price = info.get('currentPrice') or info.get('regularMarketPrice', 0)
-    market_cap    = info.get('marketCap', 0)
-    beta_val      = info.get('beta', 1.0) or 1.0
+    current_price = get_price(info, fast)
+    market_cap    = get_market_cap(info, fast, current_price)
+    beta_val      = get_beta(info)
 
     st.header(f"📊 {name}")
     c1, c2, c3, c4, c5 = st.columns(5)
     c1.metric("Sector",     sector)
     c2.metric("Market Cap", fmt_billions(market_cap))
-    c3.metric("Price",      f"${current_price:.2f}")
+    c3.metric("Price",      f"${current_price:.2f}" if current_price else "N/A")
     c4.metric("P/E (TTM)",  f"{info.get('trailingPE', 0):.1f}" if info.get('trailingPE') else "N/A")
     c5.metric("Beta",       f"{beta_val:.2f}")
     st.divider()
 
     # ---- Extract financials ----
     try:
-        # Current period (col 0)
+        # Current period (col 0). Where Yahoo has renamed a line item across
+        # vintages, alt_keys gives safe_get a fallback before defaulting to 0.
         net_income   = safe_get(inc, 'Net Income', 0)
-        revenue      = safe_get(inc, 'Total Revenue', 0)
-        ebit         = safe_get(inc, 'EBIT', 0)
+        revenue      = safe_get(inc, 'Total Revenue', 0, alt_keys=['Operating Revenue'])
+        ebit         = safe_get(inc, 'EBIT', 0, alt_keys=['Operating Income'])
         ebt          = safe_get(inc, 'Pretax Income', 0)
         gross_profit = safe_get(inc, 'Gross Profit', 0)
         int_expense  = abs(safe_get(inc, 'Interest Expense', 0))
-        sga          = abs(safe_get(inc, 'Selling General Administrative', 0))
+        sga          = abs(safe_get(inc, 'Selling General Administrative', 0,
+                                     alt_keys=['Selling General And Administration']))
 
         total_assets   = safe_get(bs, 'Total Assets', 0)
-        total_equity   = safe_get(bs, 'Stockholders Equity', 0)
+        total_equity   = safe_get(bs, 'Stockholders Equity', 0,
+                                   alt_keys=['Common Stock Equity', 'Total Equity Gross Minority Interest'])
         current_assets = safe_get(bs, 'Current Assets', 0)
         current_liab   = safe_get(bs, 'Current Liabilities', 0)
-        total_liab     = safe_get(bs, 'Total Liabilities Net Minority Interest', 0)
-        long_term_debt = safe_get(bs, 'Long Term Debt', 0)
+        total_liab     = safe_get(bs, 'Total Liabilities Net Minority Interest', 0,
+                                   alt_keys=['Total Liab'])
+        long_term_debt = safe_get(bs, 'Long Term Debt', 0, alt_keys=['Long Term Debt And Capital Lease Obligation'])
         retained_earn  = safe_get(bs, 'Retained Earnings', 0)
-        cash           = safe_get(bs, 'Cash And Cash Equivalents', 0)
-        receivables    = safe_get(bs, 'Receivables', 0)
-        ppe            = safe_get(bs, 'Net PPE', 0)
-        depreciation   = abs(safe_get(cf, 'Depreciation And Amortization', 0))
+        cash           = safe_get(bs, 'Cash And Cash Equivalents', 0,
+                                   alt_keys=['Cash Cash Equivalents And Short Term Investments'])
+        receivables    = safe_get(bs, 'Receivables', 0, alt_keys=['Accounts Receivable'])
+        ppe            = safe_get(bs, 'Net PPE', 0, alt_keys=['Net Property Plant And Equipment'])
+        depreciation   = abs(safe_get(cf, 'Depreciation And Amortization', 0,
+                                       alt_keys=['Depreciation Amortization Depletion']))
 
-        operating_cf = safe_get(cf, 'Operating Cash Flow', 0)
+        operating_cf = safe_get(cf, 'Operating Cash Flow', 0, alt_keys=['Cash Flow From Continuing Operating Activities'])
         capex_val    = abs(safe_get(cf, 'Capital Expenditure', 0))
         sbc_val      = abs(safe_get(cf, 'Stock Based Compensation', 0))
-        amort_val    = abs(safe_get(inc, 'Reconciled Depreciation', 0))
+        amort_val    = abs(safe_get(inc, 'Reconciled Depreciation', 0, alt_keys=['Depreciation Amortization Depletion Income Statement']))
 
         working_capital = current_assets - current_liab
 
+        # If EBIT wasn't reported directly, derive it (Pretax Income + Interest Expense)
+        # rather than silently leaving it at 0, which would break Altman, DuPont-5,
+        # Magic Formula, and most of Red Flags.
+        if ebit == 0 and (ebt != 0 or int_expense != 0):
+            ebit = ebt + int_expense
+
         # Prior period (col 1)
         ni_prev    = safe_get(inc, 'Net Income', 1)
-        rev_prev   = safe_get(inc, 'Total Revenue', 1)
+        rev_prev   = safe_get(inc, 'Total Revenue', 1, alt_keys=['Operating Revenue'])
         gp_prev    = safe_get(inc, 'Gross Profit', 1)
-        sga_prev   = abs(safe_get(inc, 'Selling General Administrative', 1))
+        sga_prev   = abs(safe_get(inc, 'Selling General Administrative', 1,
+                                   alt_keys=['Selling General And Administration']))
         ta_prev    = safe_get(bs, 'Total Assets', 1)
-        ltd_prev   = safe_get(bs, 'Long Term Debt', 1)
+        ltd_prev   = safe_get(bs, 'Long Term Debt', 1, alt_keys=['Long Term Debt And Capital Lease Obligation'])
         ca_prev    = safe_get(bs, 'Current Assets', 1)
         cl_prev    = safe_get(bs, 'Current Liabilities', 1)
-        rec_prev   = safe_get(bs, 'Receivables', 1)
-        ppe_prev   = safe_get(bs, 'Net PPE', 1)
-        dep_prev   = abs(safe_get(cf, 'Depreciation And Amortization', 1))
-        cfo_prev   = safe_get(cf, 'Operating Cash Flow', 1)
+        rec_prev   = safe_get(bs, 'Receivables', 1, alt_keys=['Accounts Receivable'])
+        ppe_prev   = safe_get(bs, 'Net PPE', 1, alt_keys=['Net Property Plant And Equipment'])
+        dep_prev   = abs(safe_get(cf, 'Depreciation And Amortization', 1,
+                                   alt_keys=['Depreciation Amortization Depletion']))
+        cfo_prev   = safe_get(cf, 'Operating Cash Flow', 1, alt_keys=['Cash Flow From Continuing Operating Activities'])
+        ebit_prev  = safe_get(inc, 'EBIT', 1, alt_keys=['Operating Income'])
+        ebt_prev   = safe_get(inc, 'Pretax Income', 1)
+        int_exp_prev = abs(safe_get(inc, 'Interest Expense', 1))
+        if ebit_prev == 0 and (ebt_prev != 0 or int_exp_prev != 0):
+            ebit_prev = ebt_prev + int_exp_prev
 
-        shares_out = info.get('sharesOutstanding', 0)
+        shares_out = get_shares_outstanding(info, fast)
 
         # Derived
         ebitda = ebit + depreciation
 
         # Approximate 2-year-ago ROIC for trend (use prior-year data as proxy)
-        inv_cap_prev = safe_get(bs, 'Stockholders Equity', 1) + ltd_prev
-        ebit_prev    = safe_get(inc, 'EBIT', 1)
+        inv_cap_prev = safe_get(bs, 'Stockholders Equity', 1,
+                                 alt_keys=['Common Stock Equity', 'Total Equity Gross Minority Interest']) + ltd_prev
         roic_2yr     = (ebit_prev * 0.79) / inv_cap_prev if inv_cap_prev > 0 else 0
 
     except Exception as e:
         st.error(f"Error extracting financials: {e}")
+        st.caption(
+            "This usually means Yahoo Finance returned statements in an unexpected shape "
+            "for this ticker (common for foreign listings, ADRs, or recently-IPO'd companies "
+            "with limited history)."
+        )
         return
+
+    if revenue == 0 and total_assets == 0:
+        st.warning(
+            "⚠️ Income statement and balance sheet both came back empty for this ticker. "
+            "The models below will mostly show 'insufficient data'. This is usually a "
+            "Yahoo Finance data-coverage gap (common for ETFs, foreign ADRs, or thinly "
+            "covered small-caps) rather than a bug — try a major large-cap ticker like "
+            "AAPL or MSFT to confirm the app itself is working."
+        )
 
     # ===========================================================
     # DUPONT
