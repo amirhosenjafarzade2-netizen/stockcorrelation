@@ -1,26 +1,38 @@
 """
 crypto_onchain.py
 ══════════════════════════════════════════════════════════════════════════════
-Bitcoin On-Chain Fundamental Scanner
+Bitcoin On-Chain Fundamental Scanner  (v2.0 — Extended)
 Based on Chapter 9: Crypto — On-Chain Fundamentals, Bitcoin Drivers,
 Sentiment & Strategies
 
 Data Sources (all free, no API key required):
   • Alternative.me    — Fear & Greed Index
   • CoinGecko         — Price, market cap, BTC dominance, volume, 24h/7d/30d change
-  • Blockchain.info   — Hash rate, active addresses, transaction volume, mempool
+  • Blockchain.info   — Hash rate, active addresses, tx volume, mempool,
+                         miner revenue, on-chain USD transfer volume, difficulty
   • Binance Futures   — BTC perpetual funding rate
   • yfinance          — BTC/USD OHLCV for moving averages & momentum
 
+New in v2.0:
+  • Mining Cost & Breakeven Estimator — user-adjustable electricity price &
+    fleet efficiency → estimated all-in cost per BTC vs spot price
+  • Miner Revenue & Puell Multiple proxy — daily issuance+fee revenue vs its
+    365d MA, a classic miner-capitulation / euphoria signal
+  • NVT Ratio (Network Value to Transactions) — market cap ÷ on-chain USD
+    transfer volume, a rough valuation multiple ("on-chain P/E")
+  • Difficulty & next-adjustment estimate
+  • Stock-to-Flow style supply context (issuance run-rate vs circulating supply)
+
 Scoring Engine (Chapter 9 framework):
-  • Fear & Greed Index     (contrarian signal)
-  • Hash Rate trend        (miner confidence / network health)
-  • Active Addresses trend (adoption / real usage)
-  • Transaction Volume     (on-chain demand)
-  • BTC Dominance          (risk appetite)
-  • Funding Rate           (derivatives sentiment)
-  • Price vs 200d MA       (macro trend)
-  • 30d Price Momentum     (trend direction)
+  • Fear & Greed Index       (contrarian signal)
+  • Hash Rate trend          (miner confidence / network health)
+  • Active Addresses trend   (adoption / real usage)
+  • Funding Rate             (derivatives sentiment)
+  • Price vs 200d MA         (macro trend)
+  • 30d Price Momentum       (trend direction)
+  • BTC Dominance            (risk appetite)
+  • NVT Ratio                (on-chain valuation — new)
+  • Puell Multiple proxy     (miner cycle extremes — new)
   ─────────────────────────────────────────────
   Composite → ★ rating + Bullish / Neutral / Bearish verdict
 """
@@ -48,7 +60,13 @@ FEAR_GREED_URL  = "https://api.alternative.me/fng/?limit=30"
 BINANCE_FR_URL  = "https://fapi.binance.com/fapi/v1/fundingRate?symbol=BTCUSDT&limit=8"
 
 REQUEST_TIMEOUT = 10
-HEADERS = {"User-Agent": "Mozilla/5.0 CryptoScanner/1.0"}
+HEADERS = {"User-Agent": "Mozilla/5.0 CryptoScanner/2.0"}
+
+# Block reward halving schedule (epoch start height -> reward). Used only to
+# estimate current BTC issuance per day for supply / mining-cost context.
+BLOCK_REWARD_BTC   = 3.125          # post-April-2024 halving reward
+BLOCKS_PER_DAY_AVG = 144            # ~10 min/block target
+NEXT_HALVING_YEAR  = 2028
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -128,7 +146,8 @@ def fetch_coingecko_btc() -> Dict:
 
 @st.cache_data(ttl=900, show_spinner=False)
 def fetch_blockchain_info() -> Dict:
-    """Hash rate, active addresses, tx volume, mempool from blockchain.info."""
+    """Hash rate, active addresses, tx volume, mempool, miner revenue,
+    difficulty, and USD on-chain transfer volume from blockchain.info."""
     out = {}
     try:
         s = requests.get(f"{BLOCKCHAIN_BASE}/stats", timeout=REQUEST_TIMEOUT, headers=HEADERS).json()
@@ -139,13 +158,13 @@ def fetch_blockchain_info() -> Dict:
         out["blocks_mined_24h"]  = s.get("n_blocks_mined", np.nan)
         out["difficulty"]        = s.get("difficulty", np.nan)
         out["minutes_between_blocks"] = s.get("minutes_between_blocks", np.nan)
+        out["miners_revenue_usd_24h"] = s.get("miners_revenue_usd", np.nan)
+        out["total_fees_btc_24h"]     = s.get("total_fees_btc", np.nan) / 1e8 if s.get("total_fees_btc") else np.nan
     except Exception:
         pass
 
     # Historical hash rate for trend (30-day chart)
     try:
-        end_ts   = int(datetime.now().timestamp())
-        start_ts = end_ts - 30 * 86400
         hr = requests.get(
             f"{BLOCKCHAIN_BASE}/charts/hash-rate",
             params={"timespan": "30days", "format": "json", "sampled": "true"},
@@ -183,6 +202,46 @@ def fetch_blockchain_info() -> Dict:
         out["active_addr_now"]     = np.nan
         out["active_addr_30d"]     = np.nan
 
+    # Estimated on-chain USD transfer volume (90-day, used for NVT + chart)
+    try:
+        tv = requests.get(
+            f"{BLOCKCHAIN_BASE}/charts/estimated-transaction-volume-usd",
+            params={"timespan": "90days", "format": "json", "sampled": "true"},
+            timeout=REQUEST_TIMEOUT,
+            headers=HEADERS,
+        ).json()
+        if "values" in tv:
+            out["tx_volume_usd_history"] = [
+                {"date": datetime.fromtimestamp(v["x"]).strftime("%Y-%m-%d"),
+                 "value": v["y"]}
+                for v in tv["values"]
+            ]
+            vals = [v["value"] for v in out["tx_volume_usd_history"]]
+            out["tx_volume_usd_now"] = vals[-1] if vals else np.nan
+            # 30-day average daily on-chain transfer volume — smooths noisy daily NVT
+            out["tx_volume_usd_avg30"] = float(np.mean(vals[-30:])) if len(vals) >= 1 else np.nan
+    except Exception:
+        out["tx_volume_usd_history"] = []
+        out["tx_volume_usd_now"]     = np.nan
+        out["tx_volume_usd_avg30"]   = np.nan
+
+    # Miner revenue history (90-day, used for Puell Multiple proxy)
+    try:
+        mr = requests.get(
+            f"{BLOCKCHAIN_BASE}/charts/miners-revenue",
+            params={"timespan": "1year", "format": "json", "sampled": "true"},
+            timeout=REQUEST_TIMEOUT,
+            headers=HEADERS,
+        ).json()
+        if "values" in mr:
+            out["miner_revenue_history"] = [
+                {"date": datetime.fromtimestamp(v["x"]).strftime("%Y-%m-%d"),
+                 "value": v["y"]}
+                for v in mr["values"]
+            ]
+    except Exception:
+        out["miner_revenue_history"] = []
+
     return out
 
 
@@ -218,6 +277,100 @@ def fetch_btc_ohlcv() -> pd.DataFrame:
         return pd.DataFrame()
     except Exception:
         return pd.DataFrame()
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# DERIVED METRICS  (mining cost, NVT, Puell, supply)
+# ══════════════════════════════════════════════════════════════════════════════
+
+def compute_mining_cost(bc: Dict, cg: Dict, electricity_usd_kwh: float,
+                         fleet_efficiency_j_th: float) -> Dict:
+    """
+    Estimate an all-in electricity cost per BTC mined, given network hash
+    rate and user-supplied assumptions about fleet efficiency and power price.
+
+    Methodology:
+      energy (J) per day = hash_rate (H/s) * efficiency (J/H) * seconds_per_day
+      efficiency (J/H) = fleet_efficiency_j_th / 1e12
+      kWh/day = energy(J) / 3.6e6
+      cost/day (USD) = kWh/day * electricity_usd_kwh
+      BTC issued/day ≈ BLOCK_REWARD_BTC * blocks_mined_24h (or BLOCKS_PER_DAY_AVG)
+      breakeven cost per BTC = cost/day ÷ BTC issued/day
+
+    This is a simplified model (ignores hardware capex/depreciation, cooling
+    overhead, pool fees) — it estimates *electricity-only* breakeven, which is
+    the dominant variable cost for miners and the standard quick proxy used
+    for "mining cost" dashboards.
+    """
+    hash_rate_eh = bc.get("hash_rate_eh", np.nan)
+    blocks_24h   = bc.get("blocks_mined_24h", np.nan)
+    price        = cg.get("price", np.nan)
+
+    if pd.isna(hash_rate_eh) or hash_rate_eh <= 0:
+        return {}
+
+    hash_rate_hs = hash_rate_eh * 1e18          # EH/s -> H/s
+    efficiency_j_per_h = fleet_efficiency_j_th / 1e12
+
+    watts        = hash_rate_hs * efficiency_j_per_h     # network power draw, J/s = W
+    network_mw   = watts / 1e6
+    kwh_per_day  = watts * 24 / 1000
+    cost_per_day = kwh_per_day * electricity_usd_kwh
+
+    blocks = blocks_24h if not pd.isna(blocks_24h) and blocks_24h > 0 else BLOCKS_PER_DAY_AVG
+    btc_issued_per_day = BLOCK_REWARD_BTC * blocks
+
+    breakeven_per_btc = cost_per_day / btc_issued_per_day if btc_issued_per_day > 0 else np.nan
+
+    margin_pct = np.nan
+    if not pd.isna(price) and not pd.isna(breakeven_per_btc) and breakeven_per_btc > 0:
+        margin_pct = (price - breakeven_per_btc) / breakeven_per_btc * 100
+
+    return {
+        "network_power_mw":     network_mw,
+        "network_power_gw":     network_mw / 1000,
+        "daily_energy_cost_usd": cost_per_day,
+        "btc_issued_per_day":   btc_issued_per_day,
+        "breakeven_per_btc":    breakeven_per_btc,
+        "spot_price":           price,
+        "margin_pct":           margin_pct,
+    }
+
+
+def compute_nvt(bc: Dict, cg: Dict) -> Dict:
+    """
+    NVT Ratio = Market Cap / Daily On-Chain Transaction Volume (USD).
+    High NVT  → network valuation outrunning on-chain usage (overvalued / late-cycle)
+    Low NVT   → usage outrunning valuation (undervalued / early-cycle)
+    Uses a 30-day average transfer volume to smooth single-day noise
+    (a common "NVT Signal" style adjustment).
+    """
+    mcap     = cg.get("market_cap", np.nan)
+    tx_vol30 = bc.get("tx_volume_usd_avg30", np.nan)
+    tx_vol_now = bc.get("tx_volume_usd_now", np.nan)
+
+    nvt_smoothed = mcap / tx_vol30 if (not pd.isna(mcap) and not pd.isna(tx_vol30) and tx_vol30 > 0) else np.nan
+    nvt_daily    = mcap / tx_vol_now if (not pd.isna(mcap) and not pd.isna(tx_vol_now) and tx_vol_now > 0) else np.nan
+
+    return {"nvt_smoothed": nvt_smoothed, "nvt_daily": nvt_daily}
+
+
+def compute_puell_multiple(bc: Dict) -> float:
+    """
+    Puell Multiple proxy = Daily Miner Revenue (USD) / 365-day MA of Daily
+    Miner Revenue (USD).
+    <0.5  → historically marks miner-capitulation bottoms (BULLISH extreme)
+    >4    → historically marks euphoric tops (BEARISH extreme)
+    """
+    hist = bc.get("miner_revenue_history", [])
+    if len(hist) < 30:
+        return np.nan
+    vals = [v["value"] for v in hist]
+    today = vals[-1]
+    ma = np.mean(vals)  # mean of however much history we actually have (up to 1y)
+    if ma == 0 or pd.isna(ma):
+        return np.nan
+    return today / ma
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -338,16 +491,50 @@ def score_30d_momentum(cg: Dict) -> tuple[float, str]:
     return -1.0,               f"30d return {chg:.1f}% — strong selling pressure — BEARISH"
 
 
+def score_nvt(nvt: Dict) -> tuple[float, str]:
+    """
+    NVT Ratio (on-chain valuation multiple):
+    Low NVT (<40)  → usage outrunning valuation → undervalued → BULLISH
+    High NVT (>90) → valuation outrunning usage → overvalued → BEARISH
+    Thresholds are approximate, calibrated to historical BTC NVT-Signal ranges.
+    """
+    val = nvt.get("nvt_smoothed", np.nan)
+    if pd.isna(val):
+        return 0.0, "No NVT data"
+    if val < 40:   return +1.0, f"NVT {val:.0f} — usage far outpaces valuation — BULLISH (undervalued)"
+    if val < 65:   return +0.5, f"NVT {val:.0f} — usage healthy vs valuation"
+    if val < 90:   return  0.0, f"NVT {val:.0f} — neutral valuation zone"
+    if val < 130:  return -0.5, f"NVT {val:.0f} — valuation stretched vs usage"
+    return -1.0,               f"NVT {val:.0f} — valuation far outpacing usage — BEARISH (overvalued)"
+
+
+def score_puell(puell: float) -> tuple[float, str]:
+    """
+    Puell Multiple proxy:
+    <0.5  → miner capitulation, historical bottom zone → BULLISH
+    >4    → miner euphoria, historical top zone → BEARISH
+    """
+    if pd.isna(puell):
+        return 0.0, "No miner revenue history"
+    if puell < 0.5:   return +1.0, f"Puell {puell:.2f} — miner capitulation zone — contrarian BULLISH"
+    if puell < 0.8:   return +0.5, f"Puell {puell:.2f} — below-average miner revenue — mild bullish"
+    if puell < 2.0:   return  0.0, f"Puell {puell:.2f} — normal range"
+    if puell < 4.0:   return -0.5, f"Puell {puell:.2f} — elevated miner revenue — mild bearish"
+    return -1.0,                 f"Puell {puell:.2f} — miner euphoria zone — contrarian BEARISH"
+
+
 # ── Composite Scorer ─────────────────────────────────────────────────────────
 
 SCORE_WEIGHTS = {
-    "Fear & Greed":       0.20,
-    "Hash Rate":          0.18,
-    "Active Addresses":   0.15,
-    "Funding Rate":       0.15,
-    "Price vs MA200":     0.15,
-    "30d Momentum":       0.10,
-    "BTC Dominance":      0.07,
+    "Fear & Greed":       0.16,
+    "Hash Rate":          0.14,
+    "Active Addresses":   0.13,
+    "Funding Rate":       0.13,
+    "Price vs MA200":     0.13,
+    "30d Momentum":       0.09,
+    "BTC Dominance":      0.06,
+    "NVT Ratio":          0.10,
+    "Puell Multiple":     0.06,
 }
 
 
@@ -398,7 +585,26 @@ def delta_colour(val) -> str:
 
 def render_crypto_onchain():
     st.header("₿ Bitcoin On-Chain Fundamental Scanner")
-    st.caption("Chapter 9 Framework · Fear & Greed · Hash Rate · Active Addresses · Funding Rate · Dominance · Price Trend")
+    st.caption("Chapter 9 Framework · Fear & Greed · Hash Rate · Active Addresses · Funding Rate · Dominance · NVT · Puell · Mining Economics")
+
+    # ── Sidebar-style mining assumptions (in-page, since module owns its own inputs) ──
+    with st.expander("⚙️ Mining Cost Assumptions (adjust for your estimate)", expanded=False):
+        col_a, col_b = st.columns(2)
+        with col_a:
+            electricity_cost = st.slider(
+                "Electricity cost ($/kWh)", min_value=0.02, max_value=0.20,
+                value=0.06, step=0.01,
+                help="Global average industrial mining electricity cost is roughly $0.04–$0.08/kWh"
+            )
+        with col_b:
+            fleet_efficiency = st.slider(
+                "Fleet efficiency (J/TH)", min_value=15.0, max_value=40.0,
+                value=21.5, step=0.5,
+                help="Efficiency of the assumed average miner fleet. Modern ASICs (e.g. S21 class) run ~16-18 J/TH; "
+                     "network-wide average (mix of older + newer rigs) is typically 20-25 J/TH"
+            )
+        st.caption("These assumptions drive the *Mining Economics* tab below. They are estimates, not live miner data — "
+                   "real fleets vary widely by hardware generation and region.")
 
     # ── Fetch all data ────────────────────────────────────────────────────────
     with st.spinner("Fetching on-chain & market data…"):
@@ -408,6 +614,10 @@ def render_crypto_onchain():
         fr    = fetch_funding_rate()
         ohlcv = fetch_btc_ohlcv()
 
+    mining  = compute_mining_cost(bc, cg, electricity_cost, fleet_efficiency)
+    nvt     = compute_nvt(bc, cg)
+    puell   = compute_puell_multiple(bc)
+
     # ── Run scoring ───────────────────────────────────────────────────────────
     fg_score,   fg_note   = score_fear_greed(fg)
     hr_score,   hr_note   = score_hash_rate(bc)
@@ -416,6 +626,8 @@ def render_crypto_onchain():
     dom_score,  dom_note  = score_btc_dominance(cg)
     ma_score,   ma_note   = score_price_vs_ma(ohlcv)
     mom_score,  mom_note  = score_30d_momentum(cg)
+    nvt_score,  nvt_note  = score_nvt(nvt)
+    puell_score, puell_note = score_puell(puell)
 
     raw_scores = {
         "Fear & Greed":     fg_score,
@@ -425,6 +637,8 @@ def render_crypto_onchain():
         "Price vs MA200":   ma_score,
         "30d Momentum":     mom_score,
         "BTC Dominance":    dom_score,
+        "NVT Ratio":        nvt_score,
+        "Puell Multiple":   puell_score,
     }
     notes = {
         "Fear & Greed":     fg_note,
@@ -434,6 +648,8 @@ def render_crypto_onchain():
         "Price vs MA200":   ma_note,
         "30d Momentum":     mom_note,
         "BTC Dominance":    dom_note,
+        "NVT Ratio":        nvt_note,
+        "Puell Multiple":   puell_note,
     }
 
     composite             = compute_composite(raw_scores)
@@ -469,7 +685,7 @@ def render_crypto_onchain():
     # ══════════════════════════════════════════════════════════════════════════
     # TOP METRICS ROW
     # ══════════════════════════════════════════════════════════════════════════
-    c1, c2, c3, c4, c5 = st.columns(5)
+    c1, c2, c3, c4, c5, c6 = st.columns(6)
     c1.metric("BTC Price",     fmt(cg.get("price"), 0, "$"),
               fmt(cg.get("chg_24h"), 2, suffix="%"),
               delta_color=delta_colour(cg.get("chg_24h")))
@@ -477,15 +693,16 @@ def render_crypto_onchain():
     c3.metric("BTC Dominance", fmt(cg.get("dominance"), 1, suffix="%"))
     c4.metric("Funding Rate",  fmt(fr.get("latest"), 4, suffix="%"))
     c5.metric("Hash Rate",     fmt(bc.get("hash_rate_eh"), 1, suffix=" EH/s"))
+    c6.metric("NVT Ratio",     fmt(nvt.get("nvt_smoothed"), 1))
 
     st.markdown("---")
 
     # ══════════════════════════════════════════════════════════════════════════
     # TABS
     # ══════════════════════════════════════════════════════════════════════════
-    tab_score, tab_price, tab_onchain, tab_sentiment, tab_guide = st.tabs([
+    tab_score, tab_price, tab_onchain, tab_mining, tab_sentiment, tab_guide = st.tabs([
         "📊 Score Breakdown", "📈 Price & Trend", "🔗 On-Chain Data",
-        "😨 Sentiment", "📖 Signal Guide"
+        "⛏️ Mining Economics", "😨 Sentiment", "📖 Signal Guide"
     ])
 
     # ── TAB 1 · SCORE BREAKDOWN ───────────────────────────────────────────────
@@ -610,6 +827,7 @@ def render_crypto_onchain():
         with col_l:
             st.subheader("Network Health")
             st.metric("Hash Rate",        fmt(bc.get("hash_rate_eh"), 2, suffix=" EH/s"))
+            st.metric("Difficulty",       fmt(bc.get("difficulty"), 0))
             st.metric("Transactions 24h", fmt(bc.get("n_tx_24h"), 0))
             st.metric("BTC Sent 24h",     fmt(bc.get("total_btc_sent"), 1, suffix=" BTC"))
             st.metric("Blocks Mined 24h", fmt(bc.get("blocks_mined_24h"), 0))
@@ -617,14 +835,22 @@ def render_crypto_onchain():
             st.metric("Active Addresses", fmt(bc.get("active_addr_now"), 0))
 
         with col_r:
-            st.subheader("Market Data")
+            st.subheader("Market & Valuation")
             st.metric("Market Cap",       fmt(cg.get("market_cap"), 0, "$"))
             st.metric("24h Volume",       fmt(cg.get("volume_24h"), 0, "$"))
+            st.metric("On-Chain Volume (USD, 24h)", fmt(bc.get("tx_volume_usd_now"), 0, "$"))
+            st.metric("NVT Ratio (30d-smoothed)",   fmt(nvt.get("nvt_smoothed"), 1))
             st.metric("BTC Dominance",    fmt(cg.get("dominance"), 2, suffix="%"))
             st.metric("Circulating Supply", fmt(cg.get("circulating"), 0, suffix=" BTC"))
             st.metric("% of Max Supply",
                       fmt((cg.get("circulating") or 0) / 21_000_000 * 100, 2, suffix="%"))
-            st.metric("ATH Distance",     fmt(cg.get("ath_chg"), 1, suffix="%"))
+
+        st.markdown("---")
+        st.caption(
+            "**NVT Ratio** = Market Cap ÷ on-chain USD transfer volume (30-day average, smoothed). "
+            "Think of it as an on-chain 'P/E ratio' — low values mean usage is high relative to "
+            "valuation (cheap), high values mean valuation has outrun usage (expensive)."
+        )
 
         # Hash rate chart
         hr_hist = bc.get("hash_rate_history", [])
@@ -650,7 +876,103 @@ def render_crypto_onchain():
             fig_aa.update_layout(template="plotly_dark", height=280)
             st.plotly_chart(fig_aa, use_container_width=True)
 
-    # ── TAB 4 · SENTIMENT ─────────────────────────────────────────────────────
+        # On-chain USD transfer volume chart (90d) — basis for NVT
+        tv_hist = bc.get("tx_volume_usd_history", [])
+        if tv_hist:
+            df_tv = pd.DataFrame(tv_hist)
+            df_tv["date"] = pd.to_datetime(df_tv["date"])
+            fig_tv = px.area(df_tv, x="date", y="value",
+                              labels={"value": "USD", "date": ""},
+                              title="Estimated On-Chain Transfer Volume — 90 Days (USD)",
+                              color_discrete_sequence=["#9b59b6"])
+            fig_tv.update_layout(template="plotly_dark", height=280)
+            st.plotly_chart(fig_tv, use_container_width=True)
+
+    # ── TAB 4 · MINING ECONOMICS (NEW) ────────────────────────────────────────
+    with tab_mining:
+        st.subheader("⛏️ Mining Cost & Network Economics")
+
+        if mining:
+            col1, col2, col3, col4 = st.columns(4)
+            col1.metric("Network Power Draw", fmt(mining.get("network_power_gw"), 2, suffix=" GW"))
+            col2.metric("Est. Daily Energy Cost", fmt(mining.get("daily_energy_cost_usd"), 0, "$"))
+            col3.metric("Est. Breakeven Cost / BTC", fmt(mining.get("breakeven_per_btc"), 0, "$"))
+            col4.metric(
+                "Spot vs Breakeven",
+                fmt(mining.get("margin_pct"), 1, suffix="%"),
+                delta_color=delta_colour(mining.get("margin_pct"))
+            )
+
+            margin = mining.get("margin_pct", np.nan)
+            if not pd.isna(margin):
+                if margin > 50:
+                    st.success(
+                        f"Spot price is **{margin:.0f}% above** the estimated electricity-only breakeven — "
+                        "miners are operating with a wide margin, which historically supports continued "
+                        "hash rate growth and reduces forced-selling pressure."
+                    )
+                elif margin > 0:
+                    st.info(
+                        f"Spot price is **{margin:.0f}% above** estimated breakeven — miners profitable but margins are "
+                        "moderate. Watch for hash rate deceleration if price weakens further."
+                    )
+                else:
+                    st.warning(
+                        f"Spot price is **{abs(margin):.0f}% below** estimated electricity-only breakeven for the assumed "
+                        "fleet efficiency — a level that historically pressures less-efficient miners toward "
+                        "capitulation (forced selling, hash rate declines, difficulty reductions)."
+                    )
+
+            st.markdown("---")
+            st.markdown(f"""
+**Model inputs & assumptions:**
+- Network hash rate: **{fmt(bc.get('hash_rate_eh'), 1)} EH/s**
+- Assumed fleet efficiency: **{fleet_efficiency:.1f} J/TH**
+- Assumed electricity cost: **${electricity_cost:.2f}/kWh**
+- Estimated BTC issued per day: **{fmt(mining.get('btc_issued_per_day'), 1)} BTC** (block reward × ~144 blocks/day)
+- *(Electricity-only model — excludes ASIC capex/depreciation, cooling, pool fees, and curtailment strategies,
+  which can meaningfully shift real-world miner breakevens.)*
+""")
+        else:
+            st.warning("Mining cost model unavailable — hash rate data could not be fetched.")
+
+        st.markdown("---")
+        st.subheader("Miner Revenue & Puell Multiple")
+
+        col_a, col_b = st.columns(2)
+        col_a.metric("Daily Miner Revenue (USD)", fmt(bc.get("miners_revenue_usd_24h"), 0, "$"))
+        col_b.metric("Puell Multiple (proxy)", fmt(puell, 2))
+
+        mr_hist = bc.get("miner_revenue_history", [])
+        if mr_hist:
+            df_mr = pd.DataFrame(mr_hist)
+            df_mr["date"] = pd.to_datetime(df_mr["date"])
+            fig_mr = px.area(df_mr, x="date", y="value",
+                              labels={"value": "USD", "date": ""},
+                              title="Daily Miner Revenue — 1 Year (USD)",
+                              color_discrete_sequence=["#f1c40f"])
+            fig_mr.update_layout(template="plotly_dark", height=300)
+            st.plotly_chart(fig_mr, use_container_width=True)
+
+        st.caption(
+            "**Puell Multiple** = today's daily miner revenue (USD) ÷ its trailing average over the lookback window. "
+            "Historically, readings **below ~0.5** have coincided with miner-capitulation bottoms, while readings "
+            "**above ~4** have coincided with cycle-top euphoria. This implementation uses up to a 1-year average "
+            "as a proxy for the standard 365-day MA."
+        )
+
+        st.markdown("---")
+        st.subheader("Supply Context")
+        circ = cg.get("circulating", np.nan)
+        max_supply = cg.get("max_supply", 21_000_000)
+        issued_per_day = mining.get("btc_issued_per_day", np.nan) if mining else np.nan
+        col_x, col_y, col_z = st.columns(3)
+        col_x.metric("Circulating Supply", fmt(circ, 0, suffix=" BTC"))
+        col_y.metric("Remaining to Mine", fmt((max_supply or 21_000_000) - (circ or 0), 0, suffix=" BTC"))
+        col_z.metric("Est. New Supply / Day", fmt(issued_per_day, 1, suffix=" BTC"))
+        st.caption(f"Next halving expected around **{NEXT_HALVING_YEAR}**, which will cut new issuance roughly in half again.")
+
+    # ── TAB 5 · SENTIMENT ─────────────────────────────────────────────────────
     with tab_sentiment:
         st.subheader("Fear & Greed Index")
         fg_val   = fg.get("value", 50)
@@ -725,7 +1047,7 @@ def render_crypto_onchain():
         col1.metric("Latest Funding Rate", fmt(fr.get("latest"), 4, suffix="%"))
         col2.metric("8-Period Avg Rate",   fmt(fr.get("avg_8"),  4, suffix="%"))
 
-    # ── TAB 5 · SIGNAL GUIDE ─────────────────────────────────────────────────
+    # ── TAB 6 · SIGNAL GUIDE ─────────────────────────────────────────────────
     with tab_guide:
         st.subheader("Chapter 9 Signal Reference Guide")
 
@@ -765,13 +1087,27 @@ Below MA200 = bear market structure. Do not fight the trend.
 
 **BTC Dominance** — High and rising dominance = capital concentrated in BTC (risk-off for alts but BTC-positive).
 Falling dominance = altcoin season developing, risk appetite rising broadly.
+
+**NVT Ratio** — On-chain "valuation multiple." Compares network value (market cap) to actual on-chain
+transfer volume. Low NVT = usage justifies valuation (cheap). High NVT = valuation has detached from
+usage (expensive, often late-cycle).
+
+**Puell Multiple** — Compares today's miner revenue to its trailing average. Extreme lows have marked
+miner-capitulation bottoms; extreme highs have marked euphoric tops, since miners historically sell more
+aggressively when revenue is unusually high.
+
+**Mining Cost / Breakeven** — An electricity-only estimate of what it costs the network to produce one BTC,
+based on hash rate, an assumed fleet efficiency, and an assumed power price. When spot price falls toward or
+below this line, historically more miners approach capitulation, which can precede hash rate and difficulty
+declines.
 """)
 
         st.info(
             "**Chapter 9 Key Reminders:**\n\n"
             "• No single signal is sufficient — use this composite as a confluence tool\n"
-            "• On-chain data is most powerful at extremes (MVRV >3 or <1, extreme fear/greed)\n"
+            "• On-chain data is most powerful at extremes (NVT/Puell extremes, extreme fear/greed)\n"
             "• Macro liquidity conditions override on-chain in the short term\n"
             "• BTC halvings (next: 2028) structurally reduce supply — bullish on 12–18 month horizon\n"
+            "• Mining cost estimates are electricity-only approximations, not exact miner P&L\n"
             "• For deeper metrics (MVRV, NUPL, realised price, exchange reserves) visit Glassnode or CryptoQuant"
         )
