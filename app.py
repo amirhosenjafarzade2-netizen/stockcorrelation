@@ -348,6 +348,17 @@ def get_available_modules() -> Dict[str, dict]:
     except ImportError:
         pass
 
+    # ── NEW MODULE: Crypto On-Chain Fundamental Scanner ──────────────────────
+    try:
+        from crypto_onchain import render_crypto_onchain
+        modules["₿ Crypto On-Chain Scanner"] = {
+            "func": render_crypto_onchain,
+            "desc": "Bitcoin on-chain fundamentals: Fear & Greed, hash rate, active addresses, funding rate, dominance & composite verdict",
+            "uses_context": False
+        }
+    except ImportError:
+        pass
+
     return modules
 # ────────────────────────────────────────────────
 # Session State Initialization
