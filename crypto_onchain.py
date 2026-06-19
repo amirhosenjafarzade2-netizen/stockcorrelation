@@ -1,57 +1,3 @@
-"""
-crypto_onchain.py
-══════════════════════════════════════════════════════════════════════════════
-Bitcoin On-Chain Fundamental Scanner  (v3.0 — Trend-Aware + VPA)
-Based on Chapter 9: Crypto — On-Chain Fundamentals, Bitcoin Drivers,
-Sentiment & Strategies
-
-Data Sources (all free, no API key required):
-  • Alternative.me    — Fear & Greed Index
-  • CoinGecko         — Price, market cap, BTC dominance, volume, 24h/7d/30d change
-  • Blockchain.info   — Hash rate, active addresses, tx volume, mempool,
-                         miner revenue, on-chain USD transfer volume, difficulty
-  • Binance Futures   — BTC perpetual funding rate
-  • yfinance          — BTC/USD OHLCV for moving averages, momentum & VPA
-
-What changed in v3.0 (and why):
-  • NVT and Puell are now scored on TREND as well as LEVEL. A static
-    threshold can't tell you whether a reading of "70" got there by falling
-    from 110 (de-risking, arguably bullish) or rising from 40 (re-risking,
-    arguably bearish). Both readings now carry a rate-of-change component.
-  • New Volume-Price Analysis (VPA) tab. On-chain data answers "what regime
-    are we in" over weeks/months; VPA answers "does the current price move
-    have real participation behind it" over days/weeks. The original module
-    fetched OHLCV with Volume but never used Volume for anything. This adds:
-      - On-Balance Volume (OBV) and its trend vs price trend (divergence)
-      - Volume-confirmed breakout/breakdown flags vs 20d avg volume
-      - Volume-Weighted Average Price (rolling 20d) as a dynamic reference
-  • Mining cost model is unchanged in methodology (electricity-only is the
-    right default proxy) but the capex blind spot is now a visible banner,
-    not just a code comment, since it materially affects how the breakeven
-    number should be read.
-  • Score weights are now a module-level config users can see and adjust,
-    explicitly labeled as analyst priors rather than backtested coefficients
-    — the original code presented fixed weights with no caveat, which
-    overstates their precision.
-  • Defensive fixes: NVT/Puell/VPA scoring no longer throws on short
-    histories or empty Binance responses; composite scoring degrades
-    gracefully and says so in the UI rather than silently going to 0.
-
-Scoring Engine (Chapter 9 framework + extensions):
-  • Fear & Greed Index       (contrarian signal)
-  • Hash Rate trend          (miner confidence / network health)
-  • Active Addresses trend   (adoption / real usage)
-  • Funding Rate             (derivatives sentiment)
-  • Price vs 200d MA         (macro trend)
-  • 30d Price Momentum       (trend direction)
-  • BTC Dominance            (risk appetite)
-  • NVT Ratio (level+trend)  (on-chain valuation, now trend-aware)
-  • Puell Multiple (level+trend) (miner cycle extremes, now trend-aware)
-  • Volume-Price Confirmation (new) — does volume support the price trend?
-  ─────────────────────────────────────────────
-  Composite → ★ rating + Bullish / Neutral / Bearish verdict
-"""
-
 import streamlit as st
 import requests
 import pandas as pd
@@ -306,6 +252,31 @@ def fetch_btc_ohlcv() -> pd.DataFrame:
         return pd.DataFrame()
 
 
+@st.cache_data(ttl=900, show_spinner=False)
+def fetch_btc_marketcap_history(days: int = 90) -> pd.DataFrame:
+    """
+    Daily BTC market cap history from CoinGecko, used to build a TRUE NVT
+    series (real mcap ÷ real on-chain volume per day) instead of holding
+    market cap constant at today's value across history.
+    """
+    try:
+        r = requests.get(
+            f"{COINGECKO_BASE}/coins/bitcoin/market_chart",
+            params={"vs_currency": "usd", "days": str(days), "interval": "daily"},
+            timeout=REQUEST_TIMEOUT,
+            headers=HEADERS,
+        )
+        d = r.json()
+        caps = d.get("market_caps", [])
+        if not caps:
+            return pd.DataFrame()
+        df = pd.DataFrame(caps, columns=["ts", "market_cap"])
+        df["date"] = pd.to_datetime(df["ts"], unit="ms").dt.strftime("%Y-%m-%d")
+        return df[["date", "market_cap"]].drop_duplicates(subset="date", keep="last")
+    except Exception:
+        return pd.DataFrame()
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # DERIVED METRICS  (mining cost, NVT, Puell, supply, VPA)
 # ══════════════════════════════════════════════════════════════════════════════
@@ -358,16 +329,24 @@ def compute_mining_cost(bc: Dict, cg: Dict, electricity_usd_kwh: float,
     }
 
 
-def compute_nvt(bc: Dict, cg: Dict) -> Dict:
+def compute_nvt(bc: Dict, cg: Dict, mcap_hist: pd.DataFrame) -> Dict:
     """
     NVT Ratio = Market Cap / Daily On-Chain Transaction Volume (USD), 30d
     smoothed to reduce single-day noise (standard "NVT Signal" adjustment).
 
-    Also returns a TREND component: is NVT rising or falling over the last
-    ~30 days? A level of "70" reached by falling from 110 is a different
-    story than "70" reached by rising from 40 — static thresholds alone
-    can't distinguish a market de-risking from one re-risking. This trend
-    is later combined with the level in scoring.
+    TREND component (fixed in v3.1): earlier versions of this function held
+    market cap constant at TODAY's value while varying only the volume
+    denominator across history. That collapses to measuring "1 / volume
+    drift" and mislabeling it as NVT trend — if price rallied 20% in a month
+    while on-chain volume stayed flat, true NVT rose ~20% but the old metric
+    showed ~0% because mcap never varied in the series. This version uses a
+    real daily market-cap history (fetched from CoinGecko) divided by real
+    daily on-chain volume, so the trend reflects actual NVT movement, not
+    just the volume component of it.
+
+    If market-cap history isn't available (fetch failed), trend falls back
+    to volume-only drift and is EXPLICITLY labeled as such in the UI rather
+    than presented as true NVT trend.
 
     Caveat carried into the UI: static NVT thresholds were calibrated years
     ago. As more BTC activity moves to exchanges, Lightning, and custodial
@@ -385,23 +364,40 @@ def compute_nvt(bc: Dict, cg: Dict) -> Dict:
     nvt_daily    = mcap / tx_vol_now if (not pd.isna(mcap) and not pd.isna(tx_vol_now) and tx_vol_now > 0) else np.nan
 
     nvt_trend_pct = np.nan
-    nvt_series = []
-    if len(tv_hist) >= 35 and not pd.isna(mcap):
-        vals = [v["value"] for v in tv_hist]
-        # Build a rough NVT series using current mcap as a constant proxy
-        # (mcap history isn't fetched here; this approximates recent NVT
-        # drift via the volume denominator, which dominates short-term
-        # NVT movement far more than mcap does day-to-day).
-        nvt_series = [mcap / v if v > 0 else np.nan for v in vals[-35:]]
-        recent_avg = np.nanmean(nvt_series[-5:])
-        prior_avg  = np.nanmean(nvt_series[-35:-30])
-        if prior_avg and not pd.isna(prior_avg) and prior_avg != 0:
-            nvt_trend_pct = (recent_avg - prior_avg) / prior_avg * 100
+    nvt_trend_is_true = False
+
+    if len(tv_hist) >= 35:
+        df_vol = pd.DataFrame(tv_hist)[["date", "value"]].rename(columns={"value": "tx_vol"})
+
+        if mcap_hist is not None and not mcap_hist.empty:
+            merged = df_vol.merge(mcap_hist, on="date", how="inner")
+            merged = merged.dropna(subset=["tx_vol", "market_cap"])
+            merged = merged[merged["tx_vol"] > 0]
+            if len(merged) >= 35:
+                merged["nvt"] = merged["market_cap"] / merged["tx_vol"]
+                nvt_series = merged["nvt"].tail(35).tolist()
+                recent_avg = np.nanmean(nvt_series[-5:])
+                prior_avg  = np.nanmean(nvt_series[-35:-30])
+                if prior_avg and not pd.isna(prior_avg) and prior_avg != 0:
+                    nvt_trend_pct = (recent_avg - prior_avg) / prior_avg * 100
+                    nvt_trend_is_true = True
+
+        if not nvt_trend_is_true:
+            # Fallback: market-cap history unavailable. This measures only
+            # the inverse of on-chain volume drift, NOT true NVT trend,
+            # since it holds mcap constant. Labeled as such downstream.
+            vals = [v["value"] for v in tv_hist]
+            nvt_proxy_series = [mcap / v if (v and v > 0 and not pd.isna(mcap)) else np.nan for v in vals[-35:]]
+            recent_avg = np.nanmean(nvt_proxy_series[-5:])
+            prior_avg  = np.nanmean(nvt_proxy_series[-35:-30])
+            if prior_avg and not pd.isna(prior_avg) and prior_avg != 0:
+                nvt_trend_pct = (recent_avg - prior_avg) / prior_avg * 100
 
     return {
         "nvt_smoothed": nvt_smoothed,
         "nvt_daily": nvt_daily,
         "nvt_trend_pct": nvt_trend_pct,
+        "nvt_trend_is_true": nvt_trend_is_true,  # False => volume-only proxy, mcap held constant
     }
 
 
@@ -414,6 +410,11 @@ def compute_puell_multiple(bc: Dict) -> Dict:
     Also returns a TREND component (5d vs prior 5d, on the multiple itself)
     for the same reason as NVT: a Puell of 0.6 falling further is a
     different signal than 0.6 having just bounced off 0.4.
+
+    Note: unlike NVT, this trend is NOT subject to the constant-denominator
+    bug, because `ma` (the trailing average) is a single fixed number for
+    the whole series by construction — both vals[-5:] and the MA come from
+    the same revenue history, so the ratio genuinely varies day to day.
     """
     hist = bc.get("miner_revenue_history", [])
     if len(hist) < 30:
@@ -510,55 +511,91 @@ def score_fear_greed(fg: Dict) -> Tuple[float, str]:
 
 
 def score_hash_rate(bc: Dict) -> Tuple[float, str]:
+    """
+    Trend measured via linear-regression slope over the full 30-day history
+    rather than comparing only the first 7 days to the last 7 days. The
+    endpoint-comparison approach (v3.0) ignored the middle two weeks
+    entirely and was sensitive to single-day noise at either edge; a
+    least-squares slope uses every observation and is far less sensitive
+    to one noisy day at the start or end of the window.
+    """
     hist = bc.get("hash_rate_history", [])
-    if len(hist) < 7:
+    if len(hist) < 10:
         return 0.0, "Insufficient history"
-    vals = [v["value"] for v in hist]
-    recent_avg = np.mean(vals[-7:])
-    prior_avg  = np.mean(vals[:7])
-    if prior_avg == 0:
+    vals = np.array([v["value"] for v in hist], dtype=float)
+    x = np.arange(len(vals))
+    slope, intercept = np.polyfit(x, vals, 1)
+    mean_val = np.mean(vals)
+    if mean_val == 0:
         return 0.0, "No baseline"
-    chg_pct = (recent_avg - prior_avg) / prior_avg * 100
-    if chg_pct > 5:    return +1.0, f"Hash rate rising +{chg_pct:.1f}% (30d) — BULLISH"
-    if chg_pct > 1:    return +0.5, f"Hash rate slightly rising +{chg_pct:.1f}% — mild bullish"
-    if chg_pct > -1:   return  0.0, f"Hash rate flat ({chg_pct:+.1f}%) — Neutral"
-    if chg_pct > -5:   return -0.5, f"Hash rate slightly falling {chg_pct:.1f}% — mild bearish"
-    return -1.0,               f"Hash rate falling {chg_pct:.1f}% — BEARISH (miner stress)"
+    # Normalize slope to a "% change over the full window" so thresholds
+    # stay comparable to the old endpoint-comparison logic.
+    chg_pct = (slope * (len(vals) - 1)) / mean_val * 100
+    if chg_pct > 5:    return +1.0, f"Hash rate trend +{chg_pct:.1f}% (30d, regression) — BULLISH"
+    if chg_pct > 1:    return +0.5, f"Hash rate trend slightly rising +{chg_pct:.1f}% — mild bullish"
+    if chg_pct > -1:   return  0.0, f"Hash rate trend flat ({chg_pct:+.1f}%) — Neutral"
+    if chg_pct > -5:   return -0.5, f"Hash rate trend slightly falling {chg_pct:.1f}% — mild bearish"
+    return -1.0,               f"Hash rate trend falling {chg_pct:.1f}% — BEARISH (miner stress)"
 
 
 def score_active_addresses(bc: Dict) -> Tuple[float, str]:
+    """
+    Caveat (added v3.1): active-address counts are a directionally useful
+    but noisy proxy for real usage — they're distorted by exchange
+    custodial-wallet batching, UTXO consolidation sweeps, address reuse
+    patterns, and activity migrating to Layer 2 / Lightning, none of which
+    track "new users" in any clean way. Treat this as one weak vote, not a
+    confirmed adoption read.
+    """
     now = bc.get("active_addr_now", np.nan)
     ago = bc.get("active_addr_30d", np.nan)
     if pd.isna(now) or pd.isna(ago) or ago == 0:
         return 0.0, "No address data"
     chg = (now - ago) / ago * 100
-    if chg > 10:   return +1.0, f"Active addresses +{chg:.1f}% (30d) — strong BULLISH adoption"
-    if chg > 3:    return +0.5, f"Active addresses +{chg:.1f}% — rising adoption"
+    if chg > 10:   return +1.0, f"Active addresses +{chg:.1f}% (30d) — usage rising (noisy proxy; see guide)"
+    if chg > 3:    return +0.5, f"Active addresses +{chg:.1f}% — mild rise (noisy proxy; see guide)"
     if chg > -3:   return  0.0, f"Active addresses flat ({chg:+.1f}%)"
-    if chg > -10:  return -0.5, f"Active addresses {chg:.1f}% — declining usage"
-    return -1.0,               f"Active addresses {chg:.1f}% — sharp drop — BEARISH"
+    if chg > -10:  return -0.5, f"Active addresses {chg:.1f}% — mild decline (noisy proxy; see guide)"
+    return -1.0,               f"Active addresses {chg:.1f}% — sharp drop (noisy proxy; see guide)"
 
 
 def score_funding_rate(fr: Dict) -> Tuple[float, str]:
+    """
+    Thresholds loosened slightly (v3.1): moderately positive funding is
+    common and unremarkable during genuine bull trends, not necessarily a
+    bearish tell on its own — the contrarian read works best at real
+    extremes, not at the first sign of positive funding.
+    """
     avg = fr.get("avg_8", np.nan)
     if pd.isna(avg):
         return 0.0, "No funding data"
-    if avg > 0.05:    return -1.0, f"Funding rate high ({avg:+.4f}%) — crowded longs — BEARISH"
-    if avg > 0.01:    return -0.5, f"Funding rate positive ({avg:+.4f}%) — mild bearish"
-    if avg > -0.01:   return  0.0, f"Funding rate neutral ({avg:+.4f}%)"
-    if avg > -0.05:   return +0.5, f"Funding rate negative ({avg:+.4f}%) — shorts dominant — contrarian bullish"
+    if avg > 0.08:    return -1.0, f"Funding rate very high ({avg:+.4f}%) — crowded longs — BEARISH"
+    if avg > 0.03:    return -0.5, f"Funding rate elevated ({avg:+.4f}%) — mild bearish lean"
+    if avg > -0.02:   return  0.0, f"Funding rate near-neutral ({avg:+.4f}%) — normal in either trend"
+    if avg > -0.06:   return +0.5, f"Funding rate negative ({avg:+.4f}%) — shorts dominant — contrarian bullish"
     return +1.0,               f"Funding rate very negative ({avg:+.4f}%) — short squeeze setup — BULLISH"
 
 
 def score_btc_dominance(cg: Dict) -> Tuple[float, str]:
+    """
+    Reworked (v3.1): dominance is NOT a reliable directional signal for
+    BTC itself. Rising dominance shows up in early bull markets (capital
+    flowing into BTC first) AND in bear markets (capital fleeing riskier
+    alts faster than BTC) — falling dominance shows up in late-bull
+    "altseason" AND can simply mean alts are getting hit less hard, not
+    that BTC is weak. Because the same reading can mean opposite things
+    depending on regime, this is scored as a much smaller, regime-flagging
+    signal rather than a directional bullish/bearish vote, and its weight
+    in DEFAULT_WEIGHTS has been reduced accordingly.
+    """
     dom = cg.get("dominance", np.nan)
     if pd.isna(dom):
         return 0.0, "No dominance data"
-    if dom > 60:   return +1.0, f"BTC dominance {dom:.1f}% — very high, capital in BTC — BULLISH"
-    if dom > 52:   return +0.5, f"BTC dominance {dom:.1f}% — elevated, BTC preferred"
-    if dom > 45:   return  0.0, f"BTC dominance {dom:.1f}% — balanced"
-    if dom > 38:   return -0.3, f"BTC dominance {dom:.1f}% — altseason developing"
-    return -0.5,               f"BTC dominance {dom:.1f}% — low, capital rotating to alts"
+    if dom > 60:   return +0.3, f"BTC dominance {dom:.1f}% — high; capital concentrated in BTC (regime flag, not a directional call)"
+    if dom > 52:   return +0.15, f"BTC dominance {dom:.1f}% — elevated (regime flag, not a directional call)"
+    if dom > 45:   return  0.0, f"BTC dominance {dom:.1f}% — balanced regime"
+    if dom > 38:   return -0.15, f"BTC dominance {dom:.1f}% — alt-rotation regime (regime flag, not a directional call)"
+    return -0.3,               f"BTC dominance {dom:.1f}% — low; heavy alt-rotation (regime flag, not a directional call)"
 
 
 def score_price_vs_ma(ohlcv: pd.DataFrame) -> Tuple[float, str]:
@@ -599,9 +636,15 @@ def score_nvt(nvt: Dict) -> Tuple[float, str]:
     getting cheaper or more expensive right now). Level sets the base score;
     trend nudges it by up to ±0.3, so a level reading near a threshold
     boundary can flip categories if the trend is moving sharply against it.
+
+    The trend figure now comes from real NVT history (mcap history × volume
+    history) when available — see compute_nvt(). If only the volume-only
+    fallback was available, the note says so explicitly instead of implying
+    a true NVT trend was measured.
     """
     val = nvt.get("nvt_smoothed", np.nan)
     trend = nvt.get("nvt_trend_pct", np.nan)
+    is_true_trend = nvt.get("nvt_trend_is_true", False)
     if pd.isna(val):
         return 0.0, "No NVT data"
 
@@ -615,7 +658,11 @@ def score_nvt(nvt: Dict) -> Tuple[float, str]:
     if not pd.isna(trend):
         nudge = np.clip(-trend / 100, -0.3, 0.3)  # NVT rising (trend>0) is bearish nudge
         base = float(np.clip(base + nudge, -1.0, 1.0))
-        trend_note = f", trending {'up' if trend > 0 else 'down'} {abs(trend):.0f}% (30d)"
+        direction = "up" if trend > 0 else "down"
+        if is_true_trend:
+            trend_note = f", trending {direction} {abs(trend):.0f}% (30d, true NVT)"
+        else:
+            trend_note = f", volume-only proxy trending {direction} {abs(trend):.0f}% (30d — mcap history unavailable, NOT true NVT trend)"
 
     return base, f"NVT {val:.0f}{trend_note} — {label}"
 
@@ -683,6 +730,13 @@ def score_volume_confirmation(vpa: Dict) -> Tuple[float, str]:
 
 
 # ── Composite Scorer ─────────────────────────────────────────────────────────
+
+# Signals that tend to move together because they're all reading the same
+# underlying price action from different angles. Shown in the UI as a
+# correlation-risk note: summing weights across these treats them as
+# independent votes when they're often one vote counted four times.
+CORRELATED_SIGNAL_GROUP = ["30d Momentum", "Price vs MA200", "Funding Rate", "Fear & Greed"]
+
 
 def compute_composite(scores: Dict[str, float], weights: Dict[str, float]) -> float:
     total_w = sum(weights[k] for k in scores if k in weights and not pd.isna(scores[k]))
@@ -762,25 +816,36 @@ def render_crypto_onchain():
             "**not coefficients derived from a backtest**. Adjust them if you weight certain "
             "signals differently, or to stress-test how sensitive the verdict is to the weighting scheme."
         )
+        st.info(
+            "📐 **Correlation note:** *30d Momentum*, *Price vs MA200*, *Funding Rate*, and "
+            "*Fear & Greed* mostly read the same underlying price action from different angles and "
+            "tend to move together. Summing their weights as if they were independent votes "
+            "double-counts that shared information — treat the composite below as a **structured "
+            "checklist**, not a statistically validated predictive score.",
+            icon="📐",
+        )
         weights = {}
         cols = st.columns(3)
         for i, (name, default) in enumerate(DEFAULT_WEIGHTS.items()):
             with cols[i % 3]:
-                weights[name] = st.slider(name, 0.0, 0.30, default, 0.01, key=f"w_{name}")
+                label = f"{name} 🔗" if name in CORRELATED_SIGNAL_GROUP else name
+                weights[name] = st.slider(label, 0.0, 0.30, default, 0.01, key=f"w_{name}")
+        st.caption("🔗 = part of the correlated price-action group described above.")
         total_w = sum(weights.values())
         if total_w > 0:
             weights = {k: v / total_w for k, v in weights.items()}
         st.caption(f"Weights normalized to sum to 100% (raw sum was {total_w:.2f}).")
 
     with st.spinner("Fetching on-chain & market data…"):
-        fg    = fetch_fear_greed()
-        cg    = fetch_coingecko_btc()
-        bc    = fetch_blockchain_info()
-        fr    = fetch_funding_rate()
-        ohlcv = fetch_btc_ohlcv()
+        fg        = fetch_fear_greed()
+        cg        = fetch_coingecko_btc()
+        bc        = fetch_blockchain_info()
+        fr        = fetch_funding_rate()
+        ohlcv     = fetch_btc_ohlcv()
+        mcap_hist = fetch_btc_marketcap_history(days=90)
 
     mining = compute_mining_cost(bc, cg, electricity_cost, fleet_efficiency)
-    nvt    = compute_nvt(bc, cg)
+    nvt    = compute_nvt(bc, cg, mcap_hist)
     puell  = compute_puell_multiple(bc)
     vpa    = compute_vpa(ohlcv)
 
@@ -886,14 +951,17 @@ def render_crypto_onchain():
         for name, score in raw_scores.items():
             weight = weights.get(name, 0)
             contrib = score * weight if not pd.isna(score) else np.nan
+            tag = " 🔗" if name in CORRELATED_SIGNAL_GROUP else ""
             rows.append({
-                "Signal":       name,
+                "Signal":       name + tag,
                 "Score (−1→+1)": score_bar(score),
                 "Weight":       f"{weight*100:.0f}%",
                 "Contribution": f"{contrib:+.3f}" if not pd.isna(contrib) else "—",
                 "Interpretation": notes[name],
             })
         st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+        st.caption("🔗 = correlated price-action group (30d Momentum, Price vs MA200, Funding Rate, Fear & Greed) — "
+                   "these often move together, so their combined weight overstates how much independent evidence they provide.")
 
         fig = go.Figure()
         categories = list(raw_scores.keys())
@@ -984,7 +1052,7 @@ def render_crypto_onchain():
         else:
             st.warning("Price data unavailable from yfinance.")
 
-    # ── TAB 3 · VOLUME-PRICE ANALYSIS (NEW) ───────────────────────────────────
+    # ── TAB 3 · VOLUME-PRICE ANALYSIS ────────────────────────────────────────
     with tab_vpa:
         st.subheader("📐 Volume-Price Analysis")
         st.caption(
@@ -1043,7 +1111,8 @@ def render_crypto_onchain():
                 "diverge — price rising while OBV falls, or vice versa — that's historically a higher-risk "
                 "setup, since the move isn't backed by the volume that would normally confirm it. "
                 "**20d VWAP** acts as a dynamic support/resistance reference many traders watch for "
-                "mean-reversion entries."
+                "mean-reversion entries. Note: this uses exchange-reported spot volume via yfinance, "
+                "which varies in quality/coverage across venues — treat OBV as directional, not exact."
             )
         else:
             st.warning("Insufficient price/volume history to compute VPA metrics.")
@@ -1068,16 +1137,22 @@ def render_crypto_onchain():
             st.metric("24h Volume",       fmt(cg.get("volume_24h"), 0, "$"))
             st.metric("On-Chain Volume (USD, 24h)", fmt(bc.get("tx_volume_usd_now"), 0, "$"))
             st.metric("NVT Ratio (30d-smoothed)",   fmt(nvt.get("nvt_smoothed"), 1))
-            st.metric("NVT 30d Trend", fmt(nvt.get("nvt_trend_pct"), 1, suffix="%"))
+            nvt_trend_label = "NVT 30d Trend" if nvt.get("nvt_trend_is_true") else "Vol-only NVT proxy trend*"
+            st.metric(nvt_trend_label, fmt(nvt.get("nvt_trend_pct"), 1, suffix="%"))
             st.metric("BTC Dominance",    fmt(cg.get("dominance"), 2, suffix="%"))
             st.metric("Circulating Supply", fmt(cg.get("circulating"), 0, suffix=" BTC"))
+            if not nvt.get("nvt_trend_is_true", False) and not pd.isna(nvt.get("nvt_trend_pct", np.nan)):
+                st.caption("*Market-cap history fetch failed — this trend reflects on-chain volume drift only, not true NVT.")
 
         st.markdown("---")
         st.caption(
             "**NVT Ratio** = Market Cap ÷ on-chain USD transfer volume (30-day average, smoothed). "
             "Think of it as an on-chain 'P/E ratio.' Note the **trend** column above: a level near a "
             "threshold boundary means less if it's moving sharply in the opposite direction — falling "
-            "NVT into a 'neutral' reading is a different signal than rising NVT into the same reading."
+            "NVT into a 'neutral' reading is a different signal than rising NVT into the same reading. "
+            "The trend is computed from real daily market-cap history when available; if that fetch "
+            "fails, the app falls back to a volume-only proxy and labels it as such rather than "
+            "presenting it as true NVT trend."
         )
 
         hr_hist = bc.get("hash_rate_history", [])
@@ -1185,7 +1260,9 @@ def render_crypto_onchain():
         st.caption(
             "**Puell Multiple** = daily miner revenue ÷ its trailing average. Historically, readings "
             "**below ~0.5** coincide with miner-capitulation bottoms; readings **above ~4** coincide with "
-            "cycle-top euphoria. The trend figure shows whether it's moving toward or away from an extreme."
+            "cycle-top euphoria. The trend figure shows whether it's moving toward or away from an extreme. "
+            "Unlike NVT's trend, this one is not affected by a constant-denominator issue, since both the "
+            "ratio and its trailing average are drawn from the same revenue series."
         )
 
         st.markdown("---")
@@ -1293,42 +1370,68 @@ def render_crypto_onchain():
 ---
 **Individual Signal Interpretation:**
 
-**Fear & Greed Index** — Contrarian signal. Extreme Fear (<20) historically marks accumulation zones;
+**Fear & Greed Index** 🔗 — Contrarian signal. Extreme Fear (<20) historically marks accumulation zones;
 Extreme Greed (>80) marks distribution zones. Never trade on this alone — confirm with on-chain and volume.
 
-**Hash Rate** — Rising hash rate signals miner confidence. Falling hash rate can signal miner stress
-or upcoming capitulation.
+**Hash Rate** — Now measured via a 30-day linear-regression slope rather than comparing only the first
+and last week, so the middle of the window actually counts and single noisy days at either edge matter
+less. Rising hash rate signals miner confidence; falling hash rate can signal miner stress or upcoming
+capitulation.
 
-**Active Addresses** — A core measure of real demand. Divergence between price rising and addresses
-falling is a warning signal.
+**Active Addresses** — A *directionally* useful but noisy proxy for real usage, not a clean adoption
+read. It's distorted by exchange custodial-wallet batching, UTXO consolidation sweeps, address reuse,
+and activity migrating off-chain to Layer 2 / Lightning. Weight it as one vote among many, not
+confirmation on its own.
 
-**Funding Rate** — Persistently positive = overcrowded longs vulnerable to a liquidation cascade.
-Extremely negative = short squeeze potential.
+**Funding Rate** 🔗 — Persistently very positive = overcrowded longs vulnerable to a liquidation
+cascade. Very negative = short squeeze potential. Thresholds were loosened from earlier versions
+because moderately positive funding is common and unremarkable during genuine bull trends — the
+contrarian read works best at real extremes, not the first sign of positive funding.
 
-**Price vs MA200** — The macro trend filter. Above MA200 = bull market structure; below = bear
+**Price vs MA200** 🔗 — The macro trend filter. Above MA200 = bull market structure; below = bear
 market structure.
 
-**30d Momentum** — Trend direction over a meaningful period, avoiding daily noise.
+**30d Momentum** 🔗 — Trend direction over a meaningful period, avoiding daily noise.
 
-**BTC Dominance** — High/rising = capital concentrated in BTC. Falling = altcoin season developing.
+**BTC Dominance** — *Not* a reliable directional signal for BTC on its own. Rising dominance shows up
+in early bull markets (capital flowing into BTC first) **and** in bear markets (capital fleeing
+riskier alts faster than BTC). Falling dominance shows up in "altseason" **and** can simply mean alts
+are getting hit less hard. Because the same reading can mean opposite things depending on regime,
+this is now scored as a small regime-flag (±0.3 max) rather than a directional bullish/bearish vote,
+and carries a reduced weight in the default mix.
 
-**NVT Ratio (now trend-aware)** — On-chain "valuation multiple." Low = usage justifies valuation
-(cheap); high = valuation has detached from usage (expensive). **Caveat:** static thresholds were
-calibrated years ago; as activity moves off-chain (exchanges, Lightning, custodial rails), the
-"normal" range likely drifts over time — treat NVT as one input among several, not a standalone call.
-The trend component shows whether NVT is currently moving toward or away from an extreme.
+**NVT Ratio (now trend-aware, fixed in v3.1)** — On-chain "valuation multiple." Low = usage justifies
+valuation (cheap); high = valuation has detached from usage (expensive). **The trend calculation was
+fixed**: earlier it held market cap constant at today's value across the lookback window, which meant
+the "trend" was actually just inverse on-chain-volume drift mislabeled as NVT trend. It now uses real
+daily market-cap history so the trend reflects genuine NVT movement; if market-cap history can't be
+fetched, the app falls back to the volume-only proxy and says so explicitly rather than presenting it
+as true NVT trend. Separately, static NVT thresholds were calibrated years ago — as activity moves
+off-chain (exchanges, Lightning, custodial rails), the "normal" range likely drifts — so treat NVT as
+one input among several, not a standalone call.
 
 **Puell Multiple (now trend-aware)** — Compares today's miner revenue to its trailing average.
-Extreme lows have marked capitulation bottoms; extreme highs have marked euphoric tops.
+Extreme lows have marked capitulation bottoms; extreme highs have marked euphoric tops. This trend
+calculation does not share NVT's old bug, since both the ratio and its baseline come from the same
+revenue series.
 
-**Volume-Price Analysis (new)** — Does trading volume confirm or contradict the price trend? Price
-and OBV moving together = real participation. Divergence (price up, volume distributing, or vice
-versa) is historically a higher-risk setup, regardless of what on-chain fundamentals say — this is
-the tactical layer that sits on top of the slower-moving fundamental picture.
+**Volume-Price Analysis** — Does trading volume confirm or contradict the price trend? Price and OBV
+moving together = real participation. Divergence (price up, volume distributing, or vice versa) is
+historically a higher-risk setup, regardless of what on-chain fundamentals say — this is the tactical
+layer that sits on top of the slower-moving fundamental picture. Of all the signals here, this is one
+of the more directly defensible, since it's standard technical-analysis logic rather than a crypto-
+specific heuristic — though exchange-reported volume quality varies, so treat it as directional.
 
 **Mining Cost / Breakeven** — Electricity-only estimate of network production cost per BTC. Excludes
 capex/depreciation — read it as a soft floor, not full miner P&L. When spot falls toward or below this
 line, more miners historically approach capitulation.
+
+**Composite score / linear weighting** 🔗 — The score sums weight × signal across all ten components
+as if each were independent evidence. In reality, the 🔗-tagged signals above (Fear & Greed, Funding
+Rate, Price vs MA200, 30d Momentum) substantially correlate with each other because they're all
+reading the same underlying price action from different angles — so the composite partially
+double-counts that one piece of information. Treat the composite as a **structured checklist** that
+organizes the inputs you should be looking at, not a statistically validated predictive model.
 """)
 
         st.info(
@@ -1338,6 +1441,10 @@ line, more miners historically approach capitulation.
             "• Volume-price analysis adds a tactical timing layer on top of the slower fundamental picture\n"
             "• Macro liquidity conditions can override on-chain signals in the short term\n"
             "• Score weights here are analyst priors, not backtested coefficients — adjust and stress-test them\n"
+            "• 🔗-tagged signals correlate with each other (price-action based) — don't read the composite as "
+            "ten independent votes\n"
+            "• BTC dominance is a regime flag, not a reliable directional call on BTC itself\n"
+            "• Active-address counts are a noisy adoption proxy, not a clean usage read\n"
             "• Mining cost estimates are electricity-only approximations, not exact miner P&L\n"
             "• For deeper metrics (MVRV, NUPL, realised price, exchange reserves) consider Glassnode or CryptoQuant\n\n"
             "**This tool is for research and education — it is not financial advice.**"
