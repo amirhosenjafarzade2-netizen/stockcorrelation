@@ -193,24 +193,51 @@ def fetch_fred_series(series_id: str) -> pd.Series:
         return pd.Series(dtype=float)
 
 
-def normalise_rate_series(s: pd.Series) -> pd.Series:
-    """Auto-detect decimal-form FRED rates (0.05 → 5%) and convert to %."""
-    if s.empty:
-        return s
-    if s.dropna().abs().median() < 0.20:
-        return s * 100
+def normalise_rate_series(s: pd.Series, label: str = "", code: str = "",
+                           dq_log: Optional["DataQualityLog"] = None) -> pd.Series:
+    """
+    No-op pass-through for rate/CPI series.
+
+    Every FRED series referenced in FRED_SERIES for policy_rate, ten_year,
+    and cpi_yoy is documented by FRED/source as already being in "Percent"
+    units (e.g. DFEDTARU, ECBDFR, IRLTLT01..., CPALTT01..., etc.) -- none
+    of them ship as a 0-1 decimal fraction. A prior version of this
+    function tried to auto-detect decimal-encoded values from a magnitude
+    heuristic (median < 0.20 -> multiply by 100), but that heuristic has
+    no way to tell "0.10 meaning 0.10%" (a real, low-but-valid policy
+    rate for JPY/CHF, or CPI near zero) apart from "0.0010 meaning
+    0.10% encoded as a fraction" -- both have the same magnitude. That
+    ambiguity caused real bugs: genuinely low rates got wrongly
+    multiplied by 100, and the resulting mixed units flowed into
+    real-rate subtraction (10Y yield − CPI) producing nonsensical results
+    like several-hundred-percent "real rates".
+
+    Trusting FRED's documented units (which this app's own series
+    selection controls) is more reliable than guessing from data shape.
+    If a specific series is ever found to ship as a decimal fraction,
+    add it explicitly to DECIMAL_ENCODED_SERIES below rather than
+    re-introducing a magnitude guess.
+    """
     return s
+
+
+# Series IDs (if any) that are known from FRED's own documentation to be
+# decimal-encoded rather than already in percent. Add explicit IDs here
+# only after confirming via the FRED series page ("Units:" field) --
+# do not re-introduce magnitude-based guessing.
+DECIMAL_ENCODED_SERIES: set = set()
 
 
 def fetch_currency_macro(code: str, dq_log: DataQualityLog) -> Dict[str, pd.Series]:
     out: Dict[str, pd.Series] = {}
-    rate_fields = {"policy_rate", "ten_year"}
+    rate_fields = {"policy_rate", "ten_year", "cpi_yoy"}
     for label, sid in FRED_SERIES.get(code, {}).items():
         s = fetch_fred_series(sid)
         if s.empty and sid:
             dq_log.warn(code, f"FRED '{sid}' ({label}) unavailable")
-        if label in rate_fields:
-            s = normalise_rate_series(s)
+        if label in rate_fields and sid in DECIMAL_ENCODED_SERIES:
+            s = s * 100
+            dq_log.warn(code, f"{label} ('{sid}'): converted from decimal to percent per known series unit.")
         out[label] = s
     return out
 
@@ -371,39 +398,45 @@ def taylor_rule_score(
     factors = 0
 
     # 1. Inflation gap: how far above/below 2% target
+    #    Divisor tightened from 3.0 -> 2.0: a CPI of 5% (3pt gap) now maps
+    #    to tanh(1.5)=0.90 instead of tanh(1.0)=0.76, so a clearly
+    #    above-target print actually pushes the score toward the edges
+    #    instead of staying compressed near the centre.
     if not pd.isna(cpi_now):
         infl_gap = cpi_now - INFLATION_TARGET
-        # Nonlinear: gap>4% signals hawkish urgency; gap<-1% signals dovish urgency
-        infl_score = np.tanh(infl_gap / 3.0)
+        infl_score = np.tanh(infl_gap / 2.0)
         score += infl_score * 0.35
         factors += 0.35
 
     # 2. Inflation momentum: recent trend (3m change)
+    #    Divisor tightened from 2.0 -> 1.2.
     if not pd.isna(cpi_now) and not pd.isna(cpi_3m_ago):
         infl_chg = cpi_now - cpi_3m_ago
-        # Falling rapidly even if above target → dovish signal
-        mom_score = np.tanh(infl_chg / 2.0)
+        mom_score = np.tanh(infl_chg / 1.2)
         score += mom_score * 0.20
         factors += 0.20
 
     # 3. Labour market: rising unemployment = dovish pressure
+    #    Divisor tightened from 1.0 -> 0.6 (a 0.3pt unemployment move is a
+    #    meaningful labour-market signal, not a rounding blip).
     if not pd.isna(unemp_now) and not pd.isna(unemp_prior):
         unemp_chg = unemp_now - unemp_prior
-        # Rising unemployment → dovish (negative score)
-        unemp_score = -np.tanh(unemp_chg / 1.0)
+        unemp_score = -np.tanh(unemp_chg / 0.6)
         score += unemp_score * 0.20
         factors += 0.20
 
     # 4. GDP momentum
+    #    Divisor tightened from 3.0 -> 2.0.
     if not pd.isna(gdp_growth):
-        gdp_score_t = np.tanh(gdp_growth / 3.0)
+        gdp_score_t = np.tanh(gdp_growth / 2.0)
         score += gdp_score_t * 0.15
         factors += 0.15
 
     # 5. Rate momentum: is the CB already moving in a direction?
+    #    Divisor tightened from 1.0 -> 0.75.
     if not pd.isna(rate_now) and not pd.isna(rate_6m_ago):
         rate_chg = rate_now - rate_6m_ago
-        rate_mom = np.tanh(rate_chg / 1.0)
+        rate_mom = np.tanh(rate_chg / 0.75)
         score += rate_mom * 0.10
         factors += 0.10
 
@@ -622,12 +655,29 @@ def analyze_currency(code: str, macro: Dict[str, pd.Series],
     inflation_score = cb_taylor_score  # CB score IS the inflation/policy signal
 
     # ── Trade balance ────────────────────────────────────────────────────
+    # IMPORTANT: FRED trade-balance series are NOT in comparable units
+    # across countries. USD uses BOPGSTB (raw USD millions). Most other
+    # currencies use OECD "XTNTVA01..." series, which are an OECD index
+    # unit (CXMLSA), not USD millions. Comparing raw levels side-by-side
+    # (e.g. "USD: -50,000" vs "EUR: -12.4") is comparing different units
+    # and produces numbers that look arbitrary/wrong -- because they are
+    # not on the same scale. We therefore:
+    #   1. Score trade direction/sign using the country's OWN series only
+    #      (sign + trend within one unit system is still meaningful).
+    #   2. Compute a z-score vs the country's own trailing history so the
+    #      Overview can show "how strong vs normal for this country" --
+    #      directly comparable across currencies, the same pattern already
+    #      used for GDP -- instead of showing incomparable raw levels.
     trade_dir = trend_direction(trade_bal, lookback=3)
     trade_score = np.nan
     if not pd.isna(trade_now):
         base = 0.5 if trade_now > 0 else -0.5
         mom  = 0.3 if trade_dir == "rising" else (-0.3 if trade_dir == "falling" else 0.0)
         trade_score = float(np.clip(base + mom, -1, 1))
+    trade_z = zscore_current(trade_bal, window=20)
+    # Unit label so the UI never implies cross-currency comparability of
+    # the raw figure.
+    trade_unit = "$M (raw)" if code == "USD" else "OECD index (own units)"
 
     # ── M2 ───────────────────────────────────────────────────────────────
     m2_growth_now = latest(yoy_growth(m2, 12))
@@ -675,6 +725,12 @@ def analyze_currency(code: str, macro: Dict[str, pd.Series],
     weight_used  = sum(effective_weights[k] for k, v in component_scores.items() if not pd.isna(v))
     composite    = float(weighted_sum / weight_used) if weight_used > 0 else np.nan
 
+    # Bullish/Bearish band. Composite is a weighted blend of several -1..+1
+    # component scores, so it rarely reaches the extremes even when one
+    # driver (e.g. CB policy) is screaming in one direction -- that's
+    # expected dampening, not a bug. The 0.25 cutoff is calibrated against
+    # the tanh divisors in taylor_rule_score(); if those divisors change,
+    # this threshold should be re-checked against realistic scenarios.
     if pd.isna(composite):        overall_bias = "Neutral"
     elif composite >= 0.25:       overall_bias = "Bullish"
     elif composite <= -0.25:      overall_bias = "Bearish"
@@ -721,6 +777,7 @@ def analyze_currency(code: str, macro: Dict[str, pd.Series],
         "Policy Rate %":       rate_now,   "CPI YoY %": cpi_now,
         "GDP Growth %":        gdp_growth_now, "GDP Z-Score": gdp_z,
         "Trade Balance":       trade_now,  "Unemployment %": unemp_now,
+        "Trade Z-Score":       trade_z,    "Trade Unit": trade_unit,
         "10Y Yield %":         ten_y_now,  "Real Rate % (10Y)": real_rate_10y,
         "Real Rate % (Policy)":real_rate_policy, "Real Rate %": real_rate,
         "Curve Slope":         curve_slope,"Curve State": curve_state,
@@ -796,7 +853,17 @@ def rank_currencies(results: List[Dict]) -> pd.DataFrame:
                  "★★★☆☆" if score >= 0.1 else "★★☆☆☆" if score >= -0.1 else
                  "★☆☆☆☆" if score >= -0.3 else "☆☆☆☆☆") if not pd.isna(score) else "—"
         tb = r["Trade Balance"]
-        tb_label = f"{'▲' if tb > 0 else '▼'} {tb:,.0f}" if not pd.isna(tb) else "—"
+        tb_z = r.get("Trade Z-Score", np.nan)
+        # Show the z-score (comparable across currencies) as the primary
+        # signal, with the raw print + its native unit in parentheses so
+        # it's clear the raw numbers are NOT directly comparable across
+        # rows of this table.
+        if not pd.isna(tb_z):
+            tb_label = f"{'▲' if tb_z > 0 else '▼'} z={tb_z:+.2f}"
+        elif not pd.isna(tb):
+            tb_label = f"{'▲' if tb > 0 else '▼'} {tb:,.0f} ({r.get('Trade Unit','—')})"
+        else:
+            tb_label = "—"
         rows.append({
             "Currency":     r["code"],     "Name": r["name"],
             "Bias":         r["Overall Bias"], "Score": round(score,3) if not pd.isna(score) else np.nan,
@@ -829,6 +896,43 @@ def real_rate_differential_table(results: List[Dict]) -> pd.DataFrame:
                 row[short] = f"{diff:+.2f}%" if not pd.isna(diff) else "—"
         rows.append(row)
     return pd.DataFrame(rows).set_index("Long ↓ / Short →")
+
+
+def cpi_actual_vs_expected(cpi_series: pd.Series, months: int = 24) -> pd.DataFrame:
+    """
+    Build a trailing actual-vs-model-expected CPI table for one currency.
+
+    "Expected" reuses the SAME mean-reversion blend already used elsewhere
+    in this app for the forward 12m CPI forecast (60% persistence /
+    40% reversion to the 2% inflation target), but applied retrospectively:
+    for each past month, "expected" = what the model would have forecast
+    GIVEN the prior month's actual reading. This lets the user see how well
+    the simple mean-reversion heuristic has been tracking reality, month
+    by month, rather than only seeing a single forward-looking number.
+
+    Note this is a one-step-ahead model check, not a real economist
+    forecast -- it's intended to show the model's recent error pattern,
+    not to be a forecasting authority.
+    """
+    s = cpi_series.dropna()
+    if s.empty:
+        return pd.DataFrame(columns=["Date", "Actual CPI YoY %", "Model-Expected %", "Surprise (Actual − Expected)"])
+
+    s = s.iloc[-(months + 1):]  # need one extra point to seed "prior" for the first row
+    rows = []
+    for i in range(1, len(s)):
+        date        = s.index[i]
+        actual      = float(s.iloc[i])
+        prior       = float(s.iloc[i - 1])
+        expected    = 0.60 * prior + 0.40 * INFLATION_TARGET
+        expected    = float(np.clip(expected, prior - 3.0, prior + 3.0))
+        surprise    = actual - expected
+        rows.append({
+            "Date": date, "Actual CPI YoY %": round(actual, 2),
+            "Model-Expected %": round(expected, 2),
+            "Surprise (Actual − Expected)": round(surprise, 2),
+        })
+    return pd.DataFrame(rows)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -931,6 +1035,7 @@ def main():
 
     # ── Fetch & analyse ───────────────────────────────────────────────────────
     dq_log = DataQualityLog()
+    cpi_history: Dict[str, pd.Series] = {}
     with st.spinner("Fetching macro data…"):
         results, cot_df = [], fetch_cot_data()
         for code in selected_codes:
@@ -941,6 +1046,7 @@ def main():
             cot     = get_cot_position(code, cot_df)
             r["COT Net"] = cot["net"]; r["COT Change"] = cot["change"]; r["COT Bias"] = cot["bias"]
             results.append(r)
+            cpi_history[code] = macro.get("cpi_yoy", pd.Series(dtype=float))
 
     ranked_df  = rank_currencies(results)
     pair_df    = build_pair_matrix(results, max_tier=max_tier)
@@ -957,11 +1063,11 @@ def main():
                     unsafe_allow_html=True)
         st.caption(regime_desc)
 
-    # ── Seven tabs ────────────────────────────────────────────────────────────
+    # ── Eight tabs ────────────────────────────────────────────────────────────
     (tab_overview, tab_heatmap, tab_pairs_tab,
-     tab_carry, tab_ixl, tab_cot, tab_premeeting) = st.tabs([
+     tab_carry, tab_ixl, tab_cot, tab_premeeting, tab_cpi) = st.tabs([
         "📊 Overview", "🌡️ Heat Map & Regime", "🔀 Pairs",
-        "💰 Carry", "🎯 IXL", "📋 COT", "🕐 Pre-Meeting"
+        "💰 Carry", "🎯 IXL", "📋 COT", "🕐 Pre-Meeting", "📈 CPI Actual vs Expected"
     ])
 
     # ══════════════════════════════════════════════════════════════════════════
@@ -972,7 +1078,10 @@ def main():
         st.caption(
             "GDP Z-Score = GDP growth vs own 5-year history (not a fixed divisor). "
             "CB Score = Taylor Rule estimate (−1 dovish … +1 hawkish). "
-            "Real Rate uses 10Y yield where available."
+            "Real Rate uses 10Y yield where available. "
+            "Trade Balance column shows a z-score vs each country's own history (comparable across "
+            "rows) — raw FRED trade-balance levels use different units per country (USD = $ millions, "
+            "most others = OECD index units) and are NOT directly comparable, so we don't show them side-by-side."
         )
         styled = ranked_df.style.map(colour_bias_style, subset=["Bias"])
         st.dataframe(styled, use_container_width=True, hide_index=True)
@@ -1004,7 +1113,8 @@ def main():
                     st.write(f"Yield Curve:      {r['Curve State']}")
                 with c2:
                     st.markdown("**Leading Indicators**")
-                    st.write(f"Trade Balance:    {fmt(r['Trade Balance'],0)}  ({r['Trade Bal Direction']})")
+                    st.write(f"Trade Balance:    {fmt(r['Trade Balance'],2)} {r.get('Trade Unit','')}  "
+                             f"(z={fmt(r.get('Trade Z-Score',np.nan),2)} vs own history, {r['Trade Bal Direction']})")
                     st.write(f"M2 Growth:        {fmt(r['M2 Growth YoY %'])}%  ({r['M2 Trend']})")
                     st.write(f"Consumer Conf:    {fmt(r['Consumer Conf'],1)}  ({r['Conf Direction']})")
                     pmi_lbl = fmt(r['PMI'],1) if not pd.isna(r['PMI']) else "N/A (ISM not on FRED)"
@@ -1333,6 +1443,82 @@ def main():
 | **Consensus check** | ForexFactory → indicator → beat/miss history |
 | **Divergence trade** | Strong fundamentals + short-term negative sentiment → discount entry |
 """)
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # TAB 8 · CPI ACTUAL VS EXPECTED
+    # ══════════════════════════════════════════════════════════════════════════
+    with tab_cpi:
+        st.subheader("CPI YoY — Actual vs. Model-Expected, Trailing Months")
+        st.caption(
+            "“Expected” is generated retrospectively by the same mean-reversion model this app uses "
+            "for its forward 12-month CPI forecast (60% persistence of the prior reading + 40% reversion "
+            "toward the 2% inflation target). This is a simple heuristic, not an economist consensus "
+            "forecast — use it to see where the model's assumption has been running hot or cold vs. "
+            "actual prints, not as a forecasting authority."
+        )
+
+        months_back = st.slider("Months of history to show", min_value=6, max_value=36, value=24, step=1)
+        cpi_codes_available = [c for c in selected_codes if not cpi_history.get(c, pd.Series(dtype=float)).dropna().empty]
+
+        if not cpi_codes_available:
+            st.warning("No CPI history available for the selected currencies.")
+        else:
+            cpi_tab_currencies = st.multiselect(
+                "Currencies to display", cpi_codes_available,
+                default=cpi_codes_available[:4], key="cpi_tab_select")
+
+            for code in cpi_tab_currencies:
+                series = cpi_history.get(code, pd.Series(dtype=float))
+                cpi_df = cpi_actual_vs_expected(series, months=months_back)
+                if cpi_df.empty:
+                    st.info(f"{code}: not enough CPI history to build a trail.")
+                    continue
+
+                info = CURRENCY_INFO.get(code, {})
+                st.markdown(f"**{code}** — {info.get('name', code)}")
+
+                fig_cpi = go.Figure()
+                fig_cpi.add_trace(go.Scatter(
+                    x=cpi_df["Date"], y=cpi_df["Actual CPI YoY %"],
+                    name="Actual CPI YoY %", mode="lines+markers",
+                    line=dict(color="#3498db", width=2)))
+                fig_cpi.add_trace(go.Scatter(
+                    x=cpi_df["Date"], y=cpi_df["Model-Expected %"],
+                    name="Model-Expected %", mode="lines",
+                    line=dict(color="#f1c40f", width=2, dash="dash")))
+                fig_cpi.add_hline(y=INFLATION_TARGET, line_dash="dot", line_color="#7f8c8d",
+                                   annotation_text="2% target", annotation_position="bottom right")
+                fig_cpi.update_layout(
+                    template="plotly_dark", height=300,
+                    yaxis_title="CPI YoY %",
+                    margin=dict(t=10, b=10),
+                    legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
+                )
+                st.plotly_chart(fig_cpi, use_container_width=True)
+
+                # Surprise bar chart -- where the model under/over-shot
+                fig_surprise = go.Figure(go.Bar(
+                    x=cpi_df["Date"], y=cpi_df["Surprise (Actual − Expected)"],
+                    marker_color=["#2ecc71" if v >= 0 else "#e74c3c"
+                                  for v in cpi_df["Surprise (Actual − Expected)"]],
+                ))
+                fig_surprise.update_layout(
+                    template="plotly_dark", height=180,
+                    yaxis_title="Surprise (pp)",
+                    title="Actual − Expected (positive = inflation came in hotter than the model assumed)",
+                    margin=dict(t=30, b=10),
+                )
+                st.plotly_chart(fig_surprise, use_container_width=True)
+
+                with st.expander(f"Show data table — {code}"):
+                    show_df = cpi_df.copy()
+                    show_df["Date"] = pd.to_datetime(show_df["Date"]).dt.strftime("%Y-%m")
+                    st.dataframe(show_df, use_container_width=True, hide_index=True)
+
+                avg_surprise = cpi_df["Surprise (Actual − Expected)"].mean()
+                st.caption(f"Average surprise over period: {avg_surprise:+.2f}pp "
+                           f"({'inflation has been running hotter than the model expects' if avg_surprise > 0.2 else 'inflation has been running cooler than the model expects' if avg_surprise < -0.2 else 'model has tracked reasonably well'})")
+                st.divider()
 
 
 if __name__ == "__main__":
