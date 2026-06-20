@@ -72,6 +72,46 @@ CURRENCY_INFO: Dict[str, Dict] = {
     "ZAR": {"name": "South African Rand", "country": "South Africa",   "type": "Policy-Driven / Carry", "cb": "SARB",            "cb_meeting_months": [1,3,5,7,9,11]},
 }
 
+# ══════════════════════════════════════════════════════════════════════════════
+# CPI YoY SERIES FIX
+# ──────────────────────────────────────────────────────────────────────────────
+# Every non-USD currency's "cpi_yoy" field previously pointed at the OECD raw
+# CPI INDEX LEVEL series -- the "{CC}CPIALL...INMEI" / "...MINMEI" family,
+# FRED Units: "Index 2015=100" -- instead of a year-over-year inflation rate.
+# That's why TRY showed a value like "1167": that's literally
+# TURCPIALLMINMEI's index print (base 2015=100), not 1167% inflation. The
+# same broken family was wired in for AUD, CAD, CHF, NZD, CNY, GBP, JPY, MXN,
+# and EUR (via its own EZ19 index-level series) -- so real_rate (10Y − CPI,
+# and policy rate − CPI), the Taylor rule score, the composite score, and the
+# regime classifier were all silently consuming an index level as if it were
+# a ~2-10% inflation rate, for 11 of the 12 currencies. USD's
+# CPALTT01USM659N was the one correctly-wired series, which is why USD looked
+# fine while every cross-currency comparison involving it was nonsensical.
+#
+# Fix: every series below was switched to the OECD "CPALTT01{CC}{M|Q}659N"
+# family, individually confirmed via each FRED series page's own "Units:"
+# field to read "Growth rate same period previous year" (OECD TRANSFORMATION
+# code GY) -- the same units USD already used. EUR uses the parallel
+# harmonised-CPI YoY series CPHPTT01EZM659N instead, since the Euro area is
+# published under the HICP family rather than CPALTT01.
+#
+# Fixing cpi_yoy also fixes real_rate_10y / real_rate_policy / the Taylor
+# rule score / the composite / the regime classifier downstream -- those
+# formulas were always correct, they were just being fed a corrupted input.
+# No other code changes are needed to "fix the real rate"; it was the CPI
+# input that was wrong.
+#
+# ZAR is the one exception where a verified replacement could not be
+# confirmed: South Africa's all-items YoY ("GY") series does not follow the
+# CPALTT01ZA{M|Q}659N naming pattern the other countries use -- FRED only
+# surfaces the GY transform at the COICOP component level for South Africa
+# (e.g. ZAFCP040000GYM for housing), and guessing an unconfirmed all-items ID
+# risks reproducing this exact bug silently. Rather than guess, ZAR's
+# cpi_yoy is explicitly disabled below (see BROKEN_CPI_SERIES) and treated as
+# missing data with a loud warning instead of silently feeding in wrong
+# numbers.
+# ══════════════════════════════════════════════════════════════════════════════
+
 FRED_SERIES: Dict[str, Dict[str, str]] = {
     "USD": {
         "policy_rate": "DFEDTARU", "cpi_yoy": "CPALTT01USM659N",
@@ -81,76 +121,96 @@ FRED_SERIES: Dict[str, Dict[str, str]] = {
         "consumer_conf": "UMCSENT", "building_permits": "PERMIT",
     },
     "EUR": {
-        "policy_rate": "ECBDFR", "cpi_yoy": "CP0000EZ19M086NEST",
+        "policy_rate": "ECBDFR", "cpi_yoy": "CPHPTT01EZM659N",  # FIXED: was CP0000EZ19M086NEST (index level)
         "gdp": "CLVMNACSCAB1GQEA19", "trade_balance": "XTNTVA01EZQ667S",
         "unemployment": "LRHUTTTTEZM156S", "ten_year": "IRLTLT01EZM156N",
         "pmi_mfg": "", "m2": "MABMM301EZM189S",
         "consumer_conf": "CSCICP02EZM460S", "building_permits": "",
     },
     "GBP": {
-        "policy_rate": "BOERUKM", "cpi_yoy": "GBRCPIALLMINMEI",
+        "policy_rate": "BOERUKM", "cpi_yoy": "CPALTT01GBM659N",  # FIXED: was GBRCPIALLMINMEI (index level)
         "gdp": "NGDPRSAXDCGBQ", "trade_balance": "XTNTVA01GBQ667S",
         "unemployment": "LRHUTTTTGBM156S", "ten_year": "IRLTLT01GBM156N",
         "pmi_mfg": "", "m2": "MABMM301GBM189S",
         "consumer_conf": "CSCICP02GBM460S", "building_permits": "",
     },
     "JPY": {
-        "policy_rate": "IRSTCB01JPM156N", "cpi_yoy": "JPNCPIALLMINMEI",
+        "policy_rate": "IRSTCB01JPM156N", "cpi_yoy": "CPALTT01JPM659N",  # FIXED: was JPNCPIALLMINMEI (index level)
         "gdp": "JPNRGDPEXP", "trade_balance": "XTNTVA01JPQ667S",
         "unemployment": "LRHUTTTTJPM156S", "ten_year": "IRLTLT01JPM156N",
         "pmi_mfg": "", "m2": "MABMM301JPM189S",
         "consumer_conf": "CSCICP02JPM460S", "building_permits": "",
     },
     "AUD": {
-        "policy_rate": "IRSTCB01AUM156N", "cpi_yoy": "AUSCPIALLQINMEI",
+        "policy_rate": "IRSTCB01AUM156N", "cpi_yoy": "CPALTT01AUQ659N",  # FIXED: was AUSCPIALLQINMEI (index level)
         "gdp": "AUSGDPRQDSMEI", "trade_balance": "XTNTVA01AUQ667S",
         "unemployment": "LRHUTTTTAUM156S", "ten_year": "IRLTLT01AUM156N",
         "pmi_mfg": "", "m2": "MABMM301AUM189S",
         "consumer_conf": "CSCICP02AUM460S", "building_permits": "",
     },
     "CAD": {
-        "policy_rate": "IRSTCB01CAM156N", "cpi_yoy": "CANCPIALLMINMEI",
+        "policy_rate": "IRSTCB01CAM156N", "cpi_yoy": "CPALTT01CAM659N",  # FIXED: was CANCPIALLMINMEI (index level)
         "gdp": "NGDPRSAXDCCAQ", "trade_balance": "XTNTVA01CAQ667S",
         "unemployment": "LRHUTTTTCAM156S", "ten_year": "IRLTLT01CAM156N",
         "pmi_mfg": "", "m2": "MABMM301CAM189S",
         "consumer_conf": "CSCICP02CAM460S", "building_permits": "",
     },
     "CHF": {
-        "policy_rate": "IRSTCB01CHM156N", "cpi_yoy": "CHECPIALLMINMEI",
+        "policy_rate": "IRSTCB01CHM156N", "cpi_yoy": "CPALTT01CHM659N",  # FIXED: was CHECPIALLMINMEI (index level)
         "gdp": "NGDPRSAXDCCHQ", "trade_balance": "XTNTVA01CHQ667S",
         "unemployment": "LRHUTTTTCHM156S", "ten_year": "IRLTLT01CHM156N",
         "pmi_mfg": "", "m2": "", "consumer_conf": "", "building_permits": "",
     },
     "NZD": {
-        "policy_rate": "IRSTCB01NZM156N", "cpi_yoy": "NZLCPIALLQINMEI",
+        "policy_rate": "IRSTCB01NZM156N", "cpi_yoy": "CPALTT01NZQ659N",  # FIXED: was NZLCPIALLQINMEI (index level)
         "gdp": "NGDPRSAXDCNZQ", "trade_balance": "XTNTVA01NZQ667S",
         "unemployment": "LRHUTTTTNZM156S", "ten_year": "IRLTLT01NZM156N",
         "pmi_mfg": "", "m2": "", "consumer_conf": "", "building_permits": "",
     },
     "CNY": {
-        "policy_rate": "INTDSRCNM193N", "cpi_yoy": "CHNCPIALLMINMEI",
+        "policy_rate": "INTDSRCNM193N", "cpi_yoy": "CPALTT01CNM659N",  # FIXED: was CHNCPIALLMINMEI (index level)
         "gdp": "NGDPRSAXDCCNQ", "trade_balance": "XTNTVA01CNQ667S",
         "unemployment": "LRUN64TTCNQ156S", "ten_year": "IRLTLT01CNM156N",
         "pmi_mfg": "", "m2": "", "consumer_conf": "", "building_permits": "",
     },
     "TRY": {
-        "policy_rate": "INTDSRTRM193N", "cpi_yoy": "TURCPIALLMINMEI",
+        "policy_rate": "INTDSRTRM193N", "cpi_yoy": "CPALTT01TRM659N",  # FIXED: was TURCPIALLMINMEI (index level)
         "gdp": "NGDPRSAXDCTRQ", "trade_balance": "XTNTVA01TRQ667S",
         "unemployment": "LRHUTTTTTRM156S", "ten_year": "IRLTLT01TRM156N",
         "pmi_mfg": "", "m2": "", "consumer_conf": "", "building_permits": "",
     },
     "MXN": {
-        "policy_rate": "INTDSRMXM193N", "cpi_yoy": "MEXCPIALLMINMEI",
+        "policy_rate": "INTDSRMXM193N", "cpi_yoy": "CPALTT01MXM659N",  # FIXED: was MEXCPIALLMINMEI (index level)
         "gdp": "NGDPRSAXDCMXQ", "trade_balance": "XTNTVA01MXQ667S",
         "unemployment": "LRHUTTTTMXM156S", "ten_year": "IRLTLT01MXM156N",
         "pmi_mfg": "", "m2": "", "consumer_conf": "", "building_permits": "",
     },
     "ZAR": {
-        "policy_rate": "INTDSRZAM193N", "cpi_yoy": "ZAFCPIALLMINMEI",
+        "policy_rate": "INTDSRZAM193N", "cpi_yoy": "ZAFCPIALLMINMEI",  # STILL BROKEN (index level) -- see BROKEN_CPI_SERIES below; disabled at runtime, not used in calculations.
         "gdp": "NGDPRSAXDCZAQ", "trade_balance": "XTNTVA01ZAQ667S",
         "unemployment": "LRHUTTTTZAM156S", "ten_year": "IRLTLT01ZAM156N",
         "pmi_mfg": "", "m2": "", "consumer_conf": "", "building_permits": "",
     },
+}
+
+# Currencies whose cpi_yoy series ID is known to point at an index level
+# rather than a YoY growth rate, but for which a verified correct
+# replacement could not be confirmed via FRED's own "Units:" field without
+# guessing. fetch_currency_macro() treats cpi_yoy as missing data (NaN) for
+# these codes rather than silently feeding the wrong numbers into real-rate,
+# Taylor-rule, composite, and regime calculations.
+BROKEN_CPI_SERIES: Dict[str, str] = {
+    "ZAR": ("ZAFCPIALLMINMEI is an OECD CPI INDEX LEVEL (Units: 'Index "
+            "2015=100'), not a YoY growth rate -- same bug class fixed for "
+            "every other currency. The correct South African all-items YoY "
+            "series could not be confirmed on the same CPALTT01ZA{M|Q}659N "
+            "pattern used elsewhere (FRED only surfaces the 'Growth rate "
+            "same period previous year' transform for South Africa at the "
+            "COICOP component level, e.g. ZAFCP040000GYM for housing, not "
+            "an all-items code following that naming convention). cpi_yoy, "
+            "real rate, and the CB Taylor score for ZAR are unavailable "
+            "until this is verified manually at fred.stlouisfed.org and "
+            "added here."),
 }
 
 FX_TICKER: Dict[str, str] = {
@@ -227,17 +287,46 @@ def normalise_rate_series(s: pd.Series, label: str = "", code: str = "",
 # do not re-introduce magnitude-based guessing.
 DECIMAL_ENCODED_SERIES: set = set()
 
+# Sanity-check threshold for cpi_yoy: a real YoY inflation rate, even for a
+# historically hyperinflationary economy in this universe (TRY), realistically
+# stays well under this. An index-level series (e.g. "Index 2015=100") will
+# blow past it -- that's exactly the bug class that produced TURCPIALLMINMEI's
+# ~1167 misread as a percent. This is a WARNING-ONLY guard (it never rewrites
+# data) so that if a series swap ever reintroduces this bug, it surfaces in
+# the Data Quality panel immediately instead of silently corrupting real
+# rates, the Taylor score, the composite, and the regime classifier again.
+CPI_YOY_PLAUSIBILITY_LIMIT = 150.0
+
 
 def fetch_currency_macro(code: str, dq_log: DataQualityLog) -> Dict[str, pd.Series]:
     out: Dict[str, pd.Series] = {}
     rate_fields = {"policy_rate", "ten_year", "cpi_yoy"}
     for label, sid in FRED_SERIES.get(code, {}).items():
+        # Known-broken series with no confirmed replacement: treat as
+        # missing data rather than silently feeding in an index level.
+        if label == "cpi_yoy" and code in BROKEN_CPI_SERIES:
+            dq_log.warn(code, f"cpi_yoy disabled — {BROKEN_CPI_SERIES[code]}")
+            out[label] = pd.Series(dtype=float)
+            continue
+
         s = fetch_fred_series(sid)
         if s.empty and sid:
             dq_log.warn(code, f"FRED '{sid}' ({label}) unavailable")
         if label in rate_fields and sid in DECIMAL_ENCODED_SERIES:
             s = s * 100
             dq_log.warn(code, f"{label} ('{sid}'): converted from decimal to percent per known series unit.")
+
+        # Runtime plausibility guard (see CPI_YOY_PLAUSIBILITY_LIMIT above).
+        if label == "cpi_yoy" and not s.empty:
+            non_null = s.dropna()
+            if len(non_null) and abs(float(non_null.iloc[-1])) > CPI_YOY_PLAUSIBILITY_LIMIT:
+                dq_log.warn(
+                    code,
+                    f"cpi_yoy ('{sid}') latest value {float(non_null.iloc[-1]):.1f} is implausible "
+                    f"for a YoY %% rate — likely pointing at an index-level series (e.g. 'Index "
+                    f"2015=100') rather than a growth-rate series. Verify the FRED 'Units:' field."
+                )
+
         out[label] = s
     return out
 
@@ -903,12 +992,13 @@ def cpi_actual_vs_expected(cpi_series: pd.Series, months: int = 24) -> pd.DataFr
     Build a trailing actual-vs-model-expected CPI table for one currency.
 
     "Expected" reuses the SAME mean-reversion blend already used elsewhere
-    in this app for the forward 12m CPI forecast (60% persistence /
-    40% reversion to the 2% inflation target), but applied retrospectively:
-    for each past month, "expected" = what the model would have forecast
-    GIVEN the prior month's actual reading. This lets the user see how well
-    the simple mean-reversion heuristic has been tracking reality, month
-    by month, rather than only seeing a single forward-looking number.
+    in this app for the forward 12m CPI forecast (60% persistence of the
+    prior reading + 40% reversion to the 2% inflation target), but applied
+    retrospectively: for each past month, "expected" = what the model would
+    have forecast GIVEN the prior month's actual reading. This lets the user
+    see how well the simple mean-reversion heuristic has been tracking
+    reality, month by month, rather than only seeing a single forward-
+    looking number.
 
     Note this is a one-step-ahead model check, not a real economist
     forecast -- it's intended to show the model's recent error pattern,
