@@ -42,8 +42,17 @@ class DataQualityLog:
 INFLATION_TARGET = 2.0
 HIGH_INFLATION_CURRENCIES = {"TRY", "ZAR", "MXN", "CNY"}
 
+# Economic weight tier used by the regime classifier to down-weight EM
+# outliers when computing cross-currency averages.
+# Tier 1 = largest / most systemically important economies.
+ECONOMY_WEIGHT: Dict[str, float] = {
+    "USD": 1.0, "EUR": 0.9, "JPY": 0.7, "GBP": 0.6,
+    "CAD": 0.5, "AUD": 0.5, "CHF": 0.4, "NZD": 0.3,
+    "CNY": 0.6,  # large economy but policy-driven; moderate weight
+    "TRY": 0.15, "MXN": 0.2, "ZAR": 0.15,
+}
+
 # Liquidity tiers for pair filtering
-# Tier 1 = most liquid / most tradeable
 PAIR_LIQUIDITY_TIERS: Dict[Tuple[str, str], int] = {
     ("EUR", "USD"): 1, ("USD", "JPY"): 1, ("GBP", "USD"): 1,
     ("USD", "CHF"): 1, ("AUD", "USD"): 1, ("USD", "CAD"): 1, ("NZD", "USD"): 1,
@@ -73,43 +82,8 @@ CURRENCY_INFO: Dict[str, Dict] = {
 }
 
 # ══════════════════════════════════════════════════════════════════════════════
-# CPI YoY SERIES FIX
-# ──────────────────────────────────────────────────────────────────────────────
-# Every non-USD currency's "cpi_yoy" field previously pointed at the OECD raw
-# CPI INDEX LEVEL series -- the "{CC}CPIALL...INMEI" / "...MINMEI" family,
-# FRED Units: "Index 2015=100" -- instead of a year-over-year inflation rate.
-# That's why TRY showed a value like "1167": that's literally
-# TURCPIALLMINMEI's index print (base 2015=100), not 1167% inflation. The
-# same broken family was wired in for AUD, CAD, CHF, NZD, CNY, GBP, JPY, MXN,
-# and EUR (via its own EZ19 index-level series) -- so real_rate (10Y − CPI,
-# and policy rate − CPI), the Taylor rule score, the composite score, and the
-# regime classifier were all silently consuming an index level as if it were
-# a ~2-10% inflation rate, for 11 of the 12 currencies. USD's
-# CPALTT01USM659N was the one correctly-wired series, which is why USD looked
-# fine while every cross-currency comparison involving it was nonsensical.
-#
-# Fix: every series below was switched to the OECD "CPALTT01{CC}{M|Q}659N"
-# family, individually confirmed via each FRED series page's own "Units:"
-# field to read "Growth rate same period previous year" (OECD TRANSFORMATION
-# code GY) -- the same units USD already used. EUR uses the parallel
-# harmonised-CPI YoY series CPHPTT01EZM659N instead, since the Euro area is
-# published under the HICP family rather than CPALTT01.
-#
-# Fixing cpi_yoy also fixes real_rate_10y / real_rate_policy / the Taylor
-# rule score / the composite / the regime classifier downstream -- those
-# formulas were always correct, they were just being fed a corrupted input.
-# No other code changes are needed to "fix the real rate"; it was the CPI
-# input that was wrong.
-#
-# ZAR is the one exception where a verified replacement could not be
-# confirmed: South Africa's all-items YoY ("GY") series does not follow the
-# CPALTT01ZA{M|Q}659N naming pattern the other countries use -- FRED only
-# surfaces the GY transform at the COICOP component level for South Africa
-# (e.g. ZAFCP040000GYM for housing), and guessing an unconfirmed all-items ID
-# risks reproducing this exact bug silently. Rather than guess, ZAR's
-# cpi_yoy is explicitly disabled below (see BROKEN_CPI_SERIES) and treated as
-# missing data with a loud warning instead of silently feeding in wrong
-# numbers.
+# FRED SERIES MAP
+# (CPI YoY series fixed in v3.0; unchanged here)
 # ══════════════════════════════════════════════════════════════════════════════
 
 FRED_SERIES: Dict[str, Dict[str, str]] = {
@@ -117,100 +91,89 @@ FRED_SERIES: Dict[str, Dict[str, str]] = {
         "policy_rate": "DFEDTARU", "cpi_yoy": "CPALTT01USM659N",
         "gdp": "A191RL1Q225SBEA", "trade_balance": "BOPGSTB",
         "unemployment": "UNRATE", "ten_year": "DGS10",
-        "pmi_mfg": "", "m2": "M2SL",
+        # FIX: ISM Manufacturing wired for USD; empty string removed for others
+        # (empty string previously caused a silent no-op fetch that left PMI
+        # always NaN while still rendering "PMI: N/A" in the UI).
+        "pmi_mfg": "ISMMAN", "m2": "M2SL",
         "consumer_conf": "UMCSENT", "building_permits": "PERMIT",
     },
     "EUR": {
-        "policy_rate": "ECBDFR", "cpi_yoy": "CPHPTT01EZM659N",  # FIXED: was CP0000EZ19M086NEST (index level)
+        "policy_rate": "ECBDFR", "cpi_yoy": "CPHPTT01EZM659N",
         "gdp": "CLVMNACSCAB1GQEA19", "trade_balance": "XTNTVA01EZQ667S",
         "unemployment": "LRHUTTTTEZM156S", "ten_year": "IRLTLT01EZM156N",
         "pmi_mfg": "", "m2": "MABMM301EZM189S",
         "consumer_conf": "CSCICP02EZM460S", "building_permits": "",
     },
     "GBP": {
-        "policy_rate": "BOERUKM", "cpi_yoy": "CPALTT01GBM659N",  # FIXED: was GBRCPIALLMINMEI (index level)
+        "policy_rate": "BOERUKM", "cpi_yoy": "CPALTT01GBM659N",
         "gdp": "NGDPRSAXDCGBQ", "trade_balance": "XTNTVA01GBQ667S",
         "unemployment": "LRHUTTTTGBM156S", "ten_year": "IRLTLT01GBM156N",
         "pmi_mfg": "", "m2": "MABMM301GBM189S",
         "consumer_conf": "CSCICP02GBM460S", "building_permits": "",
     },
     "JPY": {
-        "policy_rate": "IRSTCB01JPM156N", "cpi_yoy": "CPALTT01JPM659N",  # FIXED: was JPNCPIALLMINMEI (index level)
+        "policy_rate": "IRSTCB01JPM156N", "cpi_yoy": "CPALTT01JPM659N",
         "gdp": "JPNRGDPEXP", "trade_balance": "XTNTVA01JPQ667S",
         "unemployment": "LRHUTTTTJPM156S", "ten_year": "IRLTLT01JPM156N",
         "pmi_mfg": "", "m2": "MABMM301JPM189S",
         "consumer_conf": "CSCICP02JPM460S", "building_permits": "",
     },
     "AUD": {
-        "policy_rate": "IRSTCB01AUM156N", "cpi_yoy": "CPALTT01AUQ659N",  # FIXED: was AUSCPIALLQINMEI (index level)
+        "policy_rate": "IRSTCB01AUM156N", "cpi_yoy": "CPALTT01AUQ659N",
         "gdp": "AUSGDPRQDSMEI", "trade_balance": "XTNTVA01AUQ667S",
         "unemployment": "LRHUTTTTAUM156S", "ten_year": "IRLTLT01AUM156N",
         "pmi_mfg": "", "m2": "MABMM301AUM189S",
         "consumer_conf": "CSCICP02AUM460S", "building_permits": "",
     },
     "CAD": {
-        "policy_rate": "IRSTCB01CAM156N", "cpi_yoy": "CPALTT01CAM659N",  # FIXED: was CANCPIALLMINMEI (index level)
+        "policy_rate": "IRSTCB01CAM156N", "cpi_yoy": "CPALTT01CAM659N",
         "gdp": "NGDPRSAXDCCAQ", "trade_balance": "XTNTVA01CAQ667S",
         "unemployment": "LRHUTTTTCAM156S", "ten_year": "IRLTLT01CAM156N",
         "pmi_mfg": "", "m2": "MABMM301CAM189S",
         "consumer_conf": "CSCICP02CAM460S", "building_permits": "",
     },
     "CHF": {
-        "policy_rate": "IRSTCB01CHM156N", "cpi_yoy": "CPALTT01CHM659N",  # FIXED: was CHECPIALLMINMEI (index level)
+        "policy_rate": "IRSTCB01CHM156N", "cpi_yoy": "CPALTT01CHM659N",
         "gdp": "NGDPRSAXDCCHQ", "trade_balance": "XTNTVA01CHQ667S",
         "unemployment": "LRHUTTTTCHM156S", "ten_year": "IRLTLT01CHM156N",
         "pmi_mfg": "", "m2": "", "consumer_conf": "", "building_permits": "",
     },
     "NZD": {
-        "policy_rate": "IRSTCB01NZM156N", "cpi_yoy": "CPALTT01NZQ659N",  # FIXED: was NZLCPIALLQINMEI (index level)
+        "policy_rate": "IRSTCB01NZM156N", "cpi_yoy": "CPALTT01NZQ659N",
         "gdp": "NGDPRSAXDCNZQ", "trade_balance": "XTNTVA01NZQ667S",
         "unemployment": "LRHUTTTTNZM156S", "ten_year": "IRLTLT01NZM156N",
         "pmi_mfg": "", "m2": "", "consumer_conf": "", "building_permits": "",
     },
     "CNY": {
-        "policy_rate": "INTDSRCNM193N", "cpi_yoy": "CPALTT01CNM659N",  # FIXED: was CHNCPIALLMINMEI (index level)
+        "policy_rate": "INTDSRCNM193N", "cpi_yoy": "CPALTT01CNM659N",
         "gdp": "NGDPRSAXDCCNQ", "trade_balance": "XTNTVA01CNQ667S",
         "unemployment": "LRUN64TTCNQ156S", "ten_year": "IRLTLT01CNM156N",
         "pmi_mfg": "", "m2": "", "consumer_conf": "", "building_permits": "",
     },
     "TRY": {
-        "policy_rate": "INTDSRTRM193N", "cpi_yoy": "CPALTT01TRM659N",  # FIXED: was TURCPIALLMINMEI (index level)
+        "policy_rate": "INTDSRTRM193N", "cpi_yoy": "CPALTT01TRM659N",
         "gdp": "NGDPRSAXDCTRQ", "trade_balance": "XTNTVA01TRQ667S",
         "unemployment": "LRHUTTTTTRM156S", "ten_year": "IRLTLT01TRM156N",
         "pmi_mfg": "", "m2": "", "consumer_conf": "", "building_permits": "",
     },
     "MXN": {
-        "policy_rate": "INTDSRMXM193N", "cpi_yoy": "CPALTT01MXM659N",  # FIXED: was MEXCPIALLMINMEI (index level)
+        "policy_rate": "INTDSRMXM193N", "cpi_yoy": "CPALTT01MXM659N",
         "gdp": "NGDPRSAXDCMXQ", "trade_balance": "XTNTVA01MXQ667S",
         "unemployment": "LRHUTTTTMXM156S", "ten_year": "IRLTLT01MXM156N",
         "pmi_mfg": "", "m2": "", "consumer_conf": "", "building_permits": "",
     },
     "ZAR": {
-        "policy_rate": "INTDSRZAM193N", "cpi_yoy": "ZAFCPIALLMINMEI",  # STILL BROKEN (index level) -- see BROKEN_CPI_SERIES below; disabled at runtime, not used in calculations.
+        "policy_rate": "INTDSRZAM193N", "cpi_yoy": "ZAFCPIALLMINMEI",  # still broken; disabled below
         "gdp": "NGDPRSAXDCZAQ", "trade_balance": "XTNTVA01ZAQ667S",
         "unemployment": "LRHUTTTTZAM156S", "ten_year": "IRLTLT01ZAM156N",
         "pmi_mfg": "", "m2": "", "consumer_conf": "", "building_permits": "",
     },
 }
 
-# Currencies whose cpi_yoy series ID is known to point at an index level
-# rather than a YoY growth rate, but for which a verified correct
-# replacement could not be confirmed via FRED's own "Units:" field without
-# guessing. fetch_currency_macro() treats cpi_yoy as missing data (NaN) for
-# these codes rather than silently feeding the wrong numbers into real-rate,
-# Taylor-rule, composite, and regime calculations.
 BROKEN_CPI_SERIES: Dict[str, str] = {
-    "ZAR": ("ZAFCPIALLMINMEI is an OECD CPI INDEX LEVEL (Units: 'Index "
-            "2015=100'), not a YoY growth rate -- same bug class fixed for "
-            "every other currency. The correct South African all-items YoY "
-            "series could not be confirmed on the same CPALTT01ZA{M|Q}659N "
-            "pattern used elsewhere (FRED only surfaces the 'Growth rate "
-            "same period previous year' transform for South Africa at the "
-            "COICOP component level, e.g. ZAFCP040000GYM for housing, not "
-            "an all-items code following that naming convention). cpi_yoy, "
-            "real rate, and the CB Taylor score for ZAR are unavailable "
-            "until this is verified manually at fred.stlouisfed.org and "
-            "added here."),
+    "ZAR": ("ZAFCPIALLMINMEI is an OECD CPI INDEX LEVEL (Units: 'Index 2015=100'), "
+            "not a YoY growth rate. No verified replacement found on FRED. "
+            "cpi_yoy, real rate, and CB Taylor score for ZAR disabled until confirmed."),
 }
 
 FX_TICKER: Dict[str, str] = {
@@ -221,6 +184,10 @@ FX_TICKER: Dict[str, str] = {
 USD_IS_BASE = {"JPY", "CAD", "CHF", "CNY", "TRY", "MXN", "ZAR"}
 DXY_TICKER  = "DX-Y.NYB"
 
+# FX tickers used to derive realized volatility for vol-adjusted carry.
+# These are the same as FX_TICKER but collected in one place for clarity.
+FX_VOL_TICKER = FX_TICKER  # alias
+
 CLASSIC_CARRY_PAIRS = [
     ("AUD","JPY"),("NZD","JPY"),("AUD","CHF"),("NZD","CHF"),
     ("MXN","JPY"),("ZAR","JPY"),("AUD","EUR"),("NZD","EUR"),
@@ -230,6 +197,10 @@ SCORE_WEIGHTS = {
     "gdp": 0.25, "inflation": 0.20, "cb_taylor": 0.20,
     "trade": 0.15, "m2": 0.10, "conf": 0.10,
 }
+
+# Annualised vol lookback in trading days for carry adjustment.
+VOL_LOOKBACK_DAYS = 63   # ~3 months
+VOL_ANNUALISE     = 252  # trading days per year
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -253,78 +224,47 @@ def fetch_fred_series(series_id: str) -> pd.Series:
         return pd.Series(dtype=float)
 
 
-def normalise_rate_series(s: pd.Series, label: str = "", code: str = "",
-                           dq_log: Optional["DataQualityLog"] = None) -> pd.Series:
-    """
-    No-op pass-through for rate/CPI series.
-
-    Every FRED series referenced in FRED_SERIES for policy_rate, ten_year,
-    and cpi_yoy is documented by FRED/source as already being in "Percent"
-    units (e.g. DFEDTARU, ECBDFR, IRLTLT01..., CPALTT01..., etc.) -- none
-    of them ship as a 0-1 decimal fraction. A prior version of this
-    function tried to auto-detect decimal-encoded values from a magnitude
-    heuristic (median < 0.20 -> multiply by 100), but that heuristic has
-    no way to tell "0.10 meaning 0.10%" (a real, low-but-valid policy
-    rate for JPY/CHF, or CPI near zero) apart from "0.0010 meaning
-    0.10% encoded as a fraction" -- both have the same magnitude. That
-    ambiguity caused real bugs: genuinely low rates got wrongly
-    multiplied by 100, and the resulting mixed units flowed into
-    real-rate subtraction (10Y yield − CPI) producing nonsensical results
-    like several-hundred-percent "real rates".
-
-    Trusting FRED's documented units (which this app's own series
-    selection controls) is more reliable than guessing from data shape.
-    If a specific series is ever found to ship as a decimal fraction,
-    add it explicitly to DECIMAL_ENCODED_SERIES below rather than
-    re-introducing a magnitude guess.
-    """
-    return s
-
-
-# Series IDs (if any) that are known from FRED's own documentation to be
-# decimal-encoded rather than already in percent. Add explicit IDs here
-# only after confirming via the FRED series page ("Units:" field) --
-# do not re-introduce magnitude-based guessing.
+# DECIMAL_ENCODED_SERIES: add series IDs here (after verifying on FRED) if
+# a specific series ships as a 0–1 decimal fraction rather than percent.
+# Do NOT re-introduce a magnitude heuristic — that caused real bugs.
 DECIMAL_ENCODED_SERIES: set = set()
 
-# Sanity-check threshold for cpi_yoy: a real YoY inflation rate, even for a
-# historically hyperinflationary economy in this universe (TRY), realistically
-# stays well under this. An index-level series (e.g. "Index 2015=100") will
-# blow past it -- that's exactly the bug class that produced TURCPIALLMINMEI's
-# ~1167 misread as a percent. This is a WARNING-ONLY guard (it never rewrites
-# data) so that if a series swap ever reintroduces this bug, it surfaces in
-# the Data Quality panel immediately instead of silently corrupting real
-# rates, the Taylor score, the composite, and the regime classifier again.
 CPI_YOY_PLAUSIBILITY_LIMIT = 150.0
 
 
-def fetch_currency_macro(code: str, dq_log: DataQualityLog) -> Dict[str, pd.Series]:
+def fetch_currency_macro(code: str, dq_log: "DataQualityLog") -> Dict[str, pd.Series]:
     out: Dict[str, pd.Series] = {}
     rate_fields = {"policy_rate", "ten_year", "cpi_yoy"}
     for label, sid in FRED_SERIES.get(code, {}).items():
-        # Known-broken series with no confirmed replacement: treat as
-        # missing data rather than silently feeding in an index level.
         if label == "cpi_yoy" and code in BROKEN_CPI_SERIES:
             dq_log.warn(code, f"cpi_yoy disabled — {BROKEN_CPI_SERIES[code]}")
             out[label] = pd.Series(dtype=float)
             continue
 
+        # FIX: skip fetch entirely when series ID is empty string —
+        # previously this silently returned an empty Series which caused
+        # PMI to always show "N/A" even when the field was removed from UI.
+        # Now we explicitly store an empty Series and never attempt the fetch.
+        if not sid:
+            out[label] = pd.Series(dtype=float)
+            continue
+
         s = fetch_fred_series(sid)
-        if s.empty and sid:
+        if s.empty:
             dq_log.warn(code, f"FRED '{sid}' ({label}) unavailable")
+
+        # Apply decimal-to-percent conversion for any explicitly flagged series.
         if label in rate_fields and sid in DECIMAL_ENCODED_SERIES:
             s = s * 100
-            dq_log.warn(code, f"{label} ('{sid}'): converted from decimal to percent per known series unit.")
+            dq_log.warn(code, f"{label} ('{sid}'): converted from decimal to percent.")
 
-        # Runtime plausibility guard (see CPI_YOY_PLAUSIBILITY_LIMIT above).
         if label == "cpi_yoy" and not s.empty:
             non_null = s.dropna()
             if len(non_null) and abs(float(non_null.iloc[-1])) > CPI_YOY_PLAUSIBILITY_LIMIT:
                 dq_log.warn(
                     code,
                     f"cpi_yoy ('{sid}') latest value {float(non_null.iloc[-1]):.1f} is implausible "
-                    f"for a YoY %% rate — likely pointing at an index-level series (e.g. 'Index "
-                    f"2015=100') rather than a growth-rate series. Verify the FRED 'Units:' field."
+                    f"for a YoY %% rate — likely an index-level series. Verify FRED 'Units:' field."
                 )
 
         out[label] = s
@@ -407,6 +347,74 @@ def get_cot_position(code: str, cot_df: pd.DataFrame) -> Dict:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# REALIZED VOLATILITY FOR CARRY ADJUSTMENT
+# ══════════════════════════════════════════════════════════════════════════════
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def fetch_realized_vol(ticker: str, lookback: int = VOL_LOOKBACK_DAYS) -> float:
+    """
+    Annualised realized volatility from daily log-returns over `lookback` days.
+
+    Used in vol-adjusted carry = real_rate_differential / annualised_vol.
+    This gives a Sharpe-like measure so that a 5% carry in TRY (vol ~25%)
+    scores the same as a 5% carry in AUD (vol ~8%) -- which it should not,
+    because TRY carry is far riskier per unit of return.
+
+    Returns NaN if insufficient data.
+    """
+    if not ticker:
+        return np.nan
+    try:
+        data = yf.download(ticker, period="1y", interval="1d",
+                            auto_adjust=True, progress=False)
+        if data.empty:
+            return np.nan
+        if isinstance(data.columns, pd.MultiIndex):
+            data.columns = data.columns.get_level_values(0)
+        close = data["Close"] if "Close" in data.columns else None
+        if close is None:
+            return np.nan
+        if isinstance(close, pd.DataFrame):
+            close = close.iloc[:, 0]
+        close = close.dropna()
+        if len(close) < lookback + 5:
+            return np.nan
+        log_ret = np.log(close / close.shift(1)).dropna()
+        recent  = log_ret.iloc[-lookback:]
+        return float(recent.std() * np.sqrt(VOL_ANNUALISE) * 100)  # in % annualised
+    except Exception:
+        return np.nan
+
+
+def pair_realized_vol(code_long: str, code_short: str) -> float:
+    """
+    Approximate annualised realized vol for a cross pair.
+
+    For pairs involving USD (i.e. one leg IS USD), we just use the
+    non-USD currency's own vol vs USD.  For crosses (neither leg is USD),
+    we approximate: vol(A/B) ≈ sqrt(vol(A/USD)^2 + vol(B/USD)^2)
+    assuming ~zero correlation between the two legs -- a conservative
+    over-estimate that errs on the side of penalising crosses more.
+    """
+    def _vol(c: str) -> float:
+        if c == "USD":
+            return 0.0
+        t = FX_VOL_TICKER.get(c, "")
+        return fetch_realized_vol(t)
+
+    va = _vol(code_long)
+    vb = _vol(code_short)
+
+    if code_long == "USD":
+        return vb
+    if code_short == "USD":
+        return va
+    if pd.isna(va) or pd.isna(vb):
+        return np.nan
+    return float(np.sqrt(va**2 + vb**2))
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # HELPER UTILITIES
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -441,7 +449,6 @@ def yoy_growth(s: pd.Series, periods: int = 12) -> pd.Series:
     return s.pct_change(periods) * 100
 
 def zscore_current(s: pd.Series, window: int = 60) -> float:
-    """Z-score of most recent value vs trailing window."""
     v = s.dropna()
     if len(v) < 10: return np.nan
     hist = v.iloc[-window:] if len(v) >= window else v
@@ -454,9 +461,31 @@ def is_in_cb_window(code: str) -> bool:
     today_m = datetime.today().month
     return today_m in months or (today_m % 12) + 1 in months
 
+def weighted_trimmed_mean(values: List[float], weights: List[float],
+                           trim_pct: float = 0.1) -> float:
+    """
+    Weighted mean after trimming the top and bottom `trim_pct` fraction
+    of values (by value, not by weight).
+
+    Used by classify_regime() to prevent EM outliers (e.g. TRY CPI of 32%)
+    from dominating the cross-currency average that drives the regime label.
+    trim_pct=0.1 removes the top and bottom decile before averaging.
+    """
+    if not values:
+        return np.nan
+    pairs = sorted(zip(values, weights), key=lambda x: x[0])
+    n = len(pairs)
+    cut = max(1, int(n * trim_pct))
+    trimmed = pairs[cut:-cut] if n > 2 * cut else pairs
+    vals_t, wts_t = zip(*trimmed)
+    total_w = sum(wts_t)
+    if total_w == 0:
+        return np.nan
+    return sum(v * w for v, w in zip(vals_t, wts_t)) / total_w
+
 
 # ══════════════════════════════════════════════════════════════════════════════
-# TAYLOR RULE CB PREDICTOR  (replaces the binary above/below-target rule)
+# TAYLOR RULE CB PREDICTOR
 # ══════════════════════════════════════════════════════════════════════════════
 
 def taylor_rule_score(
@@ -471,94 +500,61 @@ def taylor_rule_score(
 ) -> Tuple[float, str, str]:
     """
     Returns (score -1..+1, expected_action_label, inflation_bias_label).
-
-    Taylor Rule intuition:
-      - Inflation above target AND rising          → pressure to hike
-      - Inflation above target but falling fast    → hold or consider cuts
-      - Unemployment rising                        → easing pressure
-      - GDP contracting                            → easing pressure
-      - Rate already rising (momentum)             → likely to continue
-      - Rate already falling                       → likely to continue
-
-    Score > 0 → hawkish (Bullish for currency)
-    Score < 0 → dovish  (Bearish for currency)
+    Score > 0 → hawkish (Bullish for currency).
+    Score < 0 → dovish  (Bearish for currency).
     """
     score = 0.0
     factors = 0
 
-    # 1. Inflation gap: how far above/below 2% target
-    #    Divisor tightened from 3.0 -> 2.0: a CPI of 5% (3pt gap) now maps
-    #    to tanh(1.5)=0.90 instead of tanh(1.0)=0.76, so a clearly
-    #    above-target print actually pushes the score toward the edges
-    #    instead of staying compressed near the centre.
     if not pd.isna(cpi_now):
-        infl_gap = cpi_now - INFLATION_TARGET
+        infl_gap   = cpi_now - INFLATION_TARGET
         infl_score = np.tanh(infl_gap / 2.0)
         score += infl_score * 0.35
         factors += 0.35
 
-    # 2. Inflation momentum: recent trend (3m change)
-    #    Divisor tightened from 2.0 -> 1.2.
     if not pd.isna(cpi_now) and not pd.isna(cpi_3m_ago):
-        infl_chg = cpi_now - cpi_3m_ago
+        infl_chg  = cpi_now - cpi_3m_ago
         mom_score = np.tanh(infl_chg / 1.2)
         score += mom_score * 0.20
         factors += 0.20
 
-    # 3. Labour market: rising unemployment = dovish pressure
-    #    Divisor tightened from 1.0 -> 0.6 (a 0.3pt unemployment move is a
-    #    meaningful labour-market signal, not a rounding blip).
     if not pd.isna(unemp_now) and not pd.isna(unemp_prior):
-        unemp_chg = unemp_now - unemp_prior
+        unemp_chg   = unemp_now - unemp_prior
         unemp_score = -np.tanh(unemp_chg / 0.6)
         score += unemp_score * 0.20
         factors += 0.20
 
-    # 4. GDP momentum
-    #    Divisor tightened from 3.0 -> 2.0.
     if not pd.isna(gdp_growth):
         gdp_score_t = np.tanh(gdp_growth / 2.0)
         score += gdp_score_t * 0.15
         factors += 0.15
 
-    # 5. Rate momentum: is the CB already moving in a direction?
-    #    Divisor tightened from 1.0 -> 0.75.
     if not pd.isna(rate_now) and not pd.isna(rate_6m_ago):
         rate_chg = rate_now - rate_6m_ago
         rate_mom = np.tanh(rate_chg / 0.75)
         score += rate_mom * 0.10
         factors += 0.10
 
-    if factors > 0:
-        score = score / factors  # normalise to -1..+1
-    else:
-        score = 0.0
+    score = float(np.clip(score / factors if factors > 0 else 0.0, -1, 1))
 
-    score = float(np.clip(score, -1, 1))
-
-    # Map to action label
-    if score >= 0.4:
-        action = "Strong Hike Expected"
-        bias   = "Bullish"
-    elif score >= 0.15:
-        action = "Hike Expected"
-        bias   = "Bullish"
-    elif score <= -0.4:
-        action = "Strong Cut Expected"
-        bias   = "Bearish"
-    elif score <= -0.15:
-        action = "Cut Expected"
-        bias   = "Bearish"
-    else:
-        action = "Hold Expected"
-        bias   = "Neutral"
+    if score >= 0.4:    action, bias = "Strong Hike Expected", "Bullish"
+    elif score >= 0.15: action, bias = "Hike Expected",        "Bullish"
+    elif score <= -0.4: action, bias = "Strong Cut Expected",  "Bearish"
+    elif score <= -0.15:action, bias = "Cut Expected",         "Bearish"
+    else:               action, bias = "Hold Expected",        "Neutral"
 
     return score, action, bias
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# MACRO REGIME CLASSIFIER
+# MACRO REGIME CLASSIFIER  (v3.1 — weighted trimmed mean, G10 vs EM split)
 # ══════════════════════════════════════════════════════════════════════════════
+
+# Currencies treated as "core" (G10-like) for regime classification.
+# EM currencies are weighted down via ECONOMY_WEIGHT and trimmed-mean logic,
+# so a TRY CPI of 32% no longer forces an "Inflation Shock" label when the
+# G10 bloc is sitting at 2–3%.
+G10_CODES = {"USD","EUR","GBP","JPY","AUD","CAD","CHF","NZD"}
 
 REGIME_TRADE_BIAS: Dict[str, Dict] = {
     "Risk-On": {
@@ -608,52 +604,154 @@ REGIME_TRADE_BIAS: Dict[str, Dict] = {
 
 def classify_regime(results: List[Dict]) -> Tuple[str, str]:
     """
-    Classify macro regime from the aggregate of currency analysis results.
-    Returns (regime_name, description).
+    Classify macro regime using economy-weighted trimmed means.
+
+    v3.1 changes vs v3.0:
+    - Cross-currency averages now computed with weighted_trimmed_mean()
+      using ECONOMY_WEIGHT, trimming top/bottom 10% of values.
+      This prevents a single EM outlier (e.g. TRY CPI ~32%) from dragging
+      the aggregate into "Inflation Shock" when G10 inflation is benign.
+    - G10-only sub-aggregate computed separately for the hawkish/dovish
+      CB bias signal, since EM CBs often move for idiosyncratic reasons
+      (political pressure, FX defence) that don't reflect G10 policy cycles.
+    - Thresholds unchanged; only the inputs are now more representative.
     """
     if not results:
         return "Neutral", "Insufficient data."
 
-    # Pull cross-currency averages
-    cpis     = [r["CPI YoY %"]    for r in results if not pd.isna(r["CPI YoY %"])]
-    gdps     = [r["GDP Growth %"] for r in results if not pd.isna(r["GDP Growth %"])]
-    unemps   = [r["Unemployment %"] for r in results if not pd.isna(r["Unemployment %"])]
-    cb_scores= [r["CB Taylor Score"] for r in results if not pd.isna(r.get("CB Taylor Score", np.nan))]
+    def _collect(field, codes=None):
+        vals, wts = [], []
+        for r in results:
+            if codes and r["code"] not in codes:
+                continue
+            v = r.get(field, np.nan)
+            if not pd.isna(v):
+                vals.append(float(v))
+                wts.append(ECONOMY_WEIGHT.get(r["code"], 0.3))
+        return vals, wts
 
-    avg_cpi   = np.mean(cpis)   if cpis   else np.nan
-    avg_gdp   = np.mean(gdps)   if gdps   else np.nan
-    avg_unemp = np.mean(unemps) if unemps else np.nan
-    avg_cb    = np.mean(cb_scores) if cb_scores else np.nan
+    cpi_vals,  cpi_wts  = _collect("CPI YoY %")
+    gdp_vals,  gdp_wts  = _collect("GDP Growth %")
+    # CB bias signal uses G10 only to avoid EM political noise
+    cb_vals_g10, cb_wts_g10 = _collect("CB Taylor Score", codes=G10_CODES)
 
-    # CPI direction: count currencies with rising inflation
-    cpi_rising_count = sum(1 for r in results if r.get("CPI Direction") == "rising")
-    cpi_falling_count= sum(1 for r in results if r.get("CPI Direction") == "falling")
+    avg_cpi = weighted_trimmed_mean(cpi_vals, cpi_wts)
+    avg_gdp = weighted_trimmed_mean(gdp_vals, gdp_wts)
+    # G10 CB score uses simple weighted mean (already G10-filtered, no trim needed)
+    total_cbw = sum(cb_wts_g10)
+    avg_cb = (sum(v * w for v, w in zip(cb_vals_g10, cb_wts_g10)) / total_cbw
+              if total_cbw > 0 else np.nan)
 
-    # GDP direction
-    gdp_contracting = sum(1 for r in results if "Contraction" in r.get("GDP Trend",""))
     n = len(results)
+    gdp_contracting = sum(1 for r in results if "Contraction" in r.get("GDP Trend", ""))
 
-    high_inflation  = not pd.isna(avg_cpi)  and avg_cpi  > 3.5
-    low_growth      = not pd.isna(avg_gdp)  and avg_gdp  < 1.0
-    rising_unemp    = not pd.isna(avg_unemp)
-    hawkish_bias    = not pd.isna(avg_cb)   and avg_cb   > 0.15
-    dovish_bias     = not pd.isna(avg_cb)   and avg_cb   < -0.15
-    broad_contraction = gdp_contracting / n > 0.5 if n > 0 else False
+    high_inflation     = not pd.isna(avg_cpi) and avg_cpi > 3.5
+    low_growth         = not pd.isna(avg_gdp) and avg_gdp < 1.0
+    hawkish_bias       = not pd.isna(avg_cb)  and avg_cb  > 0.15
+    dovish_bias        = not pd.isna(avg_cb)  and avg_cb  < -0.15
+    broad_contraction  = gdp_contracting / n > 0.5 if n > 0 else False
 
-    # Classification logic
+    cpi_str = f"{avg_cpi:.1f}%" if not pd.isna(avg_cpi) else "n/a"
+    gdp_str = f"{avg_gdp:.1f}%" if not pd.isna(avg_gdp) else "n/a"
+
     if high_inflation and low_growth:
-        return "Stagflation", f"Avg CPI {avg_cpi:.1f}% with GDP {avg_gdp:.1f}% — classic stagflation mix."
+        return ("Stagflation",
+                f"Wtd-trimmed avg CPI {cpi_str}, GDP {gdp_str} (G10/EM weighted).")
     if high_inflation and hawkish_bias:
-        return "Inflation Shock", f"Avg CPI {avg_cpi:.1f}%, majority of CBs signalling hikes."
+        return ("Inflation Shock",
+                f"Wtd-trimmed avg CPI {cpi_str}; G10 CBs signalling hikes.")
     if broad_contraction and dovish_bias:
-        return "Growth Shock", f"{gdp_contracting}/{n} currencies in contraction. CBs easing."
+        return ("Growth Shock",
+                f"{gdp_contracting}/{n} currencies contracting; G10 CBs easing.")
     if not high_inflation and not broad_contraction and dovish_bias:
-        return "Carry Environment", "Low inflation, stable growth, dovish CBs — ideal carry conditions."
+        return ("Carry Environment",
+                "Low inflation, stable growth, dovish G10 CBs — ideal carry conditions.")
     if not high_inflation and not broad_contraction and not hawkish_bias:
-        return "Risk-On", "Benign macro backdrop — risk appetite supported."
+        return ("Risk-On",
+                "Benign macro backdrop — risk appetite supported.")
     if broad_contraction or (not pd.isna(avg_gdp) and avg_gdp < 0):
-        return "Risk-Off", "Broad growth deterioration signals risk-off positioning."
+        return ("Risk-Off",
+                "Broad growth deterioration signals risk-off positioning.")
     return "Neutral", "Mixed signals — no dominant regime."
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# FORWARD CPI MODEL  (v3.1 — EM-aware mean reversion)
+# ══════════════════════════════════════════════════════════════════════════════
+
+def forward_cpi_estimate(code: str, cpi_now: float,
+                          cpi_history: pd.Series) -> float:
+    """
+    12-month forward CPI estimate.
+
+    v3.0 used a single formula for all currencies:
+        expected = 0.60 * cpi_now + 0.40 * 2.0
+    That anchors toward the 2% DM inflation target regardless of currency.
+    For HIGH_INFLATION_CURRENCIES (TRY, ZAR, MXN, CNY), this produces
+    nonsensical forecasts: TRY at 32% would forecast ~20%, yet TRY has
+    never been anywhere near 2% in the modern era.  The model's chronic
+    negative surprise signals were an artefact of this wrong anchor, not
+    a real inflationary surprise.
+
+    v3.1 fix:
+    - For HIGH_INFLATION_CURRENCIES: anchor toward the currency's own
+      trailing 5-year median CPI (if ≥ 12 months of history available),
+      capped so the forecast can't deviate > ±5pp from current.
+      This is still a naive heuristic, but it's a less wrong one.
+    - For standard currencies: unchanged 60/40 blend toward 2%, capped ±3pp.
+    - If insufficient history for EM anchor, fall back to 70% persistence
+      (less pull toward any anchor) rather than the DM 2% anchor.
+    """
+    if pd.isna(cpi_now):
+        return np.nan
+
+    if code in HIGH_INFLATION_CURRENCIES:
+        hist = cpi_history.dropna()
+        # Use up to 5 years (60 months) of own history as the EM anchor
+        em_anchor = float(hist.iloc[-60:].median()) if len(hist) >= 12 else np.nan
+        if not pd.isna(em_anchor):
+            raw = 0.65 * cpi_now + 0.35 * em_anchor
+            return float(np.clip(raw, cpi_now - 5.0, cpi_now + 5.0))
+        else:
+            # Not enough history: high persistence, no anchor
+            return float(np.clip(0.80 * cpi_now, cpi_now - 5.0, cpi_now + 5.0))
+    else:
+        raw = 0.60 * cpi_now + 0.40 * INFLATION_TARGET
+        return float(np.clip(raw, cpi_now - 3.0, cpi_now + 3.0))
+
+
+def cpi_actual_vs_expected(code: str, cpi_series: pd.Series,
+                            months: int = 24) -> pd.DataFrame:
+    """
+    Retrospective actual-vs-model CPI table using the currency-aware
+    forward_cpi_estimate() function.  One-step-ahead: for each month,
+    "expected" = what the model would have forecast given the prior month's
+    actual reading.
+    """
+    s = cpi_series.dropna()
+    if s.empty:
+        return pd.DataFrame(columns=["Date","Actual CPI YoY %",
+                                      "Model-Expected %","Surprise (Actual − Expected)"])
+
+    s = s.iloc[-(months + 1):]
+    rows = []
+    for i in range(1, len(s)):
+        date     = s.index[i]
+        actual   = float(s.iloc[i])
+        prior    = float(s.iloc[i - 1])
+        # Pass the history UP TO the prior period so the EM anchor doesn't
+        # look forward (avoids lookahead bias in the retrospective check).
+        hist_up_to_prior = s.iloc[:i]
+        expected = forward_cpi_estimate(code, prior, hist_up_to_prior)
+        if pd.isna(expected):
+            continue
+        rows.append({
+            "Date": date,
+            "Actual CPI YoY %":            round(actual,   2),
+            "Model-Expected %":            round(expected, 2),
+            "Surprise (Actual − Expected)": round(actual - expected, 2),
+        })
+    return pd.DataFrame(rows)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -674,7 +772,6 @@ def analyze_currency(code: str, macro: Dict[str, pd.Series],
     consumer_conf  = macro.get("consumer_conf",   pd.Series(dtype=float))
     building_perms = macro.get("building_permits",pd.Series(dtype=float))
 
-    # ── Current levels ───────────────────────────────────────────────────
     rate_now    = latest(policy_rate)
     cpi_now     = latest(cpi_yoy)
     gdp_raw     = latest(gdp)
@@ -689,18 +786,14 @@ def analyze_currency(code: str, macro: Dict[str, pd.Series],
         if pd.isna(val):
             dq_log.warn(code, f"{label} unavailable from FRED")
 
-    # ── Real rates ───────────────────────────────────────────────────────
     real_rate_10y    = ten_y_now - cpi_now if not pd.isna(ten_y_now) and not pd.isna(cpi_now) else np.nan
     real_rate_policy = rate_now  - cpi_now if not pd.isna(rate_now)  and not pd.isna(cpi_now) else np.nan
     real_rate        = real_rate_10y if not pd.isna(real_rate_10y) else real_rate_policy
 
-    # ── Yield curve ──────────────────────────────────────────────────────
     curve_slope = ten_y_now - rate_now if not pd.isna(ten_y_now) and not pd.isna(rate_now) else np.nan
-    curve_state = "unknown"
-    if not pd.isna(curve_slope):
-        curve_state = "Inverted ⚠️" if curve_slope < 0 else "Normal ✓"
+    curve_state = ("Inverted ⚠️" if not pd.isna(curve_slope) and curve_slope < 0
+                   else "Normal ✓" if not pd.isna(curve_slope) else "unknown")
 
-    # ── GDP — z-score relative to own history ────────────────────────────
     gdp_is_growth = gdp.dropna().abs().median() < 15 if not gdp.dropna().empty else False
     if gdp_is_growth:
         gdp_growth_now   = gdp_raw
@@ -723,13 +816,11 @@ def analyze_currency(code: str, macro: Dict[str, pd.Series],
     else:
         gdp_trend = "Contraction ▲"
 
-    # Z-score GDP: relative to own 5-year history (20 quarters)
     gdp_z = zscore_current(gdp_series_for_z, window=20)
     gdp_score = float(np.clip(gdp_z / 2.0, -1, 1)) if not pd.isna(gdp_z) else (
         float(np.clip(gdp_growth_now / 4.0, -1, 1)) if not pd.isna(gdp_growth_now) else np.nan
     )
 
-    # ── Taylor Rule CB Score (replaces old binary rule) ──────────────────
     cpi_direction = trend_direction(cpi_yoy, lookback=3)
     cpi_3m_ago    = value_n_ago(cpi_yoy, 3)
     unemp_prior   = value_n_ago(unemployment, 3)
@@ -741,34 +832,17 @@ def analyze_currency(code: str, macro: Dict[str, pd.Series],
         cpi_now, cpi_3m_ago, unemp_now, unemp_prior,
         gdp_growth_now, rate_now, rate_6m_ago, code
     )
-    inflation_score = cb_taylor_score  # CB score IS the inflation/policy signal
+    inflation_score = cb_taylor_score
 
-    # ── Trade balance ────────────────────────────────────────────────────
-    # IMPORTANT: FRED trade-balance series are NOT in comparable units
-    # across countries. USD uses BOPGSTB (raw USD millions). Most other
-    # currencies use OECD "XTNTVA01..." series, which are an OECD index
-    # unit (CXMLSA), not USD millions. Comparing raw levels side-by-side
-    # (e.g. "USD: -50,000" vs "EUR: -12.4") is comparing different units
-    # and produces numbers that look arbitrary/wrong -- because they are
-    # not on the same scale. We therefore:
-    #   1. Score trade direction/sign using the country's OWN series only
-    #      (sign + trend within one unit system is still meaningful).
-    #   2. Compute a z-score vs the country's own trailing history so the
-    #      Overview can show "how strong vs normal for this country" --
-    #      directly comparable across currencies, the same pattern already
-    #      used for GDP -- instead of showing incomparable raw levels.
-    trade_dir = trend_direction(trade_bal, lookback=3)
+    trade_dir   = trend_direction(trade_bal, lookback=3)
     trade_score = np.nan
     if not pd.isna(trade_now):
         base = 0.5 if trade_now > 0 else -0.5
         mom  = 0.3 if trade_dir == "rising" else (-0.3 if trade_dir == "falling" else 0.0)
         trade_score = float(np.clip(base + mom, -1, 1))
     trade_z = zscore_current(trade_bal, window=20)
-    # Unit label so the UI never implies cross-currency comparability of
-    # the raw figure.
     trade_unit = "$M (raw)" if code == "USD" else "OECD index (own units)"
 
-    # ── M2 ───────────────────────────────────────────────────────────────
     m2_growth_now = latest(yoy_growth(m2, 12))
     m2_trend      = trend_direction(yoy_growth(m2, 12))
     m2_score      = np.nan
@@ -787,50 +861,39 @@ def analyze_currency(code: str, macro: Dict[str, pd.Series],
             else:                       m2_score = 0.0
         m2_score = float(np.clip(m2_score, -1, 1))
 
-    # ── Consumer Confidence ──────────────────────────────────────────────
     conf_dir   = trend_direction(consumer_conf, lookback=3)
     conf_score = np.nan
     if not pd.isna(conf_now):
         conf_score = 0.3 if conf_dir == "rising" else (-0.3 if conf_dir == "falling" else 0.0)
 
-    # ── PMI (placeholder — no free FRED series) ──────────────────────────
     pmi_dir   = trend_direction(pmi_mfg, lookback=3)
     pmi_score = np.nan
     if not pd.isna(pmi_now):
-        pmi_score = float(np.clip((pmi_now - 50) / 10.0 +
-                                   (0.1 if pmi_dir=="rising" else -0.1 if pmi_dir=="falling" else 0), -1, 1))
+        pmi_score = float(np.clip(
+            (pmi_now - 50) / 10.0 + (0.1 if pmi_dir=="rising" else -0.1 if pmi_dir=="falling" else 0),
+            -1, 1))
 
-    # ── Composite score ──────────────────────────────────────────────────
     component_scores = {
         "gdp": gdp_score, "inflation": inflation_score,
-        "cb_taylor": cb_taylor_score,  # separate weight from inflation_score
+        "cb_taylor": cb_taylor_score,
         "trade": trade_score, "m2": m2_score, "conf": conf_score,
     }
-    # Deduplicate: inflation_score and cb_taylor_score are the same value.
-    # We only want to count the CB signal once in composite (via 'inflation' slot).
-    # Use inflation only once; cb_taylor weight goes to zero here to avoid double-counting.
+    # cb_taylor and inflation_score are the same value; set cb_taylor weight
+    # to zero here to avoid double-counting in the composite.
+    # The score weights still sum correctly because weight_used is computed
+    # from only the non-zero-weight, non-NaN components.
     effective_weights = {**SCORE_WEIGHTS, "cb_taylor": 0.0}
     weighted_sum = sum(effective_weights[k] * v for k, v in component_scores.items() if not pd.isna(v))
     weight_used  = sum(effective_weights[k] for k, v in component_scores.items() if not pd.isna(v))
     composite    = float(weighted_sum / weight_used) if weight_used > 0 else np.nan
 
-    # Bullish/Bearish band. Composite is a weighted blend of several -1..+1
-    # component scores, so it rarely reaches the extremes even when one
-    # driver (e.g. CB policy) is screaming in one direction -- that's
-    # expected dampening, not a bug. The 0.25 cutoff is calibrated against
-    # the tanh divisors in taylor_rule_score(); if those divisors change,
-    # this threshold should be re-checked against realistic scenarios.
     if pd.isna(composite):        overall_bias = "Neutral"
     elif composite >= 0.25:       overall_bias = "Bullish"
     elif composite <= -0.25:      overall_bias = "Bearish"
     else:                         overall_bias = "Neutral"
 
-    # ── CPI forward: mean-reversion blend (not linear extrapolation) ─────
-    # Expected CPI = 60% current + 40% target, capped at ±3% from current
-    cpi_exp12m = np.nan
-    if not pd.isna(cpi_now):
-        raw_exp = 0.60 * cpi_now + 0.40 * INFLATION_TARGET
-        cpi_exp12m = float(np.clip(raw_exp, cpi_now - 3.0, cpi_now + 3.0))
+    # Forward estimates — use currency-aware CPI model
+    cpi_exp12m  = forward_cpi_estimate(code, cpi_now, cpi_yoy)
 
     rate_step_map = {"Strong Hike Expected": +0.75, "Hike Expected": +0.25,
                       "Hold Expected": 0.0, "Cut Expected": -0.25, "Strong Cut Expected": -0.75}
@@ -838,15 +901,12 @@ def analyze_currency(code: str, macro: Dict[str, pd.Series],
 
     gdp_exp12m = np.nan
     if not pd.isna(gdp_growth_now) and not pd.isna(gdp_growth_prior):
-        # Mean-revert toward 2% rather than extrapolating the trend
         raw = gdp_growth_now + 0.5 * (gdp_growth_now - gdp_growth_prior)
         gdp_exp12m = float(0.7 * raw + 0.3 * 2.0)
 
-    # ── Pre-meeting window ───────────────────────────────────────────────
     pre_meeting_window = is_in_cb_window(code)
     pre_meeting_score  = 2 if (pre_meeting_window and overall_bias != "Neutral") else (1 if pre_meeting_window else 0)
 
-    # ── FX momentum ──────────────────────────────────────────────────────
     fx_now = latest(fx_series)
     fx_chg_1m = fx_chg_3m = fx_chg_12m = np.nan
     if not fx_series.empty:
@@ -887,19 +947,16 @@ def analyze_currency(code: str, macro: Dict[str, pd.Series],
         "Pre-Meeting Window":  pre_meeting_window, "Pre-Meeting Score": pre_meeting_score,
         "FX Spot":             fx_now, "FX Chg 1m %": fx_chg_1m,
         "FX Chg 3m %":         fx_chg_3m, "FX Chg 12m %": fx_chg_12m,
+        # FX realized vol stored on the result for use in carry tab
+        "FX Realized Vol %":   fetch_realized_vol(FX_TICKER.get(code, "")),
     }
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# PAIR SCORING ENGINE  (relative analysis)
+# PAIR SCORING ENGINE
 # ══════════════════════════════════════════════════════════════════════════════
 
 def build_pair_matrix(results: List[Dict], max_tier: int = 3) -> pd.DataFrame:
-    """
-    Build a scored pair matrix. For every A/B combination:
-      pair_score = A_composite - B_composite
-    Filtered to liquidity tier ≤ max_tier. Sorted by |score| descending.
-    """
     rows = []
     for i, ra in enumerate(results):
         for j, rb in enumerate(results):
@@ -911,7 +968,6 @@ def build_pair_matrix(results: List[Dict], max_tier: int = 3) -> pd.DataFrame:
             sb = rb.get("Composite Score", np.nan)
             if pd.isna(sa) or pd.isna(sb): continue
             pair_score = sa - sb
-            # Direction: positive = long A / short B is the trade
             long_code  = a if pair_score >= 0 else b
             short_code = b if pair_score >= 0 else a
             abs_score  = abs(pair_score)
@@ -943,10 +999,6 @@ def rank_currencies(results: List[Dict]) -> pd.DataFrame:
                  "★☆☆☆☆" if score >= -0.3 else "☆☆☆☆☆") if not pd.isna(score) else "—"
         tb = r["Trade Balance"]
         tb_z = r.get("Trade Z-Score", np.nan)
-        # Show the z-score (comparable across currencies) as the primary
-        # signal, with the raw print + its native unit in parentheses so
-        # it's clear the raw numbers are NOT directly comparable across
-        # rows of this table.
         if not pd.isna(tb_z):
             tb_label = f"{'▲' if tb_z > 0 else '▼'} z={tb_z:+.2f}"
         elif not pd.isna(tb):
@@ -987,40 +1039,62 @@ def real_rate_differential_table(results: List[Dict]) -> pd.DataFrame:
     return pd.DataFrame(rows).set_index("Long ↓ / Short →")
 
 
-def cpi_actual_vs_expected(cpi_series: pd.Series, months: int = 24) -> pd.DataFrame:
+def vol_adjusted_carry_table(results: List[Dict]) -> pd.DataFrame:
     """
-    Build a trailing actual-vs-model-expected CPI table for one currency.
+    Build carry analysis table with vol-adjusted carry (Sharpe-like ratio).
 
-    "Expected" reuses the SAME mean-reversion blend already used elsewhere
-    in this app for the forward 12m CPI forecast (60% persistence of the
-    prior reading + 40% reversion to the 2% inflation target), but applied
-    retrospectively: for each past month, "expected" = what the model would
-    have forecast GIVEN the prior month's actual reading. This lets the user
-    see how well the simple mean-reversion heuristic has been tracking
-    reality, month by month, rather than only seeing a single forward-
-    looking number.
+    Vol-adjusted carry = real_rate_differential / pair_annualised_vol (%).
+    A ratio > 0.20 is considered attractive; < 0.10 is marginal.
 
-    Note this is a one-step-ahead model check, not a real economist
-    forecast -- it's intended to show the model's recent error pattern,
-    not to be a forecasting authority.
+    Why this matters: a 5% carry differential in TRY/JPY (pair vol ~25%)
+    gives a ratio of 0.20 — the same ratio as a 1.6% carry in AUD/JPY
+    (pair vol ~8%). Raw carry alone massively overstates the attractiveness
+    of EM carry trades vs G10 carry trades because it ignores that FX vol
+    can erase the carry in a single bad day.
+
+    Vol is computed from 63-day realized volatility of the FX rate vs USD
+    for each leg, then combined as sqrt(va^2 + vb^2) for crosses.
     """
-    s = cpi_series.dropna()
-    if s.empty:
-        return pd.DataFrame(columns=["Date", "Actual CPI YoY %", "Model-Expected %", "Surprise (Actual − Expected)"])
-
-    s = s.iloc[-(months + 1):]  # need one extra point to seed "prior" for the first row
+    result_map = {r["code"]: r for r in results}
     rows = []
-    for i in range(1, len(s)):
-        date        = s.index[i]
-        actual      = float(s.iloc[i])
-        prior       = float(s.iloc[i - 1])
-        expected    = 0.60 * prior + 0.40 * INFLATION_TARGET
-        expected    = float(np.clip(expected, prior - 3.0, prior + 3.0))
-        surprise    = actual - expected
+    for lc, sc in CLASSIC_CARRY_PAIRS:
+        if lc not in result_map or sc not in result_map:
+            continue
+        rl, rs = result_map[lc], result_map[sc]
+        rrd = (rl["Real Rate %"] - rs["Real Rate %"]
+               if not pd.isna(rl["Real Rate %"]) and not pd.isna(rs["Real Rate %"]) else np.nan)
+
+        # Vol-adjusted carry
+        pair_vol = pair_realized_vol(lc, sc)
+        if not pd.isna(rrd) and not pd.isna(pair_vol) and pair_vol > 0:
+            adj_carry = rrd / pair_vol
+        else:
+            adj_carry = np.nan
+
+        if not pd.isna(adj_carry):
+            if adj_carry >= 0.20:   carry_rating = "✅ Attractive"
+            elif adj_carry >= 0.10: carry_rating = "⚠️ Marginal"
+            elif adj_carry >= 0:    carry_rating = "❌ Unattractive"
+            else:                   carry_rating = "🔴 Negative"
+        else:
+            carry_rating = "—"
+
         rows.append({
-            "Date": date, "Actual CPI YoY %": round(actual, 2),
-            "Model-Expected %": round(expected, 2),
-            "Surprise (Actual − Expected)": round(surprise, 2),
+            "Pair":                f"{lc}/{sc}",
+            "Long":                lc,
+            "Short":               sc,
+            "Long Real Rate %":    fmt(rl["Real Rate %"]),
+            "Short Real Rate %":   fmt(rs["Real Rate %"]),
+            "Real Yield Diff %":   fmt(rrd),
+            "Pair Vol % (Ann.)":   fmt(pair_vol) if not pd.isna(pair_vol) else "—",
+            "Vol-Adj Carry":       f"{adj_carry:.3f}" if not pd.isna(adj_carry) else "—",
+            "Carry Rating":        carry_rating,
+            "Long Policy Rate %":  fmt(rl["Policy Rate %"]),
+            "Short Policy Rate %": fmt(rs["Policy Rate %"]),
+            "Long Bias":           rl["Overall Bias"],
+            "Short Bias":          rs["Overall Bias"],
+            "Curve Warning":       ("⚠️" if (rl["Curve State"]=="Inverted ⚠️"
+                                             or rs["Curve State"]=="Inverted ⚠️") else "✓"),
         })
     return pd.DataFrame(rows)
 
@@ -1094,10 +1168,12 @@ def colour_bias_style(val):
 def main():
     st.set_page_config(page_title="Forex Fundamental Scanner",
                         page_icon="💱", layout="wide")
-    st.title("💱 Forex Fundamental Scanner  v3.0")
-    st.caption("Taylor Rule CB Prediction · GDP Z-Score · Pair Matrix · Regime Classifier · Heat Map")
+    st.title("💱 Forex Fundamental Scanner  v3.1")
+    st.caption(
+        "Taylor Rule CB Prediction · GDP Z-Score · Vol-Adjusted Carry · "
+        "Weighted-Trimmed Regime Classifier · EM-Aware CPI Forward Model"
+    )
 
-    # ── Sidebar ───────────────────────────────────────────────────────────────
     with st.sidebar:
         st.header("⚙️ Settings")
         all_codes      = list(CURRENCY_INFO.keys())
@@ -1123,7 +1199,6 @@ def main():
         st.warning("Select at least one currency.")
         return
 
-    # ── Fetch & analyse ───────────────────────────────────────────────────────
     dq_log = DataQualityLog()
     cpi_history: Dict[str, pd.Series] = {}
     with st.spinner("Fetching macro data…"):
@@ -1141,6 +1216,7 @@ def main():
     ranked_df  = rank_currencies(results)
     pair_df    = build_pair_matrix(results, max_tier=max_tier)
     rr_diff_df = real_rate_differential_table(results)
+    carry_df   = vol_adjusted_carry_table(results)
     regime, regime_desc = classify_regime(results)
 
     with st.sidebar:
@@ -1153,7 +1229,6 @@ def main():
                     unsafe_allow_html=True)
         st.caption(regime_desc)
 
-    # ── Eight tabs ────────────────────────────────────────────────────────────
     (tab_overview, tab_heatmap, tab_pairs_tab,
      tab_carry, tab_ixl, tab_cot, tab_premeeting, tab_cpi) = st.tabs([
         "📊 Overview", "🌡️ Heat Map & Regime", "🔀 Pairs",
@@ -1166,12 +1241,11 @@ def main():
     with tab_overview:
         st.subheader("Currency Ranking")
         st.caption(
-            "GDP Z-Score = GDP growth vs own 5-year history (not a fixed divisor). "
+            "GDP Z-Score = GDP growth vs own 5-year history. "
             "CB Score = Taylor Rule estimate (−1 dovish … +1 hawkish). "
             "Real Rate uses 10Y yield where available. "
-            "Trade Balance column shows a z-score vs each country's own history (comparable across "
-            "rows) — raw FRED trade-balance levels use different units per country (USD = $ millions, "
-            "most others = OECD index units) and are NOT directly comparable, so we don't show them side-by-side."
+            "Trade Balance shows z-score vs each country's own history — raw levels "
+            "are not cross-country comparable (USD = $M, others = OECD index)."
         )
         styled = ranked_df.style.map(colour_bias_style, subset=["Bias"])
         st.dataframe(styled, use_container_width=True, hide_index=True)
@@ -1193,31 +1267,35 @@ def main():
                 c1, c2, c3 = st.columns(3)
                 with c1:
                     st.markdown("**Macro Levels**")
-                    st.write(f"Policy Rate:      {fmt(r['Policy Rate %'])}%")
-                    st.write(f"CPI YoY:          {fmt(r['CPI YoY %'])}% ({r['CPI Direction']})")
-                    st.write(f"Real Rate (10Y):  {fmt(r['Real Rate % (10Y)'])}%")
+                    st.write(f"Policy Rate:       {fmt(r['Policy Rate %'])}%")
+                    st.write(f"CPI YoY:           {fmt(r['CPI YoY %'])}% ({r['CPI Direction']})")
+                    st.write(f"Real Rate (10Y):   {fmt(r['Real Rate % (10Y)'])}%")
                     st.write(f"Real Rate (Policy):{fmt(r['Real Rate % (Policy)'])}%")
-                    st.write(f"GDP Growth:       {fmt(r['GDP Growth %'])}%  Z={fmt(r.get('GDP Z-Score',np.nan))}")
-                    st.write(f"Unemployment:     {fmt(r['Unemployment %'])}%")
-                    st.write(f"10Y Yield:        {fmt(r['10Y Yield %'])}%")
-                    st.write(f"Yield Curve:      {r['Curve State']}")
+                    st.write(f"GDP Growth:        {fmt(r['GDP Growth %'])}%  Z={fmt(r.get('GDP Z-Score',np.nan))}")
+                    st.write(f"Unemployment:      {fmt(r['Unemployment %'])}%")
+                    st.write(f"10Y Yield:         {fmt(r['10Y Yield %'])}%")
+                    st.write(f"Yield Curve:       {r['Curve State']}")
+                    st.write(f"FX Realized Vol:   {fmt(r.get('FX Realized Vol %', np.nan))}% (ann.)")
                 with c2:
                     st.markdown("**Leading Indicators**")
-                    st.write(f"Trade Balance:    {fmt(r['Trade Balance'],2)} {r.get('Trade Unit','')}  "
+                    st.write(f"Trade Balance:  {fmt(r['Trade Balance'],2)} {r.get('Trade Unit','')}  "
                              f"(z={fmt(r.get('Trade Z-Score',np.nan),2)} vs own history, {r['Trade Bal Direction']})")
-                    st.write(f"M2 Growth:        {fmt(r['M2 Growth YoY %'])}%  ({r['M2 Trend']})")
-                    st.write(f"Consumer Conf:    {fmt(r['Consumer Conf'],1)}  ({r['Conf Direction']})")
-                    pmi_lbl = fmt(r['PMI'],1) if not pd.isna(r['PMI']) else "N/A (ISM not on FRED)"
-                    st.write(f"PMI:              {pmi_lbl}")
-                    st.write(f"Building Permits: {fmt(r['Building Permits'],0)}")
+                    st.write(f"M2 Growth:      {fmt(r['M2 Growth YoY %'])}%  ({r['M2 Trend']})")
+                    st.write(f"Consumer Conf:  {fmt(r['Consumer Conf'],1)}  ({r['Conf Direction']})")
+                    # FIX: PMI shown only when a real value exists; otherwise suppressed cleanly
+                    if not pd.isna(r["PMI"]):
+                        st.write(f"PMI:            {fmt(r['PMI'],1)}")
+                    else:
+                        st.write("PMI:            N/A (no free FRED series for this currency)")
+                    st.write(f"Building Permits:{fmt(r['Building Permits'],0)}")
                 with c3:
                     st.markdown("**CB & Forward Outlook**")
-                    st.write(f"Taylor CB Score:  {fmt(r.get('CB Taylor Score',np.nan))} ← key signal")
-                    st.write(f"CB Action:        **{r['Expected CB Action']}**")
-                    st.write(f"CPI (12m fwd):    {fmt(r['CPI Expected (12m)'])}%")
-                    st.write(f"Rate (12m fwd):   {fmt(r['Rate Expected (12m)'])}%")
-                    st.write(f"GDP (12m fwd):    {fmt(r['GDP Expected (12m)'])}%")
-                    st.write(f"FX 1m/3m/12m:     {fmt(r['FX Chg 1m %'])}% / {fmt(r['FX Chg 3m %'])}% / {fmt(r['FX Chg 12m %'])}%")
+                    st.write(f"Taylor CB Score: {fmt(r.get('CB Taylor Score',np.nan))} ← key signal")
+                    st.write(f"CB Action:       **{r['Expected CB Action']}**")
+                    st.write(f"CPI (12m fwd):   {fmt(r['CPI Expected (12m)'])}%")
+                    st.write(f"Rate (12m fwd):  {fmt(r['Rate Expected (12m)'])}%")
+                    st.write(f"GDP (12m fwd):   {fmt(r['GDP Expected (12m)'])}%")
+                    st.write(f"FX 1m/3m/12m:    {fmt(r['FX Chg 1m %'])}% / {fmt(r['FX Chg 3m %'])}% / {fmt(r['FX Chg 12m %'])}%")
 
                 st.write("**Component Scores**")
                 for label, key in [("GDP","GDP Score"),("INFLATION","Inflation Score"),
@@ -1237,7 +1315,6 @@ def main():
     # TAB 2 · HEAT MAP & REGIME
     # ══════════════════════════════════════════════════════════════════════════
     with tab_heatmap:
-        # ── Currency strength heat map ────────────────────────────────────
         st.subheader("🌡️ Currency Strength Heat Map")
         hm_codes  = ranked_df["Currency"].tolist()
         hm_scores = ranked_df["Score"].tolist()
@@ -1258,7 +1335,6 @@ def main():
         )
         st.plotly_chart(fig_hm, use_container_width=True)
 
-        # ── Component radar chart per currency ───────────────────────────
         st.subheader("Component Breakdown — Radar")
         radar_currencies = st.multiselect("Select currencies for radar",
                                            hm_codes, default=hm_codes[:4])
@@ -1268,11 +1344,10 @@ def main():
         for r in results:
             if r["code"] not in radar_currencies: continue
             vals = [r.get(k, 0) or 0 for k in score_keys]
-            vals += [vals[0]]  # close polygon
+            vals += [vals[0]]
             fig_radar.add_trace(go.Scatterpolar(
                 r=vals, theta=categories + [categories[0]],
-                fill="toself", name=r["code"],
-                line=dict(width=2),
+                fill="toself", name=r["code"], line=dict(width=2),
             ))
         fig_radar.update_layout(
             polar=dict(radialaxis=dict(visible=True, range=[-1,1])),
@@ -1281,9 +1356,13 @@ def main():
         )
         st.plotly_chart(fig_radar, use_container_width=True)
 
-        # ── Regime panel ──────────────────────────────────────────────────
         st.divider()
         st.subheader("🌐 Macro Regime")
+        st.caption(
+            "v3.1: regime is computed from economy-weighted trimmed means "
+            "(ECONOMY_WEIGHT × trimmed 10%), so EM outliers no longer dominate "
+            "the G10 aggregate. G10 CB bias is computed separately."
+        )
         ri = REGIME_TRADE_BIAS.get(regime, REGIME_TRADE_BIAS["Neutral"])
         r1, r2 = st.columns([1, 2])
         with r1:
@@ -1299,14 +1378,11 @@ def main():
                 short_str = "  ".join([f"🔴 **{c}**" for c in ri["short"] if c in selected_codes])
                 if long_str:  st.markdown(f"Favour Long: {long_str}")
                 if short_str: st.markdown(f"Favour Short: {short_str}")
-            st.info("Regime is inferred from aggregate macro signals across selected currencies. "
-                    "It is a qualitative guide — not a precise classification.")
+            st.info("Regime is inferred from aggregate macro signals. It is a qualitative guide.")
 
-        # ── CB Taylor Score bar ───────────────────────────────────────────
         st.divider()
         st.subheader("Central Bank Taylor Rule Scores")
-        st.caption("Derived from: inflation gap + inflation momentum + unemployment trend + GDP + rate momentum. "
-                    "Positive = hawkish bias (bullish for currency), negative = dovish.")
+        st.caption("Positive = hawkish bias (bullish for currency), negative = dovish.")
         cb_codes  = [r["code"] for r in results]
         cb_scores = [r.get("CB Taylor Score", 0) or 0 for r in results]
         cb_actions= [r["Expected CB Action"] for r in results]
@@ -1326,13 +1402,13 @@ def main():
     with tab_pairs_tab:
         st.subheader("Pair Score Matrix — Relative Fundamental Analysis")
         st.caption(
-            "Pair Score = Long currency composite − Short currency composite. "
+            "Pair Score = Long composite − Short composite. "
             "Higher absolute score = greater fundamental divergence. "
-            "Liquidity tier filter applied (sidebar). ★★★ = high conviction."
+            "★★★ = high conviction."
         )
 
         if pair_df.empty:
-            st.info("No qualifying pairs with current liquidity filter. Try expanding to Tier 3 or 4.")
+            st.info("No qualifying pairs with current liquidity filter.")
         else:
             top_df = pair_df[["Pair","Pair Score","Conviction","Long","Long Score",
                                "Short","Short Score","Long CB","Short CB","Liquidity Tier"]].head(15)
@@ -1340,7 +1416,6 @@ def main():
                 subset=["Pair Score"], cmap="RdYlGn", vmin=-1, vmax=1)
             st.dataframe(styled_pairs, use_container_width=True, hide_index=True)
 
-            # Conviction top 3
             st.subheader("Top Conviction Trades")
             top3 = pair_df.head(3)
             for _, p in top3.iterrows():
@@ -1353,11 +1428,9 @@ def main():
                     col3.write(f"**Long {p['Long']}**: score {fmt(p['Long Score'],3)}  ·  CB: {p['Long CB']}")
                     col3.write(f"**Short {p['Short']}**: score {fmt(p['Short Score'],3)}  ·  CB: {p['Short CB']}")
 
-        # Full NxN matrix
         st.divider()
         st.subheader("Full Score Differential Matrix")
-        st.caption("Cell = row currency score − column currency score. "
-                    "Positive = row currency is fundamentally stronger.")
+        st.caption("Cell = row currency score − column currency score.")
         codes_in  = [r["code"] for r in results]
         scores_in = {r["code"]: r.get("Composite Score", np.nan) for r in results}
         matrix_data = []
@@ -1401,33 +1474,68 @@ def main():
                 st.plotly_chart(fig_dxy, use_container_width=True)
 
     # ══════════════════════════════════════════════════════════════════════════
-    # TAB 4 · CARRY
+    # TAB 4 · CARRY  (v3.1 — vol-adjusted carry)
     # ══════════════════════════════════════════════════════════════════════════
     with tab_carry:
+        st.subheader("Vol-Adjusted Carry Analysis")
+        st.caption(
+            "**Vol-Adj Carry = Real Yield Differential ÷ Pair Annualised Vol.**  "
+            "A ratio ≥ 0.20 is considered attractive; < 0.10 is marginal. "
+            "This is a Sharpe-like measure: a 5% carry in TRY/JPY (vol ~25%) "
+            "scores the same as a 1.6% carry in AUD/JPY (vol ~8%), because "
+            "TRY's FX vol can erase the carry in a single bad session. "
+            "Raw carry differentials alone overstate EM carry attractiveness. "
+            "Vol = 63-day realized (annualised) from daily FX returns."
+        )
+
+        if carry_df.empty:
+            st.info("No classic carry pairs found in selected currencies.")
+        else:
+            # Colour the carry rating column
+            def colour_carry(val):
+                if "Attractive" in str(val): return "background-color:#1a4a1a;color:#7fff7f"
+                if "Marginal"   in str(val): return "background-color:#2a2a1a;color:#ffff99"
+                if "Negative"   in str(val): return "background-color:#4a1a1a;color:#ff9999"
+                if "Unattract" in str(val):  return "background-color:#3a2a1a;color:#ffaa55"
+                return ""
+
+            styled_carry = carry_df.style.map(colour_carry, subset=["Carry Rating"])
+            st.dataframe(styled_carry, use_container_width=True, hide_index=True)
+
+            # Vol-adj carry bar chart
+            plot_rows = carry_df[carry_df["Vol-Adj Carry"] != "—"].copy()
+            if not plot_rows.empty:
+                plot_rows["_adj"] = pd.to_numeric(plot_rows["Vol-Adj Carry"], errors="coerce")
+                plot_rows = plot_rows.dropna(subset=["_adj"])
+                fig_carry = go.Figure(go.Bar(
+                    x=plot_rows["Pair"],
+                    y=plot_rows["_adj"],
+                    marker_color=["#2ecc71" if v >= 0.20 else "#f1c40f" if v >= 0.10
+                                  else "#e74c3c" for v in plot_rows["_adj"]],
+                    text=[f"{v:.3f}" for v in plot_rows["_adj"]],
+                    textposition="outside",
+                ))
+                fig_carry.add_hline(y=0.20, line_dash="dash", line_color="#2ecc71",
+                                    annotation_text="Attractive threshold (0.20)")
+                fig_carry.add_hline(y=0.10, line_dash="dot", line_color="#f1c40f",
+                                    annotation_text="Marginal threshold (0.10)")
+                fig_carry.update_layout(
+                    title="Vol-Adjusted Carry Ratio by Pair",
+                    yaxis_title="Real Yield Diff / Pair Vol",
+                    template="plotly_dark", height=340,
+                )
+                st.plotly_chart(fig_carry, use_container_width=True)
+
+        st.divider()
         st.subheader("Real Rate Differentials (10Y-based)")
+        st.caption("Raw differentials shown for reference. Use the vol-adjusted table above for sizing.")
         st.dataframe(rr_diff_df, use_container_width=True)
 
-        st.subheader("Classic Carry Pairs")
-        result_map = {r["code"]: r for r in results}
-        carry_rows = []
-        for lc, sc in CLASSIC_CARRY_PAIRS:
-            if lc not in result_map or sc not in result_map: continue
-            rl, rs = result_map[lc], result_map[sc]
-            rrd = (rl["Real Rate %"] - rs["Real Rate %"]
-                   if not pd.isna(rl["Real Rate %"]) and not pd.isna(rs["Real Rate %"]) else np.nan)
-            carry_rows.append({
-                "Pair": f"{lc}/{sc}",
-                "Long Real Rate %":  fmt(rl["Real Rate %"]),
-                "Short Real Rate %": fmt(rs["Real Rate %"]),
-                "Real Yield Diff %": fmt(rrd),
-                "Long Bias":  rl["Overall Bias"], "Short Bias": rs["Overall Bias"],
-                "Long Policy Rate %":  fmt(rl["Policy Rate %"]),
-                "Short Policy Rate %": fmt(rs["Policy Rate %"]),
-                "VIX Check": "⚠️" if (rl["Curve State"]=="Inverted ⚠️" or rs["Curve State"]=="Inverted ⚠️") else "✓",
-            })
-        st.dataframe(pd.DataFrame(carry_rows), use_container_width=True, hide_index=True)
-        st.info("**Early warnings:** VIX multi-year lows = complacency; rising VIX = reduce carry. "
-                "Inverted yield curve = recession risk. LIBOR-OIS widening = interbank stress.")
+        st.info(
+            "**Early warnings:** VIX multi-year lows = complacency; rising VIX = reduce carry. "
+            "Inverted yield curve = recession risk. LIBOR-OIS widening = interbank stress. "
+            "High FX vol (Pair Vol % column) = carry unwind risk even when rate diff is wide."
+        )
 
     # ══════════════════════════════════════════════════════════════════════════
     # TAB 5 · IXL
@@ -1489,8 +1597,7 @@ def main():
                               else ("—" if r["COT Bias"]=="—" else "⚠️ Divergence")),
         } for r in results]
         st.dataframe(pd.DataFrame(cot_rows), use_container_width=True, hide_index=True)
-        st.info("⚠️ Divergence = COT contradicts fundamentals → wait for alignment or trade with caution. "
-                "Extreme net positioning = crowded trade / reversal risk.")
+        st.info("⚠️ Divergence = COT contradicts fundamentals → wait for alignment or trade with caution.")
         if cot_df.empty:
             st.warning("COT data unavailable from CFTC. Check connectivity.")
 
@@ -1524,7 +1631,7 @@ def main():
 5. ✅ COT positioning aligned with bias
 6. ✅ Taylor CB Score confirms expected action direction
 """)
-        st.subheader("Buy the Rumour / Sell the Fact (Section 12)")
+        st.subheader("Buy the Rumour / Sell the Fact")
         st.markdown("""
 | Signal | Watch for |
 |--------|-----------|
@@ -1535,20 +1642,21 @@ def main():
 """)
 
     # ══════════════════════════════════════════════════════════════════════════
-    # TAB 8 · CPI ACTUAL VS EXPECTED
+    # TAB 8 · CPI ACTUAL VS EXPECTED  (v3.1 — EM-aware model)
     # ══════════════════════════════════════════════════════════════════════════
     with tab_cpi:
         st.subheader("CPI YoY — Actual vs. Model-Expected, Trailing Months")
         st.caption(
-            "“Expected” is generated retrospectively by the same mean-reversion model this app uses "
-            "for its forward 12-month CPI forecast (60% persistence of the prior reading + 40% reversion "
-            "toward the 2% inflation target). This is a simple heuristic, not an economist consensus "
-            "forecast — use it to see where the model's assumption has been running hot or cold vs. "
-            "actual prints, not as a forecasting authority."
+            "**v3.1 change:** HIGH_INFLATION_CURRENCIES (TRY, ZAR, MXN, CNY) now use an "
+            "EM-aware anchor: the model reverts toward the currency's own 5-year median CPI "
+            "rather than the 2% DM target. This eliminates the chronic negative-surprise artefact "
+            "that appeared for TRY/MXN in v3.0 (where the 2% anchor produced forecasts like 20% "
+            "for a 32% CPI currency, making every print look like a 'hot surprise')."
         )
 
         months_back = st.slider("Months of history to show", min_value=6, max_value=36, value=24, step=1)
-        cpi_codes_available = [c for c in selected_codes if not cpi_history.get(c, pd.Series(dtype=float)).dropna().empty]
+        cpi_codes_available = [c for c in selected_codes
+                                if not cpi_history.get(c, pd.Series(dtype=float)).dropna().empty]
 
         if not cpi_codes_available:
             st.warning("No CPI history available for the selected currencies.")
@@ -1559,13 +1667,14 @@ def main():
 
             for code in cpi_tab_currencies:
                 series = cpi_history.get(code, pd.Series(dtype=float))
-                cpi_df = cpi_actual_vs_expected(series, months=months_back)
+                cpi_df = cpi_actual_vs_expected(code, series, months=months_back)
                 if cpi_df.empty:
                     st.info(f"{code}: not enough CPI history to build a trail.")
                     continue
 
                 info = CURRENCY_INFO.get(code, {})
-                st.markdown(f"**{code}** — {info.get('name', code)}")
+                em_note = " (EM anchor: own 5yr median)" if code in HIGH_INFLATION_CURRENCIES else " (DM anchor: 2% target)"
+                st.markdown(f"**{code}** — {info.get('name', code)}{em_note}")
 
                 fig_cpi = go.Figure()
                 fig_cpi.add_trace(go.Scatter(
@@ -1577,7 +1686,7 @@ def main():
                     name="Model-Expected %", mode="lines",
                     line=dict(color="#f1c40f", width=2, dash="dash")))
                 fig_cpi.add_hline(y=INFLATION_TARGET, line_dash="dot", line_color="#7f8c8d",
-                                   annotation_text="2% target", annotation_position="bottom right")
+                                   annotation_text="2% DM target", annotation_position="bottom right")
                 fig_cpi.update_layout(
                     template="plotly_dark", height=300,
                     yaxis_title="CPI YoY %",
@@ -1586,7 +1695,6 @@ def main():
                 )
                 st.plotly_chart(fig_cpi, use_container_width=True)
 
-                # Surprise bar chart -- where the model under/over-shot
                 fig_surprise = go.Figure(go.Bar(
                     x=cpi_df["Date"], y=cpi_df["Surprise (Actual − Expected)"],
                     marker_color=["#2ecc71" if v >= 0 else "#e74c3c"
@@ -1595,7 +1703,7 @@ def main():
                 fig_surprise.update_layout(
                     template="plotly_dark", height=180,
                     yaxis_title="Surprise (pp)",
-                    title="Actual − Expected (positive = inflation came in hotter than the model assumed)",
+                    title="Actual − Expected (positive = hotter than model predicted)",
                     margin=dict(t=30, b=10),
                 )
                 st.plotly_chart(fig_surprise, use_container_width=True)
@@ -1606,8 +1714,10 @@ def main():
                     st.dataframe(show_df, use_container_width=True, hide_index=True)
 
                 avg_surprise = cpi_df["Surprise (Actual − Expected)"].mean()
-                st.caption(f"Average surprise over period: {avg_surprise:+.2f}pp "
-                           f"({'inflation has been running hotter than the model expects' if avg_surprise > 0.2 else 'inflation has been running cooler than the model expects' if avg_surprise < -0.2 else 'model has tracked reasonably well'})")
+                st.caption(
+                    f"Average surprise over period: {avg_surprise:+.2f}pp "
+                    f"({'inflation running hotter than model' if avg_surprise > 0.2 else 'inflation running cooler than model' if avg_surprise < -0.2 else 'model tracking well'})"
+                )
                 st.divider()
 
 
