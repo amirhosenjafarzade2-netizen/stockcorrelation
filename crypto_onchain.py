@@ -21,7 +21,7 @@ FEAR_GREED_URL  = "https://api.alternative.me/fng/?limit=30"
 BINANCE_FR_URL  = "https://fapi.binance.com/fapi/v1/fundingRate?symbol=BTCUSDT&limit=8"
 
 REQUEST_TIMEOUT = 10
-HEADERS = {"User-Agent": "Mozilla/5.0 CryptoScanner/3.0"}
+HEADERS = {"User-Agent": "Mozilla/5.0 CryptoScanner/3.2"}
 
 # Block reward halving schedule (epoch start height -> reward). Used only to
 # estimate current BTC issuance per day for supply / mining-cost context.
@@ -29,25 +29,60 @@ BLOCK_REWARD_BTC   = 3.125          # post-April-2024 halving reward
 BLOCKS_PER_DAY_AVG = 144            # ~10 min/block target
 NEXT_HALVING_YEAR  = 2028
 
+# Macro tickers / FRED series for the new Macro Liquidity signal.
+DXY_TICKER = "DX-Y.NYB"
+FRED_FED_FUNDS   = "DFEDTARU"          # Fed funds target rate (upper bound)
+FRED_CPI_USD_YOY = "CPALTT01USM659N"   # US CPI YoY %
+FRED_UNRATE      = "UNRATE"            # US unemployment rate
+FRED_GDP_GROWTH  = "A191RL1Q225SBEA"   # US real GDP growth, annualized
+FRED_10Y         = "DGS10"             # 10Y Treasury yield
+INFLATION_TARGET = 2.0
+
+# Stablecoin tickers tracked via CoinGecko market data for the new
+# Stablecoin Supply Growth signal — a liquidity/dry-powder proxy that is
+# largely independent of spot price action (unlike the correlated group).
+STABLECOIN_IDS = {
+    "USDT": "tether",
+    "USDC": "usd-coin",
+    "DAI":  "dai",
+}
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 # SCORE WEIGHTS — analyst priors, NOT backtested coefficients.
 # Surfaced here (rather than buried) so it's visible these are a starting
-# point for discussion, not a validated model. Editable via the UI.
+# point for discussion, not a validated model. Editable via the UI, and the
+# UI auto-rebalances all weights to sum to 100% whenever one is changed.
+#
+# v3.2 note on defaults: adding "Macro Liquidity" to the correlated
+# price-action group (see CORRELATED_SIGNAL_GROUP below) would inflate that
+# group's combined weight if simply appended on top of v3.1's weights. To
+# avoid that, the four pre-existing correlated signals were trimmed down
+# slightly so the five-signal correlated group's total share (~45%) is
+# roughly unchanged from v3.1's four-signal total (~46%). "Stablecoin
+# Supply Growth" is NOT part of the correlated group — it is a liquidity/
+# demand proxy that does not mechanically move with price the way the
+# others do — so its weight was carved out of the broader on-chain budget
+# rather than from the correlated group.
 # ══════════════════════════════════════════════════════════════════════════════
 
 DEFAULT_WEIGHTS = {
-    "Fear & Greed":        0.14,
-    "Hash Rate":           0.12,
-    "Active Addresses":    0.12,
-    "Funding Rate":        0.12,
-    "Price vs MA200":      0.12,
-    "30d Momentum":        0.08,
-    "BTC Dominance":       0.05,
-    "NVT Ratio":           0.10,
-    "Puell Multiple":      0.06,
-    "Volume Confirmation": 0.09,
+    "Fear & Greed":            12,   # was 14 — trimmed to make room for Macro Liquidity
+    "Hash Rate":                11,   # was 12
+    "Active Addresses":        11,   # was 12
+    "Funding Rate":             10,   # was 12 — trimmed (correlated group)
+    "Price vs MA200":          10,   # was 12 — trimmed (correlated group)
+    "30d Momentum":              7,   # was 8  — trimmed (correlated group)
+    "BTC Dominance":             4,   # was 5
+    "NVT Ratio":                 9,   # was 10
+    "Puell Multiple":            5,   # was 6
+    "Volume Confirmation":       8,   # was 9
+    "Macro Liquidity":           8,   # NEW — correlated group (price-action driver)
+    "Stablecoin Supply Growth":  5,   # NEW — independent liquidity/demand proxy
 }
+# Weights above sum to 100 by construction; the UI re-derives fractions
+# (weight / 100) at render time regardless, so this is a convenience, not
+# a hard requirement.
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -277,6 +312,304 @@ def fetch_btc_marketcap_history(days: int = 90) -> pd.DataFrame:
         return pd.DataFrame()
 
 
+@st.cache_data(ttl=3600, show_spinner=False)
+def fetch_fred_series(series_id: str) -> pd.Series:
+    """Generic FRED CSV fetch, shared by the Macro Liquidity signal."""
+    if not series_id:
+        return pd.Series(dtype=float)
+    url = f"https://fred.stlouisfed.org/graph/fredgraph.csv?id={series_id}"
+    try:
+        df = pd.read_csv(url)
+        if df.empty or df.shape[1] < 2:
+            return pd.Series(dtype=float)
+        dc, vc = df.columns[0], df.columns[1]
+        df[dc] = pd.to_datetime(df[dc], errors="coerce")
+        df[vc] = pd.to_numeric(df[vc], errors="coerce")
+        return df.dropna(subset=[dc]).set_index(dc)[vc].dropna()
+    except Exception:
+        return pd.Series(dtype=float)
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def fetch_dxy_history() -> pd.Series:
+    """DXY (US Dollar Index) daily history via yfinance, used for the
+    Macro Liquidity signal's dollar-strength component."""
+    try:
+        data = yf.download(DXY_TICKER, period="6mo", interval="1d",
+                            auto_adjust=True, progress=False)
+        if data.empty:
+            return pd.Series(dtype=float)
+        if isinstance(data.columns, pd.MultiIndex):
+            data.columns = data.columns.get_level_values(0)
+        s = data["Close"] if "Close" in data.columns else pd.Series(dtype=float)
+        if isinstance(s, pd.DataFrame):
+            s = s.iloc[:, 0]
+        return s.dropna()
+    except Exception:
+        return pd.Series(dtype=float)
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def fetch_stablecoin_supply() -> Dict:
+    """
+    Aggregate market cap (≈ circulating supply, since stablecoins are
+    pegged ~1:1) for USDT, USDC, and DAI from CoinGecko, plus 30-day
+    history per coin so we can measure supply GROWTH rather than just
+    a snapshot level.
+
+    Rationale: net stablecoin issuance is a reasonable proxy for "dry
+    powder" entering the crypto ecosystem ahead of deployment into BTC
+    or other assets. It is largely mechanical (driven by issuer minting/
+    redemption decisions and exchange demand for on/off ramps) rather
+    than a restatement of BTC's own price action — which is what makes
+    it a genuinely different vote from the correlated price-action
+    group, unlike Macro Liquidity (which IS expected to correlate with
+    price action, since that's precisely the channel macro liquidity
+    operates through).
+    """
+    total_now  = 0.0
+    total_30d  = 0.0
+    any_ok     = False
+    per_coin   = {}
+
+    for symbol, coingecko_id in STABLECOIN_IDS.items():
+        try:
+            r = requests.get(
+                f"{COINGECKO_BASE}/coins/{coingecko_id}/market_chart",
+                params={"vs_currency": "usd", "days": "30", "interval": "daily"},
+                timeout=REQUEST_TIMEOUT,
+                headers=HEADERS,
+            )
+            d = r.json()
+            caps = d.get("market_caps", [])
+            if not caps:
+                continue
+            vals = [c[1] for c in caps]
+            now_v, ago_v = vals[-1], vals[0]
+            total_now += now_v
+            total_30d += ago_v
+            per_coin[symbol] = {"now": now_v, "ago_30d": ago_v}
+            any_ok = True
+        except Exception:
+            continue
+
+    if not any_ok or total_30d <= 0:
+        return {}
+
+    growth_pct = (total_now - total_30d) / total_30d * 100
+    return {
+        "total_now":   total_now,
+        "total_30d":   total_30d,
+        "growth_pct":  growth_pct,
+        "per_coin":    per_coin,
+    }
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# MACRO LIQUIDITY  (NEW in v3.2)
+# ══════════════════════════════════════════════════════════════════════════════
+
+def trend_pct_change(s: pd.Series, lookback: int = 20) -> float:
+    """% change of the trailing mean over `lookback` days vs the
+    prior `lookback`-day window. Shared helper for DXY / yield trend."""
+    v = s.dropna()
+    if len(v) < lookback * 2:
+        return np.nan
+    recent = v.iloc[-lookback:].mean()
+    prior  = v.iloc[-(lookback*2):-lookback].mean()
+    if prior == 0 or pd.isna(prior):
+        return np.nan
+    return float((recent - prior) / abs(prior) * 100)
+
+
+def taylor_rule_score_us(
+    cpi_now: float, cpi_3m_ago: float,
+    unemp_now: float, unemp_prior: float,
+    gdp_growth: float,
+    rate_now: float, rate_6m_ago: float,
+) -> Tuple[float, str]:
+    """
+    US-only Taylor Rule estimate, ported from the forex fundamental
+    scanner's taylor_rule_score(). Returns (score -1..+1, action label).
+    Score > 0 = hawkish Fed (typically a headwind for risk assets/BTC);
+    score < 0 = dovish Fed (typically a tailwind).
+    """
+    score, factors = 0.0, 0.0
+
+    if not pd.isna(cpi_now):
+        score += np.tanh((cpi_now - INFLATION_TARGET) / 2.0) * 0.35
+        factors += 0.35
+    if not pd.isna(cpi_now) and not pd.isna(cpi_3m_ago):
+        score += np.tanh((cpi_now - cpi_3m_ago) / 1.2) * 0.20
+        factors += 0.20
+    if not pd.isna(unemp_now) and not pd.isna(unemp_prior):
+        score += -np.tanh((unemp_now - unemp_prior) / 0.6) * 0.20
+        factors += 0.20
+    if not pd.isna(gdp_growth):
+        score += np.tanh(gdp_growth / 2.0) * 0.15
+        factors += 0.15
+    if not pd.isna(rate_now) and not pd.isna(rate_6m_ago):
+        score += np.tanh((rate_now - rate_6m_ago) / 0.75) * 0.10
+        factors += 0.10
+
+    score = float(np.clip(score / factors if factors > 0 else 0.0, -1, 1))
+    if score >= 0.4:     action = "Strong Hike Expected"
+    elif score >= 0.15:  action = "Hike Expected"
+    elif score <= -0.4:  action = "Strong Cut Expected"
+    elif score <= -0.15: action = "Cut Expected"
+    else:                action = "Hold Expected"
+    return score, action
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def fetch_macro_liquidity_inputs() -> Dict:
+    """Pulls all raw series needed for the Macro Liquidity signal in one
+    cached call: Fed policy data (FRED) + DXY + 10Y real-yield trend."""
+    fed_rate = fetch_fred_series(FRED_FED_FUNDS)
+    cpi      = fetch_fred_series(FRED_CPI_USD_YOY)
+    unemp    = fetch_fred_series(FRED_UNRATE)
+    gdp      = fetch_fred_series(FRED_GDP_GROWTH)
+    ten_y    = fetch_fred_series(FRED_10Y)
+    dxy      = fetch_dxy_history()
+
+    def _latest(s):
+        v = s.dropna()
+        return float(v.iloc[-1]) if len(v) else np.nan
+
+    def _n_ago(s, n):
+        v = s.dropna()
+        return float(v.iloc[-(n+1)]) if len(v) >= n + 1 else np.nan
+
+    return {
+        "fed_rate_now": _latest(fed_rate), "fed_rate_6m_ago": _n_ago(fed_rate, 6),
+        "cpi_now": _latest(cpi), "cpi_3m_ago": _n_ago(cpi, 3),
+        "unemp_now": _latest(unemp), "unemp_3m_ago": _n_ago(unemp, 3),
+        "gdp_growth": _latest(gdp),
+        "ten_y_now": _latest(ten_y),
+        "real_yield_now": (_latest(ten_y) - _latest(cpi))
+                            if not pd.isna(_latest(ten_y)) and not pd.isna(_latest(cpi)) else np.nan,
+        "ten_y_series": ten_y, "cpi_series": cpi,
+        "dxy_series": dxy,
+        "dxy_now": _latest(dxy),
+        "dxy_trend_pct": trend_pct_change(dxy, lookback=20),
+    }
+
+
+def compute_macro_liquidity(inputs: Dict) -> Dict:
+    """
+    Blends three sub-components into one Macro Liquidity reading:
+      1. Fed Taylor score (hawkish/dovish bias) — weight 0.5
+      2. DXY 20d trend (dollar strengthening = liquidity headwind) — weight 0.3
+      3. Real 10Y yield level (higher real yields = risk-asset headwind) — weight 0.2
+
+    All three feed from the same underlying liquidity regime, which is why
+    this signal is grouped with the correlated price-action signals rather
+    than treated as independent evidence — it does NOT measure something
+    structurally different from Price vs MA200 / Funding Rate the way
+    Stablecoin Supply Growth does. It earns its own scorecard row because
+    it is forward-looking (policy trajectory) rather than backward-looking
+    (price that has already happened), which is still useful, but the
+    correlation tag should not be removed.
+    """
+    fed_score, fed_action = taylor_rule_score_us(
+        inputs.get("cpi_now", np.nan), inputs.get("cpi_3m_ago", np.nan),
+        inputs.get("unemp_now", np.nan), inputs.get("unemp_3m_ago", np.nan),
+        inputs.get("gdp_growth", np.nan),
+        inputs.get("fed_rate_now", np.nan), inputs.get("fed_rate_6m_ago", np.nan),
+    )
+    # Fed hawkishness is a headwind for risk assets like BTC, so we invert
+    # sign here: hawkish Fed (fed_score > 0) -> negative contribution to
+    # the bullish/bearish scale used throughout this scorecard.
+    fed_component = -fed_score
+
+    dxy_trend = inputs.get("dxy_trend_pct", np.nan)
+    dxy_component = np.nan
+    if not pd.isna(dxy_trend):
+        # Rising DXY = tightening dollar liquidity = bearish for BTC.
+        dxy_component = float(np.clip(-dxy_trend / 4.0, -1, 1))
+
+    real_yield = inputs.get("real_yield_now", np.nan)
+    yield_component = np.nan
+    if not pd.isna(real_yield):
+        # Real yield around 0-1% treated as neutral; materially positive
+        # real yields are a headwind, materially negative are a tailwind.
+        yield_component = float(np.clip(-(real_yield - 0.5) / 2.0, -1, 1))
+
+    parts, weights_local = [], []
+    if not pd.isna(fed_component):   parts.append(fed_component);   weights_local.append(0.5)
+    if not pd.isna(dxy_component):   parts.append(dxy_component);   weights_local.append(0.3)
+    if not pd.isna(yield_component): parts.append(yield_component); weights_local.append(0.2)
+
+    if not parts:
+        composite = np.nan
+    else:
+        w_sum = sum(weights_local)
+        composite = float(sum(p * w for p, w in zip(parts, weights_local)) / w_sum)
+
+    return {
+        "score": composite,
+        "fed_score": fed_score, "fed_action": fed_action, "fed_component": fed_component,
+        "dxy_trend_pct": dxy_trend, "dxy_component": dxy_component,
+        "real_yield_now": real_yield, "yield_component": yield_component,
+    }
+
+
+def score_macro_liquidity(macro: Dict) -> Tuple[float, str]:
+    score = macro.get("score", np.nan)
+    if pd.isna(score):
+        return 0.0, "Insufficient macro data"
+
+    fed_action = macro.get("fed_action", "—")
+    dxy_trend  = macro.get("dxy_trend_pct", np.nan)
+    real_yield = macro.get("real_yield_now", np.nan)
+
+    dxy_note = f"DXY {'rising' if not pd.isna(dxy_trend) and dxy_trend > 0 else 'falling'} " \
+               f"{abs(dxy_trend):.1f}% (20d)" if not pd.isna(dxy_trend) else "DXY n/a"
+    yield_note = f"real 10Y yield {real_yield:+.1f}%" if not pd.isna(real_yield) else "real yield n/a"
+
+    note = f"Fed: {fed_action}; {dxy_note}; {yield_note}"
+    if score > 0.3:
+        note += " — liquidity tailwind, BULLISH for risk assets"
+    elif score < -0.3:
+        note += " — liquidity headwind, BEARISH for risk assets"
+    else:
+        note += " — liquidity roughly neutral"
+    return score, note
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# STABLECOIN SUPPLY GROWTH SCORING  (NEW in v3.2)
+# ══════════════════════════════════════════════════════════════════════════════
+
+def score_stablecoin_growth(sc: Dict) -> Tuple[float, str]:
+    """
+    Net stablecoin supply growth as a dry-powder / liquidity-inflow proxy.
+
+    This is intentionally NOT part of CORRELATED_SIGNAL_GROUP: stablecoin
+    minting/redemption is driven by issuer and exchange-side decisions
+    (new fiat on-ramping, redemptions for off-ramping) that lead or lag
+    price moves rather than mechanically restating them, unlike Funding
+    Rate or 30d Momentum, which are direct transformations of price/order-
+    book data. Treat it as one of the more independent votes in the
+    scorecard.
+
+    Caveat (disclosed in UI): stablecoin supply also grows for reasons
+    unrelated to crypto risk appetite — e.g. trading desks parking
+    treasury cash, cross-border settlement use, or yield-farming flows
+    on DeFi protocols that never touch BTC. It is a noisy proxy, not a
+    confirmed "money about to buy BTC" signal.
+    """
+    growth = sc.get("growth_pct", np.nan)
+    if pd.isna(growth):
+        return 0.0, "No stablecoin supply data"
+
+    if growth > 8:    return +1.0, f"Stablecoin supply +{growth:.1f}% (30d) — strong inflow, dry powder building — BULLISH"
+    if growth > 3:    return +0.5, f"Stablecoin supply +{growth:.1f}% (30d) — mild inflow"
+    if growth > -3:   return  0.0, f"Stablecoin supply {growth:+.1f}% (30d) — roughly flat"
+    if growth > -8:   return -0.5, f"Stablecoin supply {growth:.1f}% (30d) — mild outflow / redemptions"
+    return -1.0,                 f"Stablecoin supply {growth:.1f}% (30d) — sharp outflow, capital leaving — BEARISH"
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # DERIVED METRICS  (mining cost, NVT, Puell, supply, VPA)
 # ══════════════════════════════════════════════════════════════════════════════
@@ -334,19 +667,11 @@ def compute_nvt(bc: Dict, cg: Dict, mcap_hist: pd.DataFrame) -> Dict:
     NVT Ratio = Market Cap / Daily On-Chain Transaction Volume (USD), 30d
     smoothed to reduce single-day noise (standard "NVT Signal" adjustment).
 
-    TREND component (fixed in v3.1): earlier versions of this function held
-    market cap constant at TODAY's value while varying only the volume
-    denominator across history. That collapses to measuring "1 / volume
-    drift" and mislabeling it as NVT trend — if price rallied 20% in a month
-    while on-chain volume stayed flat, true NVT rose ~20% but the old metric
-    showed ~0% because mcap never varied in the series. This version uses a
-    real daily market-cap history (fetched from CoinGecko) divided by real
-    daily on-chain volume, so the trend reflects actual NVT movement, not
-    just the volume component of it.
-
-    If market-cap history isn't available (fetch failed), trend falls back
-    to volume-only drift and is EXPLICITLY labeled as such in the UI rather
-    than presented as true NVT trend.
+    TREND component: uses real daily market-cap history (fetched from
+    CoinGecko) divided by real daily on-chain volume, so the trend
+    reflects actual NVT movement, not just the volume component of it.
+    If market-cap history isn't available, trend falls back to volume-only
+    drift and is EXPLICITLY labeled as such in the UI.
 
     Caveat carried into the UI: static NVT thresholds were calibrated years
     ago. As more BTC activity moves to exchanges, Lightning, and custodial
@@ -383,9 +708,6 @@ def compute_nvt(bc: Dict, cg: Dict, mcap_hist: pd.DataFrame) -> Dict:
                     nvt_trend_is_true = True
 
         if not nvt_trend_is_true:
-            # Fallback: market-cap history unavailable. This measures only
-            # the inverse of on-chain volume drift, NOT true NVT trend,
-            # since it holds mcap constant. Labeled as such downstream.
             vals = [v["value"] for v in tv_hist]
             nvt_proxy_series = [mcap / v if (v and v > 0 and not pd.isna(mcap)) else np.nan for v in vals[-35:]]
             recent_avg = np.nanmean(nvt_proxy_series[-5:])
@@ -397,7 +719,7 @@ def compute_nvt(bc: Dict, cg: Dict, mcap_hist: pd.DataFrame) -> Dict:
         "nvt_smoothed": nvt_smoothed,
         "nvt_daily": nvt_daily,
         "nvt_trend_pct": nvt_trend_pct,
-        "nvt_trend_is_true": nvt_trend_is_true,  # False => volume-only proxy, mcap held constant
+        "nvt_trend_is_true": nvt_trend_is_true,
     }
 
 
@@ -407,14 +729,10 @@ def compute_puell_multiple(bc: Dict) -> Dict:
     Daily Miner Revenue (USD, up to 1y history as a proxy for the standard
     365d MA).
 
-    Also returns a TREND component (5d vs prior 5d, on the multiple itself)
-    for the same reason as NVT: a Puell of 0.6 falling further is a
-    different signal than 0.6 having just bounced off 0.4.
-
+    Also returns a TREND component (5d vs prior 5d, on the multiple itself).
     Note: unlike NVT, this trend is NOT subject to the constant-denominator
     bug, because `ma` (the trailing average) is a single fixed number for
-    the whole series by construction — both vals[-5:] and the MA come from
-    the same revenue history, so the ratio genuinely varies day to day.
+    the whole series by construction.
     """
     hist = bc.get("miner_revenue_history", [])
     if len(hist) < 30:
@@ -442,15 +760,13 @@ def compute_vpa(ohlcv: pd.DataFrame) -> Dict:
     """
     Volume-Price Analysis. On-chain metrics describe network fundamentals
     on a weeks-to-months horizon; VPA describes order-book participation
-    on a days-to-weeks horizon — whether a price move is backed by real
-    volume or is a thin, low-conviction move likely to fail.
+    on a days-to-weeks horizon.
 
     Computes:
       - OBV (On-Balance Volume) and its 20d trend
       - Price 20d trend, for divergence comparison against OBV
       - 20d Volume-Weighted Average Price (rolling)
-      - Volume-confirmed breakout/breakdown flag: did the latest 5d price
-        move happen on above-average volume?
+      - Volume-confirmed breakout/breakdown flag
     """
     if ohlcv.empty or len(ohlcv) < 25:
         return {}
@@ -460,7 +776,6 @@ def compute_vpa(ohlcv: pd.DataFrame) -> Dict:
     if isinstance(close, pd.DataFrame): close = close.iloc[:, 0]
     if isinstance(vol, pd.DataFrame):   vol = vol.iloc[:, 0]
 
-    # On-Balance Volume
     direction = np.sign(close.diff().fillna(0))
     obv = (direction * vol).cumsum()
 
@@ -472,12 +787,10 @@ def compute_vpa(ohlcv: pd.DataFrame) -> Dict:
     price_prior  = float(close.iloc[-25:-20].mean())
     price_trend_pct = ((price_recent - price_prior) / price_prior * 100) if price_prior != 0 else np.nan
 
-    # Rolling 20-day VWAP
     vwap20 = (close * vol).rolling(20).sum() / vol.rolling(20).sum()
     vwap20_now = float(vwap20.iloc[-1]) if not pd.isna(vwap20.iloc[-1]) else np.nan
     price_now = float(close.iloc[-1])
 
-    # Volume confirmation on the most recent 5-day move
     avg_vol_20 = float(vol.iloc[-20:].mean())
     recent_vol_5 = float(vol.iloc[-5:].mean())
     vol_ratio = (recent_vol_5 / avg_vol_20) if avg_vol_20 > 0 else np.nan
@@ -496,7 +809,7 @@ def compute_vpa(ohlcv: pd.DataFrame) -> Dict:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# SCORING ENGINE
+# SCORING ENGINE  (existing signals, unchanged logic from v3.1)
 # ══════════════════════════════════════════════════════════════════════════════
 
 def score_fear_greed(fg: Dict) -> Tuple[float, str]:
@@ -512,12 +825,10 @@ def score_fear_greed(fg: Dict) -> Tuple[float, str]:
 
 def score_hash_rate(bc: Dict) -> Tuple[float, str]:
     """
-    Trend measured via linear-regression slope over the full 30-day history
-    rather than comparing only the first 7 days to the last 7 days. The
-    endpoint-comparison approach (v3.0) ignored the middle two weeks
-    entirely and was sensitive to single-day noise at either edge; a
-    least-squares slope uses every observation and is far less sensitive
-    to one noisy day at the start or end of the window.
+    Trend measured via linear-regression slope over the full 30-day
+    history rather than comparing only the first 7 days to the last 7
+    days, so the middle of the window counts and single-day noise at
+    either edge matters less.
     """
     hist = bc.get("hash_rate_history", [])
     if len(hist) < 10:
@@ -528,8 +839,6 @@ def score_hash_rate(bc: Dict) -> Tuple[float, str]:
     mean_val = np.mean(vals)
     if mean_val == 0:
         return 0.0, "No baseline"
-    # Normalize slope to a "% change over the full window" so thresholds
-    # stay comparable to the old endpoint-comparison logic.
     chg_pct = (slope * (len(vals) - 1)) / mean_val * 100
     if chg_pct > 5:    return +1.0, f"Hash rate trend +{chg_pct:.1f}% (30d, regression) — BULLISH"
     if chg_pct > 1:    return +0.5, f"Hash rate trend slightly rising +{chg_pct:.1f}% — mild bullish"
@@ -540,12 +849,10 @@ def score_hash_rate(bc: Dict) -> Tuple[float, str]:
 
 def score_active_addresses(bc: Dict) -> Tuple[float, str]:
     """
-    Caveat (added v3.1): active-address counts are a directionally useful
-    but noisy proxy for real usage — they're distorted by exchange
-    custodial-wallet batching, UTXO consolidation sweeps, address reuse
-    patterns, and activity migrating to Layer 2 / Lightning, none of which
-    track "new users" in any clean way. Treat this as one weak vote, not a
-    confirmed adoption read.
+    Caveat: active-address counts are a directionally useful but noisy
+    proxy for real usage — distorted by exchange custodial-wallet
+    batching, UTXO consolidation sweeps, address reuse patterns, and
+    activity migrating to Layer 2 / Lightning. Treat as one weak vote.
     """
     now = bc.get("active_addr_now", np.nan)
     ago = bc.get("active_addr_30d", np.nan)
@@ -561,10 +868,9 @@ def score_active_addresses(bc: Dict) -> Tuple[float, str]:
 
 def score_funding_rate(fr: Dict) -> Tuple[float, str]:
     """
-    Thresholds loosened slightly (v3.1): moderately positive funding is
-    common and unremarkable during genuine bull trends, not necessarily a
-    bearish tell on its own — the contrarian read works best at real
-    extremes, not at the first sign of positive funding.
+    Thresholds loosened: moderately positive funding is common and
+    unremarkable during genuine bull trends — the contrarian read works
+    best at real extremes, not at the first sign of positive funding.
     """
     avg = fr.get("avg_8", np.nan)
     if pd.isna(avg):
@@ -578,15 +884,9 @@ def score_funding_rate(fr: Dict) -> Tuple[float, str]:
 
 def score_btc_dominance(cg: Dict) -> Tuple[float, str]:
     """
-    Reworked (v3.1): dominance is NOT a reliable directional signal for
-    BTC itself. Rising dominance shows up in early bull markets (capital
-    flowing into BTC first) AND in bear markets (capital fleeing riskier
-    alts faster than BTC) — falling dominance shows up in late-bull
-    "altseason" AND can simply mean alts are getting hit less hard, not
-    that BTC is weak. Because the same reading can mean opposite things
-    depending on regime, this is scored as a much smaller, regime-flagging
-    signal rather than a directional bullish/bearish vote, and its weight
-    in DEFAULT_WEIGHTS has been reduced accordingly.
+    Dominance is NOT a reliable directional signal for BTC itself — the
+    same reading can mean opposite things depending on regime, so this
+    is scored as a small regime-flag rather than a directional vote.
     """
     dom = cg.get("dominance", np.nan)
     if pd.isna(dom):
@@ -633,14 +933,7 @@ def score_30d_momentum(cg: Dict) -> Tuple[float, str]:
 def score_nvt(nvt: Dict) -> Tuple[float, str]:
     """
     Combines LEVEL (is it cheap/expensive vs history) with TREND (is it
-    getting cheaper or more expensive right now). Level sets the base score;
-    trend nudges it by up to ±0.3, so a level reading near a threshold
-    boundary can flip categories if the trend is moving sharply against it.
-
-    The trend figure now comes from real NVT history (mcap history × volume
-    history) when available — see compute_nvt(). If only the volume-only
-    fallback was available, the note says so explicitly instead of implying
-    a true NVT trend was measured.
+    getting cheaper or more expensive right now).
     """
     val = nvt.get("nvt_smoothed", np.nan)
     trend = nvt.get("nvt_trend_pct", np.nan)
@@ -656,7 +949,7 @@ def score_nvt(nvt: Dict) -> Tuple[float, str]:
 
     trend_note = ""
     if not pd.isna(trend):
-        nudge = np.clip(-trend / 100, -0.3, 0.3)  # NVT rising (trend>0) is bearish nudge
+        nudge = np.clip(-trend / 100, -0.3, 0.3)
         base = float(np.clip(base + nudge, -1.0, 1.0))
         direction = "up" if trend > 0 else "down"
         if is_true_trend:
@@ -691,10 +984,6 @@ def score_puell(puell: Dict) -> Tuple[float, str]:
 def score_volume_confirmation(vpa: Dict) -> Tuple[float, str]:
     """
     Does volume confirm the price trend, or diverge from it?
-    Bullish: price rising + OBV rising together (real accumulation).
-    Bearish divergence: price rising while OBV falling (distribution into
-    strength — classic warning sign) or price falling while OBV rising
-    (absorption / accumulation into weakness — contrarian bullish).
     """
     if not vpa:
         return 0.0, "No volume data"
@@ -708,8 +997,8 @@ def score_volume_confirmation(vpa: Dict) -> Tuple[float, str]:
 
     both_up   = price_trend > 1 and obv_trend > 1
     both_down = price_trend < -1 and obv_trend < -1
-    bull_div  = price_trend < -1 and obv_trend > 1   # price down, volume accumulating
-    bear_div  = price_trend > 1 and obv_trend < -1   # price up, volume distributing
+    bull_div  = price_trend < -1 and obv_trend > 1
+    bear_div  = price_trend > 1 and obv_trend < -1
 
     vol_note = ""
     if not pd.isna(vol_ratio):
@@ -732,10 +1021,13 @@ def score_volume_confirmation(vpa: Dict) -> Tuple[float, str]:
 # ── Composite Scorer ─────────────────────────────────────────────────────────
 
 # Signals that tend to move together because they're all reading the same
-# underlying price action from different angles. Shown in the UI as a
-# correlation-risk note: summing weights across these treats them as
-# independent votes when they're often one vote counted four times.
-CORRELATED_SIGNAL_GROUP = ["30d Momentum", "Price vs MA200", "Funding Rate", "Fear & Greed"]
+# underlying price action / liquidity backdrop from different angles.
+# "Macro Liquidity" belongs here: it operates through the same channel
+# (risk-asset appetite) that drives Price vs MA200 / Funding Rate / 30d
+# Momentum / Fear & Greed, even though its inputs (Fed policy, DXY, real
+# yields) are different data sources. "Stablecoin Supply Growth" is
+# deliberately NOT in this group — see its scoring function for why.
+CORRELATED_SIGNAL_GROUP = ["30d Momentum", "Price vs MA200", "Funding Rate", "Fear & Greed", "Macro Liquidity"]
 
 
 def compute_composite(scores: Dict[str, float], weights: Dict[str, float]) -> float:
@@ -779,13 +1071,104 @@ def delta_colour(val) -> str:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# WEIGHT SLIDER UI — auto-rebalancing  (NEW in v3.2)
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _rebalance_weight(changed_key: str, total_cap: float = 60.0) -> None:
+    """
+    on_change callback for a single weight slider. Redistributes the
+    delta across all OTHER weights in proportion to their current share
+    of the remaining total, so relative balance among untouched sliders
+    is preserved (rather than flattening toward equal weight over
+    repeated edits, which a naive equal-split would do).
+    """
+    state = st.session_state.weight_state
+    new_val = float(st.session_state[f"w_{changed_key}"])
+    new_val = max(0.0, min(total_cap, new_val))
+    old_val = state[changed_key]
+    delta = new_val - old_val
+
+    others = [k for k in state if k != changed_key]
+    others_sum = sum(state[k] for k in others)
+
+    state[changed_key] = new_val
+    if others_sum > 0:
+        for k in others:
+            share = state[k] / others_sum
+            state[k] = max(0.0, state[k] - delta * share)
+    else:
+        # All other sliders are at 0 — split the remainder evenly.
+        even_share = max(0.0, (100.0 - new_val) / len(others)) if others else 0.0
+        for k in others:
+            state[k] = even_share
+
+    # Floating point drift correction — force exact sum to 100.
+    drift = 100.0 - sum(state.values())
+    if abs(drift) > 1e-9 and others:
+        state[others[0]] = max(0.0, state[others[0]] + drift)
+
+    for k in state:
+        st.session_state[f"w_{k}"] = state[k]
+
+
+def render_weight_sliders(default_weights: Dict[str, float],
+                           correlated_group: set) -> Dict[str, float]:
+    """
+    Renders one slider per signal. Moving any slider auto-rebalances all
+    others (proportionally, not equally) so the total always sums to
+    100%. State persists in st.session_state across reruns so successive
+    drags compound correctly instead of resetting to defaults each time.
+    Returns a dict of {signal_name: fraction} where fractions sum to 1.0,
+    suitable for direct use in compute_composite().
+    """
+    if "weight_state" not in st.session_state:
+        st.session_state.weight_state = dict(default_weights)
+        for k, v in default_weights.items():
+            st.session_state[f"w_{k}"] = v
+
+    state = st.session_state.weight_state
+
+    st.caption(
+        "Drag any slider — the others automatically rebalance, proportionally, "
+        "so the total always stays at 100%. This keeps the relative weighting "
+        "you set elsewhere from silently drifting, the way post-hoc renormalization can."
+    )
+
+    reset_col, total_col = st.columns([1, 3])
+    with reset_col:
+        if st.button("↺ Reset to defaults", key="reset_weights_btn"):
+            st.session_state.weight_state = dict(default_weights)
+            for k, v in default_weights.items():
+                st.session_state[f"w_{k}"] = v
+            st.rerun()
+
+    cols = st.columns(3)
+    for i, name in enumerate(state.keys()):
+        with cols[i % 3]:
+            tag = " 🔗" if name in correlated_group else ""
+            st.slider(
+                name + tag, min_value=0.0, max_value=60.0,
+                value=float(state[name]), step=1.0,
+                key=f"w_{name}",
+                on_change=_rebalance_weight, args=(name,),
+            )
+
+    total = sum(state.values())
+    with total_col:
+        st.caption(f"🔗 = correlated price-action / liquidity group · **Total: {total:.1f}%**")
+
+    return {k: v / 100.0 for k, v in state.items()}
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # MAIN RENDER FUNCTION  (called by app.py)
 # ══════════════════════════════════════════════════════════════════════════════
 
 def render_crypto_onchain():
     st.header("₿ Bitcoin On-Chain Fundamental Scanner")
     st.caption("Chapter 9 Framework · Fear & Greed · Hash Rate · Active Addresses · Funding Rate · "
-               "Dominance · NVT (trend-aware) · Puell (trend-aware) · Volume-Price Analysis · Mining Economics")
+               "Dominance · NVT (trend-aware) · Puell (trend-aware) · Volume-Price Analysis · "
+               "Mining Economics · Macro Liquidity · Stablecoin Supply Growth")
 
     with st.expander("⚙️ Mining Cost Assumptions (adjust for your estimate)", expanded=False):
         col_a, col_b = st.columns(2)
@@ -812,83 +1195,86 @@ def render_crypto_onchain():
 
     with st.expander("🎛️ Composite Score Weights (analyst priors — not backtested)", expanded=False):
         st.caption(
-            "These weights are a reasonable starting point reflecting Chapter 9's framework, "
-            "**not coefficients derived from a backtest**. Adjust them if you weight certain "
-            "signals differently, or to stress-test how sensitive the verdict is to the weighting scheme."
+            "These weights are a reasonable starting point reflecting Chapter 9's framework plus two "
+            "macro/liquidity additions, **not coefficients derived from a backtest**. Adjust them if "
+            "you weight certain signals differently, or to stress-test how sensitive the verdict is "
+            "to the weighting scheme."
         )
         st.info(
-            "📐 **Correlation note:** *30d Momentum*, *Price vs MA200*, *Funding Rate*, and "
-            "*Fear & Greed* mostly read the same underlying price action from different angles and "
-            "tend to move together. Summing their weights as if they were independent votes "
-            "double-counts that shared information — treat the composite below as a **structured "
-            "checklist**, not a statistically validated predictive score.",
+            "📐 **Correlation note:** *30d Momentum*, *Price vs MA200*, *Funding Rate*, *Fear & Greed*, "
+            "and *Macro Liquidity* mostly read the same underlying price-action / liquidity backdrop "
+            "from different angles and tend to move together. Summing their weights as if they were "
+            "independent votes double-counts that shared information. *Stablecoin Supply Growth* is "
+            "kept separate from this group — issuer-driven minting/redemption flows lead or lag price "
+            "rather than mechanically restating it — but it is still a noisy proxy, not confirmed "
+            "demand. Treat the composite below as a **structured checklist**, not a statistically "
+            "validated predictive score.",
             icon="📐",
         )
-        weights = {}
-        cols = st.columns(3)
-        for i, (name, default) in enumerate(DEFAULT_WEIGHTS.items()):
-            with cols[i % 3]:
-                label = f"{name} 🔗" if name in CORRELATED_SIGNAL_GROUP else name
-                weights[name] = st.slider(label, 0.0, 0.30, default, 0.01, key=f"w_{name}")
-        st.caption("🔗 = part of the correlated price-action group described above.")
-        total_w = sum(weights.values())
-        if total_w > 0:
-            weights = {k: v / total_w for k, v in weights.items()}
-        st.caption(f"Weights normalized to sum to 100% (raw sum was {total_w:.2f}).")
+        weights = render_weight_sliders(DEFAULT_WEIGHTS, set(CORRELATED_SIGNAL_GROUP))
 
     with st.spinner("Fetching on-chain & market data…"):
-        fg        = fetch_fear_greed()
-        cg        = fetch_coingecko_btc()
-        bc        = fetch_blockchain_info()
-        fr        = fetch_funding_rate()
-        ohlcv     = fetch_btc_ohlcv()
-        mcap_hist = fetch_btc_marketcap_history(days=90)
+        fg          = fetch_fear_greed()
+        cg          = fetch_coingecko_btc()
+        bc          = fetch_blockchain_info()
+        fr          = fetch_funding_rate()
+        ohlcv       = fetch_btc_ohlcv()
+        mcap_hist   = fetch_btc_marketcap_history(days=90)
+        macro_in    = fetch_macro_liquidity_inputs()
+        stablecoins = fetch_stablecoin_supply()
 
     mining = compute_mining_cost(bc, cg, electricity_cost, fleet_efficiency)
     nvt    = compute_nvt(bc, cg, mcap_hist)
     puell  = compute_puell_multiple(bc)
     vpa    = compute_vpa(ohlcv)
+    macro  = compute_macro_liquidity(macro_in)
 
-    fg_score,   fg_note   = score_fear_greed(fg)
-    hr_score,   hr_note   = score_hash_rate(bc)
-    aa_score,   aa_note   = score_active_addresses(bc)
-    fund_score, fund_note = score_funding_rate(fr)
-    dom_score,  dom_note  = score_btc_dominance(cg)
-    ma_score,   ma_note   = score_price_vs_ma(ohlcv)
-    mom_score,  mom_note  = score_30d_momentum(cg)
-    nvt_score,  nvt_note  = score_nvt(nvt)
+    fg_score,    fg_note    = score_fear_greed(fg)
+    hr_score,    hr_note    = score_hash_rate(bc)
+    aa_score,    aa_note    = score_active_addresses(bc)
+    fund_score,  fund_note  = score_funding_rate(fr)
+    dom_score,   dom_note   = score_btc_dominance(cg)
+    ma_score,    ma_note    = score_price_vs_ma(ohlcv)
+    mom_score,   mom_note   = score_30d_momentum(cg)
+    nvt_score,   nvt_note   = score_nvt(nvt)
     puell_score, puell_note = score_puell(puell)
-    vol_score,  vol_note  = score_volume_confirmation(vpa)
+    vol_score,   vol_note   = score_volume_confirmation(vpa)
+    macro_score, macro_note = score_macro_liquidity(macro)
+    sc_score,    sc_note    = score_stablecoin_growth(stablecoins)
 
     raw_scores = {
-        "Fear & Greed":        fg_score,
-        "Hash Rate":           hr_score,
-        "Active Addresses":    aa_score,
-        "Funding Rate":        fund_score,
-        "Price vs MA200":      ma_score,
-        "30d Momentum":        mom_score,
-        "BTC Dominance":       dom_score,
-        "NVT Ratio":           nvt_score,
-        "Puell Multiple":      puell_score,
-        "Volume Confirmation": vol_score,
+        "Fear & Greed":               fg_score,
+        "Hash Rate":                  hr_score,
+        "Active Addresses":           aa_score,
+        "Funding Rate":               fund_score,
+        "Price vs MA200":             ma_score,
+        "30d Momentum":               mom_score,
+        "BTC Dominance":              dom_score,
+        "NVT Ratio":                  nvt_score,
+        "Puell Multiple":             puell_score,
+        "Volume Confirmation":        vol_score,
+        "Macro Liquidity":            macro_score,
+        "Stablecoin Supply Growth":   sc_score,
     }
     notes = {
-        "Fear & Greed":        fg_note,
-        "Hash Rate":           hr_note,
-        "Active Addresses":    aa_note,
-        "Funding Rate":        fund_note,
-        "Price vs MA200":      ma_note,
-        "30d Momentum":        mom_note,
-        "BTC Dominance":       dom_note,
-        "NVT Ratio":           nvt_note,
-        "Puell Multiple":      puell_note,
-        "Volume Confirmation": vol_note,
+        "Fear & Greed":               fg_note,
+        "Hash Rate":                  hr_note,
+        "Active Addresses":           aa_note,
+        "Funding Rate":               fund_note,
+        "Price vs MA200":             ma_note,
+        "30d Momentum":               mom_note,
+        "BTC Dominance":              dom_note,
+        "NVT Ratio":                  nvt_note,
+        "Puell Multiple":             puell_note,
+        "Volume Confirmation":        vol_note,
+        "Macro Liquidity":            macro_note,
+        "Stablecoin Supply Growth":   sc_note,
     }
 
     composite              = compute_composite(raw_scores, weights)
     verdict, stars, colour = composite_to_verdict(composite)
 
-    data_coverage = sum(1 for v in raw_scores.values() if not pd.isna(v) and v != 0.0) 
+    data_coverage = sum(1 for v in raw_scores.values() if not pd.isna(v) and v != 0.0)
     missing = [k for k, v in raw_scores.items() if pd.isna(v)]
 
     # ══════════════════════════════════════════════════════════════════════════
@@ -923,7 +1309,7 @@ def render_crypto_onchain():
     # ══════════════════════════════════════════════════════════════════════════
     # TOP METRICS ROW
     # ══════════════════════════════════════════════════════════════════════════
-    c1, c2, c3, c4, c5, c6 = st.columns(6)
+    c1, c2, c3, c4, c5, c6, c7 = st.columns(7)
     c1.metric("BTC Price",     fmt(cg.get("price"), 0, "$"),
               fmt(cg.get("chg_24h"), 2, suffix="%"),
               delta_color=delta_colour(cg.get("chg_24h")))
@@ -932,15 +1318,17 @@ def render_crypto_onchain():
     c4.metric("Funding Rate",  fmt(fr.get("latest"), 4, suffix="%"))
     c5.metric("Hash Rate",     fmt(bc.get("hash_rate_eh"), 1, suffix=" EH/s"))
     c6.metric("NVT Ratio",     fmt(nvt.get("nvt_smoothed"), 1))
+    c7.metric("Fed Bias",      macro.get("fed_action", "—"))
 
     st.markdown("---")
 
     # ══════════════════════════════════════════════════════════════════════════
     # TABS
     # ══════════════════════════════════════════════════════════════════════════
-    tab_score, tab_price, tab_vpa, tab_onchain, tab_mining, tab_sentiment, tab_guide = st.tabs([
+    (tab_score, tab_price, tab_vpa, tab_onchain,
+     tab_mining, tab_macro, tab_sentiment, tab_guide) = st.tabs([
         "📊 Score Breakdown", "📈 Price & Trend", "📐 Volume-Price Analysis", "🔗 On-Chain Data",
-        "⛏️ Mining Economics", "😨 Sentiment", "📖 Signal Guide"
+        "⛏️ Mining Economics", "🌐 Macro Liquidity", "😨 Sentiment", "📖 Signal Guide"
     ])
 
     # ── TAB 1 · SCORE BREAKDOWN ───────────────────────────────────────────────
@@ -960,8 +1348,10 @@ def render_crypto_onchain():
                 "Interpretation": notes[name],
             })
         st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
-        st.caption("🔗 = correlated price-action group (30d Momentum, Price vs MA200, Funding Rate, Fear & Greed) — "
-                   "these often move together, so their combined weight overstates how much independent evidence they provide.")
+        st.caption("🔗 = correlated price-action / liquidity group (30d Momentum, Price vs MA200, "
+                   "Funding Rate, Fear & Greed, Macro Liquidity) — these tend to move together, so "
+                   "their combined weight overstates how much independent evidence they provide. "
+                   "Stablecoin Supply Growth is deliberately kept outside this group.")
 
         fig = go.Figure()
         categories = list(raw_scores.keys())
@@ -977,9 +1367,10 @@ def render_crypto_onchain():
         fig.add_hrect(y0=0.2, y1=1.0,  fillcolor="#00e676", opacity=0.05, line_width=0)
         fig.add_hrect(y0=-1.0, y1=-0.2, fillcolor="#ff5252", opacity=0.05, line_width=0)
         fig.update_layout(
-            title="On-Chain & Volume Signal Scores (−1 Bearish → +1 Bullish)",
+            title="On-Chain, Macro & Volume Signal Scores (−1 Bearish → +1 Bullish)",
             yaxis=dict(range=[-1.2, 1.2], title="Score"),
-            template="plotly_dark", height=400,
+            template="plotly_dark", height=420,
+            xaxis=dict(tickangle=-20),
         )
         st.plotly_chart(fig, use_container_width=True)
 
@@ -1058,8 +1449,7 @@ def render_crypto_onchain():
         st.caption(
             "On-chain metrics describe network fundamentals over weeks-to-months. VPA describes "
             "exchange order-book participation over days-to-weeks — whether the current price move "
-            "is backed by real volume, or is a thin move likely to fail. The two are complementary, "
-            "not redundant: on-chain tells you what zone you're in, VPA helps with *when* to act within it."
+            "is backed by real volume, or is a thin move likely to fail."
         )
 
         if vpa:
@@ -1108,11 +1498,10 @@ def render_crypto_onchain():
                 "**OBV** adds the day's volume when price closes up and subtracts it when price closes "
                 "down, so it tracks cumulative buying/selling pressure independent of price itself. "
                 "When OBV and price move together, the trend has real participation behind it. When they "
-                "diverge — price rising while OBV falls, or vice versa — that's historically a higher-risk "
-                "setup, since the move isn't backed by the volume that would normally confirm it. "
-                "**20d VWAP** acts as a dynamic support/resistance reference many traders watch for "
-                "mean-reversion entries. Note: this uses exchange-reported spot volume via yfinance, "
-                "which varies in quality/coverage across venues — treat OBV as directional, not exact."
+                "diverge, that's historically a higher-risk setup. **20d VWAP** acts as a dynamic "
+                "support/resistance reference many traders watch for mean-reversion entries. Note: this "
+                "uses exchange-reported spot volume via yfinance, which varies in quality/coverage across "
+                "venues — treat OBV as directional, not exact."
             )
         else:
             st.warning("Insufficient price/volume history to compute VPA metrics.")
@@ -1147,12 +1536,9 @@ def render_crypto_onchain():
         st.markdown("---")
         st.caption(
             "**NVT Ratio** = Market Cap ÷ on-chain USD transfer volume (30-day average, smoothed). "
-            "Think of it as an on-chain 'P/E ratio.' Note the **trend** column above: a level near a "
-            "threshold boundary means less if it's moving sharply in the opposite direction — falling "
-            "NVT into a 'neutral' reading is a different signal than rising NVT into the same reading. "
-            "The trend is computed from real daily market-cap history when available; if that fetch "
-            "fails, the app falls back to a volume-only proxy and labels it as such rather than "
-            "presenting it as true NVT trend."
+            "Think of it as an on-chain 'P/E ratio.' The trend is computed from real daily market-cap "
+            "history when available; if that fetch fails, the app falls back to a volume-only proxy "
+            "and labels it as such rather than presenting it as true NVT trend."
         )
 
         hr_hist = bc.get("hash_rate_history", [])
@@ -1260,9 +1646,8 @@ def render_crypto_onchain():
         st.caption(
             "**Puell Multiple** = daily miner revenue ÷ its trailing average. Historically, readings "
             "**below ~0.5** coincide with miner-capitulation bottoms; readings **above ~4** coincide with "
-            "cycle-top euphoria. The trend figure shows whether it's moving toward or away from an extreme. "
-            "Unlike NVT's trend, this one is not affected by a constant-denominator issue, since both the "
-            "ratio and its trailing average are drawn from the same revenue series."
+            "cycle-top euphoria. Unlike NVT's trend, this one is not affected by a constant-denominator "
+            "issue, since both the ratio and its trailing average are drawn from the same revenue series."
         )
 
         st.markdown("---")
@@ -1276,7 +1661,108 @@ def render_crypto_onchain():
         col_z.metric("Est. New Supply / Day", fmt(issued_per_day, 1, suffix=" BTC"))
         st.caption(f"Next halving expected around **{NEXT_HALVING_YEAR}**, cutting new issuance roughly in half again.")
 
-    # ── TAB 6 · SENTIMENT ─────────────────────────────────────────────────────
+    # ── TAB 6 · MACRO LIQUIDITY  (NEW) ────────────────────────────────────────
+    with tab_macro:
+        st.subheader("🌐 Macro Liquidity")
+        st.caption(
+            "BTC behaves like a high-beta risk asset most of the time, and macro liquidity conditions "
+            "can override on-chain signals in the short term. This tab makes that channel explicit "
+            "instead of leaving it as an unmeasured caveat: it blends a US Fed Taylor Rule estimate "
+            "(ported from the forex fundamental scanner), the 20-day DXY trend, and the real 10Y yield "
+            "level into one liquidity reading."
+        )
+
+        col1, col2, col3 = st.columns(3)
+        col1.metric("Fed Bias", macro.get("fed_action", "—"),
+                    fmt(macro.get("fed_score"), 2))
+        col2.metric("DXY 20d Trend", fmt(macro.get("dxy_trend_pct"), 1, suffix="%"))
+        col3.metric("Real 10Y Yield", fmt(macro.get("real_yield_now"), 2, suffix="%"))
+
+        st.markdown(f"**Read:** {macro_note}")
+
+        st.markdown("---")
+        st.markdown("**Sub-component contributions to the Macro Liquidity score**")
+        sub_df = pd.DataFrame([
+            {"Component": "Fed Taylor bias (inverted: hawkish = headwind)",
+             "Weight in blend": "50%",
+             "Score": fmt(macro.get("fed_component"), 2)},
+            {"Component": "DXY 20d trend (rising = tightening)",
+             "Weight in blend": "30%",
+             "Score": fmt(macro.get("dxy_component"), 2)},
+            {"Component": "Real 10Y yield level (higher = headwind)",
+             "Weight in blend": "20%",
+             "Score": fmt(macro.get("yield_component"), 2)},
+        ])
+        st.dataframe(sub_df, use_container_width=True, hide_index=True)
+        st.caption(
+            "These three sub-component weights (50/30/20) are internal to the Macro Liquidity signal "
+            "and are separate from the overall scorecard weight this signal receives in the composite — "
+            "adjust the scorecard weight in the '🎛️ Composite Score Weights' panel above; these "
+            "internal proportions are fixed in code."
+        )
+
+        dxy_series = macro_in.get("dxy_series", pd.Series(dtype=float))
+        if not dxy_series.empty:
+            fig_dxy = go.Figure()
+            fig_dxy.add_trace(go.Scatter(x=dxy_series.index, y=dxy_series.values, name="DXY",
+                                          line=dict(color="#3498db", width=2)))
+            fig_dxy.update_layout(title="US Dollar Index (DXY) — 6 Months",
+                                   template="plotly_dark", height=300, yaxis_title="Index")
+            st.plotly_chart(fig_dxy, use_container_width=True)
+
+        ten_y_series = macro_in.get("ten_y_series", pd.Series(dtype=float))
+        cpi_series   = macro_in.get("cpi_series", pd.Series(dtype=float))
+        if not ten_y_series.empty and not cpi_series.empty:
+            merged = pd.concat([ten_y_series.rename("ten_y"), cpi_series.rename("cpi")], axis=1).dropna()
+            merged["real_yield"] = merged["ten_y"] - merged["cpi"]
+            fig_ry = go.Figure()
+            fig_ry.add_trace(go.Scatter(x=merged.index, y=merged["real_yield"], name="Real 10Y Yield",
+                                         line=dict(color="#e67e22", width=2), fill="tozeroy",
+                                         fillcolor="rgba(230,126,34,0.08)"))
+            fig_ry.add_hline(y=0, line_dash="dash", line_color="white", opacity=0.4)
+            fig_ry.update_layout(title="US Real 10Y Yield (10Y nominal − CPI YoY)",
+                                  template="plotly_dark", height=280, yaxis_title="%")
+            st.plotly_chart(fig_ry, use_container_width=True)
+
+        st.markdown("---")
+        st.subheader("💵 Stablecoin Supply Growth")
+        st.caption(
+            "Aggregate USDT + USDC + DAI market cap (≈ circulating supply, pegged ~1:1) as a dry-powder "
+            "proxy. Tracked separately from the Macro Liquidity blend above because it is driven by "
+            "issuer/exchange minting and redemption decisions rather than Fed policy or FX markets — "
+            "a genuinely different vote, not the same liquidity story from another angle."
+        )
+        if stablecoins:
+            col_a, col_b, col_c = st.columns(3)
+            col_a.metric("Total Stablecoin Mcap", fmt(stablecoins.get("total_now"), 0, "$"))
+            col_b.metric("30d Ago", fmt(stablecoins.get("total_30d"), 0, "$"))
+            col_c.metric("30d Growth", fmt(stablecoins.get("growth_pct"), 1, suffix="%"),
+                         delta_color=delta_colour(stablecoins.get("growth_pct")))
+            st.markdown(f"**Read:** {sc_note}")
+
+            per_coin = stablecoins.get("per_coin", {})
+            if per_coin:
+                pc_rows = [{
+                    "Stablecoin": sym,
+                    "Market Cap Now": fmt(vals["now"], 0, "$"),
+                    "Market Cap 30d Ago": fmt(vals["ago_30d"], 0, "$"),
+                    "30d Growth": fmt((vals["now"] - vals["ago_30d"]) / vals["ago_30d"] * 100, 1, suffix="%")
+                                  if vals["ago_30d"] else "—",
+                } for sym, vals in per_coin.items()]
+                st.dataframe(pd.DataFrame(pc_rows), use_container_width=True, hide_index=True)
+        else:
+            st.warning("Stablecoin supply data unavailable from CoinGecko.")
+
+        st.info(
+            "**Caveats:** Fed Taylor Rule scores are a heuristic estimate ported from the forex "
+            "fundamental scanner, not a forecast verified against FOMC outcomes. DXY and real-yield "
+            "components are simple trend/level reads, not full rates-market models. Stablecoin supply "
+            "also grows for reasons unrelated to crypto risk appetite — e.g. treasury cash parking or "
+            "cross-border settlement use — so treat it as a noisy proxy, not a confirmed 'money about "
+            "to buy BTC' signal."
+        )
+
+    # ── TAB 7 · SENTIMENT ─────────────────────────────────────────────────────
     with tab_sentiment:
         st.subheader("Fear & Greed Index")
         fg_val   = fg.get("value", 50)
@@ -1350,7 +1836,7 @@ def render_crypto_onchain():
         col1.metric("Latest Funding Rate", fmt(fr.get("latest"), 4, suffix="%"))
         col2.metric("8-Period Avg Rate",   fmt(fr.get("avg_8"),  4, suffix="%"))
 
-    # ── TAB 7 · SIGNAL GUIDE ─────────────────────────────────────────────────
+    # ── TAB 8 · SIGNAL GUIDE ─────────────────────────────────────────────────
     with tab_guide:
         st.subheader("Chapter 9 Signal Reference Guide")
 
@@ -1373,7 +1859,7 @@ def render_crypto_onchain():
 **Fear & Greed Index** 🔗 — Contrarian signal. Extreme Fear (<20) historically marks accumulation zones;
 Extreme Greed (>80) marks distribution zones. Never trade on this alone — confirm with on-chain and volume.
 
-**Hash Rate** — Now measured via a 30-day linear-regression slope rather than comparing only the first
+**Hash Rate** — Measured via a 30-day linear-regression slope rather than comparing only the first
 and last week, so the middle of the window actually counts and single noisy days at either edge matter
 less. Rising hash rate signals miner confidence; falling hash rate can signal miner stress or upcoming
 capitulation.
@@ -1384,9 +1870,9 @@ and activity migrating off-chain to Layer 2 / Lightning. Weight it as one vote a
 confirmation on its own.
 
 **Funding Rate** 🔗 — Persistently very positive = overcrowded longs vulnerable to a liquidation
-cascade. Very negative = short squeeze potential. Thresholds were loosened from earlier versions
-because moderately positive funding is common and unremarkable during genuine bull trends — the
-contrarian read works best at real extremes, not the first sign of positive funding.
+cascade. Very negative = short squeeze potential. Thresholds favor real extremes over the first sign
+of positive funding, since moderately positive funding is common and unremarkable during genuine
+bull trends.
 
 **Price vs MA200** 🔗 — The macro trend filter. Above MA200 = bull market structure; below = bear
 market structure.
@@ -1396,42 +1882,61 @@ market structure.
 **BTC Dominance** — *Not* a reliable directional signal for BTC on its own. Rising dominance shows up
 in early bull markets (capital flowing into BTC first) **and** in bear markets (capital fleeing
 riskier alts faster than BTC). Falling dominance shows up in "altseason" **and** can simply mean alts
-are getting hit less hard. Because the same reading can mean opposite things depending on regime,
-this is now scored as a small regime-flag (±0.3 max) rather than a directional bullish/bearish vote,
-and carries a reduced weight in the default mix.
+are getting hit less hard. Scored as a small regime-flag (±0.3 max) rather than a directional vote,
+with a reduced weight in the default mix.
 
-**NVT Ratio (now trend-aware, fixed in v3.1)** — On-chain "valuation multiple." Low = usage justifies
-valuation (cheap); high = valuation has detached from usage (expensive). **The trend calculation was
-fixed**: earlier it held market cap constant at today's value across the lookback window, which meant
-the "trend" was actually just inverse on-chain-volume drift mislabeled as NVT trend. It now uses real
-daily market-cap history so the trend reflects genuine NVT movement; if market-cap history can't be
-fetched, the app falls back to the volume-only proxy and says so explicitly rather than presenting it
-as true NVT trend. Separately, static NVT thresholds were calibrated years ago — as activity moves
-off-chain (exchanges, Lightning, custodial rails), the "normal" range likely drifts — so treat NVT as
-one input among several, not a standalone call.
+**NVT Ratio (trend-aware)** — On-chain "valuation multiple." Low = usage justifies valuation (cheap);
+high = valuation has detached from usage (expensive). The trend calculation uses real daily market-cap
+history so the trend reflects genuine NVT movement; if market-cap history can't be fetched, the app
+falls back to the volume-only proxy and says so explicitly rather than presenting it as true NVT
+trend. Static NVT thresholds were calibrated years ago — as activity moves off-chain, the "normal"
+range likely drifts — so treat NVT as one input among several, not a standalone call.
 
-**Puell Multiple (now trend-aware)** — Compares today's miner revenue to its trailing average.
-Extreme lows have marked capitulation bottoms; extreme highs have marked euphoric tops. This trend
-calculation does not share NVT's old bug, since both the ratio and its baseline come from the same
-revenue series.
+**Puell Multiple (trend-aware)** — Compares today's miner revenue to its trailing average. Extreme
+lows have marked capitulation bottoms; extreme highs have marked euphoric tops. This trend calculation
+does not share NVT's old constant-denominator issue, since both the ratio and its baseline come from
+the same revenue series.
 
 **Volume-Price Analysis** — Does trading volume confirm or contradict the price trend? Price and OBV
-moving together = real participation. Divergence (price up, volume distributing, or vice versa) is
-historically a higher-risk setup, regardless of what on-chain fundamentals say — this is the tactical
-layer that sits on top of the slower-moving fundamental picture. Of all the signals here, this is one
-of the more directly defensible, since it's standard technical-analysis logic rather than a crypto-
-specific heuristic — though exchange-reported volume quality varies, so treat it as directional.
+moving together = real participation. Divergence is historically a higher-risk setup, regardless of
+what on-chain fundamentals say — this is the tactical layer that sits on top of the slower-moving
+fundamental picture. Of all the signals here, this is one of the more directly defensible, since it's
+standard technical-analysis logic rather than a crypto-specific heuristic — though exchange-reported
+volume quality varies, so treat it as directional.
+
+**Macro Liquidity** 🔗 *(new)* — Blends a US Fed Taylor Rule estimate (ported from the forex
+fundamental scanner), the 20-day DXY trend, and the real 10Y yield level into one liquidity reading.
+Hawkish Fed / rising dollar / high real yields = headwind for BTC as a risk asset; the reverse = a
+tailwind. This is tagged as part of the correlated price-action/liquidity group because it operates
+through the same risk-appetite channel as Price vs MA200, Funding Rate, and Fear & Greed, even though
+its raw inputs (rates, FX) are different data sources from theirs. It is forward-looking (policy
+trajectory) rather than backward-looking (price that already happened), which is its main value-add
+over the other four — but it should not be treated as a fifth independent vote.
+
+**Stablecoin Supply Growth** *(new)* — Aggregate USDT + USDC + DAI market cap growth over 30 days, as
+a dry-powder / liquidity-inflow proxy. Deliberately kept OUTSIDE the correlated group: minting and
+redemption decisions are driven by issuers and exchanges responding to fiat on/off-ramp demand, which
+can lead or lag price rather than mechanically restating it. Still a noisy proxy — supply also grows
+for reasons unrelated to crypto risk appetite, like treasury cash parking or cross-border settlement —
+so treat it as one vote, not confirmed incoming demand.
 
 **Mining Cost / Breakeven** — Electricity-only estimate of network production cost per BTC. Excludes
 capex/depreciation — read it as a soft floor, not full miner P&L. When spot falls toward or below this
 line, more miners historically approach capitulation.
 
-**Composite score / linear weighting** 🔗 — The score sums weight × signal across all ten components
-as if each were independent evidence. In reality, the 🔗-tagged signals above (Fear & Greed, Funding
-Rate, Price vs MA200, 30d Momentum) substantially correlate with each other because they're all
-reading the same underlying price action from different angles — so the composite partially
-double-counts that one piece of information. Treat the composite as a **structured checklist** that
-organizes the inputs you should be looking at, not a statistically validated predictive model.
+**Composite score / linear weighting** 🔗 — The score sums weight × signal across all twelve
+components as if each were independent evidence. In reality, the 🔗-tagged signals (Fear & Greed,
+Funding Rate, Price vs MA200, 30d Momentum, Macro Liquidity) substantially correlate with each other
+because they're all reading the same underlying price-action / liquidity backdrop from different
+angles — so the composite partially double-counts that one piece of information. Treat the composite
+as a **structured checklist** that organizes the inputs you should be looking at, not a statistically
+validated predictive model.
+
+**Editable weights** — Every weight in the '🎛️ Composite Score Weights' panel can be adjusted. Moving
+any single slider automatically rebalances all the others proportionally so the total always sums to
+100% — this preserves the relative balance among the signals you didn't touch, rather than flattening
+everything toward equal weight over repeated edits. Use the reset button to return to the defaults
+shown above at any time.
 """)
 
         st.info(
@@ -1439,12 +1944,14 @@ organizes the inputs you should be looking at, not a statistically validated pre
             "• No single signal is sufficient — use this composite as a confluence tool, not a trading signal\n"
             "• On-chain data is most informative at extremes; trend matters as much as level\n"
             "• Volume-price analysis adds a tactical timing layer on top of the slower fundamental picture\n"
-            "• Macro liquidity conditions can override on-chain signals in the short term\n"
+            "• Macro liquidity conditions can override on-chain signals in the short term — now measured "
+            "explicitly via the Macro Liquidity signal instead of being an unmeasured caveat\n"
             "• Score weights here are analyst priors, not backtested coefficients — adjust and stress-test them\n"
-            "• 🔗-tagged signals correlate with each other (price-action based) — don't read the composite as "
-            "ten independent votes\n"
+            "• 🔗-tagged signals correlate with each other (price-action / liquidity based) — don't read the "
+            "composite as twelve independent votes\n"
             "• BTC dominance is a regime flag, not a reliable directional call on BTC itself\n"
             "• Active-address counts are a noisy adoption proxy, not a clean usage read\n"
+            "• Stablecoin supply growth is a noisy dry-powder proxy, not confirmed incoming demand\n"
             "• Mining cost estimates are electricity-only approximations, not exact miner P&L\n"
             "• For deeper metrics (MVRV, NUPL, realised price, exchange reserves) consider Glassnode or CryptoQuant\n\n"
             "**This tool is for research and education — it is not financial advice.**"
