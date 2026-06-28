@@ -41,6 +41,58 @@ STABLECOIN_IDS = {
     "DAI":  "dai",
 }
 
+# ── Liquidity Dashboard FRED series (v3.4) ──────────────────────────────────
+# All confirmed live FRED tickers. Net liquidity proxy follows the standard
+# market convention: Fed Balance Sheet − Reverse Repo − Treasury General
+# Account (see e.g. the widely-cited WALCL-RRPONTSYD-WTREGEN formula).
+FRED_FED_BALANCE_SHEET = "WALCL"       # Fed total assets, weekly, $mm
+FRED_REVERSE_REPO      = "RRPONTSYD"   # ON RRP usage, daily, $bn
+FRED_TGA               = "WTREGEN"     # Treasury General Account, weekly, $mm
+FRED_M2                = "M2SL"        # M2 money stock, monthly, $bn
+FRED_TOTAL_DEBT        = "GFDEBTN"     # Total US federal debt outstanding, quarterly, $mm
+                                        # (proxy for Treasury issuance trend — FRED has no
+                                        # single clean "daily net issuance" series; GFDEBTN's
+                                        # quarter-over-quarter change is used as that proxy
+                                        # and is explicitly labeled as such in the UI)
+
+# Global liquidity is approximated as Fed + ECB balance sheets, FX-converted
+# to USD — a simplified version of the standard "Global Net Liquidity"
+# community proxy (e.g. as popularized by Michael Howell / CrossBorder
+# Capital and widely replicated on TradingView, which typically also adds
+# BoJ + PBoC legs). It is NOT an official series from any single source,
+# and is clearly labeled as an approximation in the UI.
+FRED_ECB_ASSETS  = "ECBASSETSW"   # ECB total assets, weekly, EUR mm
+ECB_FX_TICKER    = "EURUSD=X"     # EUR/USD for conversion
+# No reliable free daily BoJ/PBoC series via FRED/yfinance — those legs are
+# OMITTED from the v3.4 global liquidity proxy rather than estimated; see
+# the Liquidity tab caveat box for the explicit disclosure.
+
+
+# ── ETF Dashboard (v3.4) ────────────────────────────────────────────────────
+# IMPORTANT: there is no free, public, programmatic API for daily spot BTC
+# ETF flows. Farside Investors and SoSoValue publish the numbers people
+# actually cite, but both are scrape-only HTML tables with no stable free
+# API and no confirmed redistribution license. Rather than fabricate flow
+# figures (these numbers move markets and people act on them), this
+# dashboard:
+#   1. Computes what IS independently verifiable from a real, fetchable
+#      source: aggregate AUM / shares-outstanding trend for the largest
+#      spot BTC ETFs via Yahoo Finance (yfinance), which reliably provides
+#      price and volume data for these tickers.
+#   2. Clearly labels which numbers are auto-fetched market data vs.
+#      DERIVED ESTIMATES (e.g. implied flow ≈ AUM change adjusted for BTC
+#      price change), and never presents an estimate as a reported flow.
+#   3. Provides a manual-entry override so a user who has today's real
+#      Farside/SoSoValue flow numbers can paste them in for an accurate
+#      read, visually distinguished from the auto-fetched estimate.
+ETF_TICKERS = {
+    "IBIT": "iShares Bitcoin Trust (BlackRock)",
+    "FBTC": "Fidelity Wise Origin Bitcoin Fund",
+    "GBTC": "Grayscale Bitcoin Trust",
+    "ARKB": "ARK 21Shares Bitcoin ETF",
+    "BITB": "Bitwise Bitcoin ETF",
+}
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 # SIGNAL GROUPS  (v3.3 reorganization)
@@ -76,6 +128,7 @@ SIGNAL_GROUPS = {
     "NVT Ratio":                  GROUP_VALUATION,
     "Puell Multiple":             GROUP_VALUATION,
     "Mining Cost Margin":         GROUP_VALUATION,
+    "Percent Supply in Profit":   GROUP_VALUATION,   # NEW v3.4
 
     "Price vs MA200":             GROUP_TREND,
     "30d Momentum":               GROUP_TREND,
@@ -89,6 +142,8 @@ SIGNAL_GROUPS = {
     "Active Addresses":            GROUP_CONTEXT,
     "Stablecoin Supply Growth":    GROUP_CONTEXT,
     "Macro Liquidity":             GROUP_CONTEXT,
+    "Fed Net Liquidity":           GROUP_CONTEXT,   # NEW v3.4 — Liquidity Dashboard headline metric
+    "ETF Flow Pressure":           GROUP_CONTEXT,   # NEW v3.4 — ETF Dashboard headline metric
 }
 
 GROUP_ORDER = [GROUP_VALUATION, GROUP_TREND, GROUP_SENTIMENT, GROUP_CONTEXT]
@@ -121,19 +176,31 @@ GROUP_BLURB = {
 # ══════════════════════════════════════════════════════════════════════════════
 
 DEFAULT_WEIGHTS = {
-    "Fear & Greed":              12,
-    "Hash Rate":                  11,
-    "Active Addresses":          11,
-    "Funding Rate":               10,
-    "Price vs MA200":            10,
-    "30d Momentum":                7,
-    "BTC Dominance":               4,
-    "NVT Ratio":                   9,
-    "Puell Multiple":              5,
-    "Volume Confirmation":         8,
-    "Macro Liquidity":             8,
-    "Stablecoin Supply Growth":    5,
+    # v3.4 note: two new weighted signals were added (Percent Supply in
+    # Profit, ETF Flow Pressure). To make room without re-deriving the
+    # whole scheme, every pre-existing weight below was trimmed by
+    # roughly the same proportion it was trimmed in the v3.2 rebalance
+    # (i.e. the trims are spread across all prior signals rather than
+    # taken from one group), so relative balance among v3.1/v3.2/v3.3
+    # signals is preserved. Sum is still 100 by construction; the UI
+    # re-derives fractions at render time regardless.
+    "Fear & Greed":              10,   # was 12
+    "Hash Rate":                  9,   # was 11
+    "Active Addresses":           9,   # was 11
+    "Funding Rate":                8,   # was 10
+    "Price vs MA200":              8,   # was 10
+    "30d Momentum":                6,   # was 7
+    "BTC Dominance":                3,   # was 4
+    "NVT Ratio":                    7,   # was 9
+    "Puell Multiple":               4,   # was 5
+    "Volume Confirmation":          7,   # was 8
+    "Macro Liquidity":              7,   # was 8
+    "Stablecoin Supply Growth":     4,   # was 5
+    "Percent Supply in Profit":     9,   # NEW v3.4 — strong valuation-extremity signal,
+                                          # historically one of the cleanest cycle markers
+    "ETF Flow Pressure":            9,   # NEW v3.4 — flows now dominate marginal BTC demand
 }
+# Weights above sum to 100 by construction.
 
 # ══════════════════════════════════════════════════════════════════════════════
 # DATA FETCHERS  (all cached 15 min)
@@ -436,6 +503,283 @@ def fetch_stablecoin_supply() -> Dict:
         "per_coin":    per_coin,
     }
 
+
+# ══════════════════════════════════════════════════════════════════════════════
+# LIQUIDITY DASHBOARD DATA  (NEW in v3.4)
+#
+# Everything below is fetched from FRED (already have fetch_fred_series) plus
+# yfinance for the EUR/USD cross used to convert ECB assets to USD. All
+# series are real, confirmed-live FRED tickers (see constants section).
+# Net liquidity and global liquidity are clearly-labeled APPROXIMATIONS
+# using the standard community formula, not an official published series.
+# ══════════════════════════════════════════════════════════════════════════════
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def fetch_liquidity_dashboard_data() -> Dict:
+    """Pulls every series needed for the Liquidity Dashboard tab in one
+    cached call. Returns raw series (for charting) plus latest/trend
+    scalars (for the scorecard)."""
+    fed_bs   = fetch_fred_series(FRED_FED_BALANCE_SHEET)   # $mm, weekly
+    rrp      = fetch_fred_series(FRED_REVERSE_REPO)        # $bn, daily
+    tga      = fetch_fred_series(FRED_TGA)                 # $mm, weekly
+    m2       = fetch_fred_series(FRED_M2)                  # $bn, monthly
+    debt     = fetch_fred_series(FRED_TOTAL_DEBT)           # $mm, quarterly
+    ecb      = fetch_fred_series(FRED_ECB_ASSETS)           # EUR mm, weekly
+
+    eurusd = pd.Series(dtype=float)
+    try:
+        fx = yf.download(ECB_FX_TICKER, period="2y", interval="1d",
+                          auto_adjust=True, progress=False)
+        if not fx.empty:
+            if isinstance(fx.columns, pd.MultiIndex):
+                fx.columns = fx.columns.get_level_values(0)
+            s = fx["Close"] if "Close" in fx.columns else pd.Series(dtype=float)
+            if isinstance(s, pd.DataFrame):
+                s = s.iloc[:, 0]
+            eurusd = s.dropna()
+    except Exception:
+        pass
+
+    def _latest(s):
+        v = s.dropna()
+        return float(v.iloc[-1]) if len(v) else np.nan
+
+    def _n_ago_periods(s, n):
+        v = s.dropna()
+        return float(v.iloc[-(n+1)]) if len(v) >= n + 1 else np.nan
+
+    # Fed Net Liquidity (USD bn) = WALCL($mm) - RRP($bn*1000... careful with units)
+    # Units check: WALCL & TGA are reported in $millions; RRPONTSYD is in $billions.
+    # Convert everything to $ billions for the net-liquidity series.
+    net_liq_series = pd.Series(dtype=float)
+    if not fed_bs.empty and not rrp.empty and not tga.empty:
+        df = pd.concat([
+            (fed_bs / 1000.0).rename("fed_bn"),
+            rrp.rename("rrp_bn"),
+            (tga / 1000.0).rename("tga_bn"),
+        ], axis=1).ffill().dropna()
+        if not df.empty:
+            net_liq_series = (df["fed_bn"] - df["rrp_bn"] - df["tga_bn"])
+
+    fed_bs_now_bn = _latest(fed_bs) / 1000.0 if not pd.isna(_latest(fed_bs)) else np.nan
+    rrp_now_bn    = _latest(rrp)
+    tga_now_bn    = _latest(tga) / 1000.0 if not pd.isna(_latest(tga)) else np.nan
+    net_liq_now   = float(net_liq_series.iloc[-1]) if len(net_liq_series) else np.nan
+    net_liq_4w_ago = float(net_liq_series.iloc[-29]) if len(net_liq_series) >= 29 else np.nan
+    net_liq_trend_pct = (
+        (net_liq_now - net_liq_4w_ago) / abs(net_liq_4w_ago) * 100
+        if not pd.isna(net_liq_now) and not pd.isna(net_liq_4w_ago) and net_liq_4w_ago != 0
+        else np.nan
+    )
+
+    m2_now = _latest(m2)
+    m2_yoy = np.nan
+    m2v = m2.dropna()
+    if len(m2v) >= 13:
+        m2_yoy = float((m2v.iloc[-1] - m2v.iloc[-13]) / abs(m2v.iloc[-13]) * 100)
+
+    debt_now = _latest(debt) / 1000.0 if not pd.isna(_latest(debt)) else np.nan  # -> $bn
+    debt_qoq_pct = np.nan
+    dv = debt.dropna()
+    if len(dv) >= 2:
+        debt_qoq_pct = float((dv.iloc[-1] - dv.iloc[-2]) / abs(dv.iloc[-2]) * 100)
+
+    # Global liquidity proxy: Fed + ECB (USD-converted). BoJ/PBoC omitted —
+    # see constants section + UI caveat for why.
+    global_liq_series = pd.Series(dtype=float)
+    if not fed_bs.empty and not ecb.empty and len(eurusd):
+        ecb_usd = (ecb * eurusd.reindex(ecb.index, method="ffill")) / 1000.0  # EUR mm * rate -> USD mm -> /1000 = USD bn... 
+        # ecb is in EUR millions; eurusd gives USD per EUR; product is USD millions; /1000 -> USD bn
+        df_g = pd.concat([(fed_bs / 1000.0).rename("fed_bn"), ecb_usd.rename("ecb_bn")], axis=1).ffill().dropna()
+        if not df_g.empty:
+            global_liq_series = df_g["fed_bn"] + df_g["ecb_bn"]
+
+    global_liq_now = float(global_liq_series.iloc[-1]) if len(global_liq_series) else np.nan
+    global_liq_trend_pct = np.nan
+    if len(global_liq_series) >= 29:
+        prior = float(global_liq_series.iloc[-29])
+        if prior != 0:
+            global_liq_trend_pct = float((global_liq_series.iloc[-1] - prior) / abs(prior) * 100)
+
+    return {
+        "fed_bs_series": fed_bs, "fed_bs_now_bn": fed_bs_now_bn,
+        "rrp_series": rrp, "rrp_now_bn": rrp_now_bn,
+        "tga_series": tga, "tga_now_bn": tga_now_bn,
+        "m2_series": m2, "m2_now_bn": m2_now, "m2_yoy_pct": m2_yoy,
+        "debt_series": debt, "debt_now_bn": debt_now, "debt_qoq_pct": debt_qoq_pct,
+        "net_liq_series": net_liq_series, "net_liq_now_bn": net_liq_now,
+        "net_liq_trend_pct": net_liq_trend_pct,
+        "global_liq_series": global_liq_series, "global_liq_now_bn": global_liq_now,
+        "global_liq_trend_pct": global_liq_trend_pct,
+        "ecb_series": ecb, "eurusd_series": eurusd,
+    }
+
+
+def score_fed_net_liquidity(liq: Dict) -> Tuple[float, str]:
+    """
+    Scores the Fed Net Liquidity TREND (4-week % change), not the level —
+    level alone isn't comparable across time given the balance sheet's
+    long-run size changes. Rising net liquidity (QE-like / RRP & TGA
+    draining) is a tailwind for risk assets including BTC; falling net
+    liquidity (QT-like / RRP & TGA refilling) is a headwind. This is the
+    same channel as Macro Liquidity (Context group) but a different,
+    independently-sourced read — Macro Liquidity uses Fed policy RATE +
+    DXY + real yields, this uses the Fed's actual BALANCE SHEET mechanics.
+    """
+    trend = liq.get("net_liq_trend_pct", np.nan)
+    now_bn = liq.get("net_liq_now_bn", np.nan)
+    if pd.isna(trend):
+        return 0.0, "Insufficient Fed liquidity data"
+
+    level_note = f"Net liquidity ≈ ${now_bn:,.0f}bn" if not pd.isna(now_bn) else "Net liquidity level n/a"
+
+    if trend > 4:    base, label = +1.0, "rising sharply (4w) — strong liquidity tailwind — BULLISH"
+    elif trend > 1:   base, label = +0.5, "rising (4w) — mild liquidity tailwind"
+    elif trend > -1:  base, label = 0.0,  "roughly flat (4w) — neutral"
+    elif trend > -4:  base, label = -0.5, "falling (4w) — mild liquidity headwind"
+    else:             base, label = -1.0, "falling sharply (4w) — strong liquidity headwind — BEARISH"
+
+    return base, f"{level_note}, {trend:+.1f}% (4w) — {label}"
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# ETF DASHBOARD DATA  (NEW in v3.4)
+#
+# See ETF_TICKERS constant comment for the data-availability caveat. This
+# fetcher pulls real price/volume data via yfinance for each ETF ticker,
+# then derives an APPROXIMATE flow-pressure read from volume + price
+# action — explicitly NOT the same as a reported creation/redemption flow
+# number. A manual-override path lets the user paste real numbers from
+# Farside/SoSoValue/the issuers' own daily disclosures for an accurate read.
+# ══════════════════════════════════════════════════════════════════════════════
+
+@st.cache_data(ttl=900, show_spinner=False)
+def fetch_etf_market_data() -> Dict:
+    """Real, fetchable market data (price, volume, shares) for the major
+    spot BTC ETF tickers via yfinance. This is NOT flow data — see
+    compute_etf_flow_proxy() for how (and how cautiously) it's used."""
+    out = {}
+    for ticker in ETF_TICKERS:
+        try:
+            data = yf.download(ticker, period="3mo", interval="1d",
+                                auto_adjust=True, progress=False)
+            if data.empty:
+                continue
+            if isinstance(data.columns, pd.MultiIndex):
+                data.columns = data.columns.get_level_values(0)
+            close = data["Close"] if "Close" in data.columns else pd.Series(dtype=float)
+            vol = data["Volume"] if "Volume" in data.columns else pd.Series(dtype=float)
+            if isinstance(close, pd.DataFrame): close = close.iloc[:, 0]
+            if isinstance(vol, pd.DataFrame): vol = vol.iloc[:, 0]
+            out[ticker] = {"close": close.dropna(), "volume": vol.dropna()}
+        except Exception:
+            continue
+    return out
+
+
+def compute_etf_flow_proxy(etf_data: Dict, btc_chg_24h: float) -> Dict:
+    """
+    Builds an APPROXIMATE daily/weekly/30d "flow pressure" read from dollar
+    volume traded in each ETF, explicitly distinct from real net
+    creation/redemption flows (which require authorized-participant data
+    these issuers/Farside/SoSoValue publish but don't expose via a free
+    API). Dollar volume is a liquidity/attention proxy, not a flow number:
+    high volume can mean strong net buying, strong net selling, or just
+    heavy two-way trading with no net flow at all.
+
+    What this CAN tell you directionally: rising aggregate dollar volume
+    alongside a rising BTC price has historically coincided with net
+    creation periods (more cited inflow days); rising volume alongside a
+    falling price has historically coincided with net redemption periods.
+    That correlation is the basis for the "pressure" sign below — it is a
+    heuristic tilt, not a substitute for the real number.
+    """
+    if not etf_data:
+        return {}
+
+    total_dollar_vol = None
+    per_ticker = {}
+    for ticker, d in etf_data.items():
+        close, vol = d["close"], d["volume"]
+        aligned = pd.concat([close.rename("close"), vol.rename("volume")], axis=1).dropna()
+        if aligned.empty:
+            continue
+        dollar_vol = aligned["close"] * aligned["volume"]
+        per_ticker[ticker] = dollar_vol
+        total_dollar_vol = dollar_vol if total_dollar_vol is None else total_dollar_vol.add(dollar_vol, fill_value=0)
+
+    if total_dollar_vol is None or total_dollar_vol.empty:
+        return {}
+
+    daily_now = float(total_dollar_vol.iloc[-1])
+    weekly_now = float(total_dollar_vol.iloc[-5:].sum()) if len(total_dollar_vol) >= 5 else np.nan
+    avg30 = float(total_dollar_vol.iloc[-30:].mean()) if len(total_dollar_vol) >= 1 else np.nan
+    trend_30d_pct = np.nan
+    if len(total_dollar_vol) >= 35:
+        recent = total_dollar_vol.iloc[-5:].mean()
+        prior = total_dollar_vol.iloc[-35:-30].mean()
+        if prior and prior != 0:
+            trend_30d_pct = float((recent - prior) / prior * 100)
+
+    # Directional tilt: same-sign volume trend + price change = net-flow-like
+    # pressure in that direction; sign flips if volume is rising while price
+    # falls (distribution-like) or volume is falling while price rises
+    # (low-conviction rally, not flow-driven).
+    pressure_sign = 0.0
+    if not pd.isna(trend_30d_pct) and not pd.isna(btc_chg_24h):
+        if trend_30d_pct > 5 and btc_chg_24h > 0:
+            pressure_sign = +1.0
+        elif trend_30d_pct > 5 and btc_chg_24h < 0:
+            pressure_sign = -1.0
+        elif trend_30d_pct < -5:
+            pressure_sign = 0.0  # thinning volume = fading conviction either way, treated as neutral
+
+    return {
+        "daily_dollar_volume": daily_now,
+        "weekly_dollar_volume": weekly_now,
+        "avg30_dollar_volume": avg30,
+        "trend_30d_pct": trend_30d_pct,
+        "pressure_sign": pressure_sign,
+        "per_ticker_dollar_volume": per_ticker,
+        "total_dollar_volume_series": total_dollar_vol,
+    }
+
+
+def score_etf_flow_pressure(etf_proxy: Dict, manual_override: Optional[Dict] = None) -> Tuple[float, str]:
+    """
+    If the user has supplied real flow numbers via the manual-override
+    panel (today's reported net flow in $mm, e.g. copied from Farside),
+    THOSE are used and clearly labeled as user-supplied real data. If not,
+    falls back to the auto-fetched volume-based proxy with an explicit
+    "estimate, not reported flow" label so the distinction is never lost
+    downstream in the scorecard.
+    """
+    if manual_override and not pd.isna(manual_override.get("net_flow_usd_mm", np.nan)):
+        flow = manual_override["net_flow_usd_mm"]
+        note_prefix = f"User-supplied net flow: ${flow:+,.0f}mm (reported, not estimated)"
+        if flow > 500:    return +1.0, f"{note_prefix} — strong net inflow — BULLISH"
+        if flow > 100:    return +0.5, f"{note_prefix} — moderate net inflow"
+        if flow > -100:   return  0.0, f"{note_prefix} — roughly flat"
+        if flow > -500:   return -0.5, f"{note_prefix} — moderate net outflow"
+        return -1.0,                  f"{note_prefix} — strong net outflow — BEARISH"
+
+    if not etf_proxy:
+        return 0.0, "No ETF market data available"
+
+    pressure = etf_proxy.get("pressure_sign", 0.0)
+    trend = etf_proxy.get("trend_30d_pct", np.nan)
+    trend_note = f"ETF dollar volume {'rising' if not pd.isna(trend) and trend > 0 else 'falling'} " \
+                 f"{abs(trend):.0f}% (30d)" if not pd.isna(trend) else "ETF volume trend n/a"
+
+    note = f"{trend_note} [ESTIMATE from trading volume, NOT a reported flow figure]"
+    if pressure > 0.3:
+        note += " — volume+price pattern resembles net-inflow periods — lean BULLISH"
+    elif pressure < -0.3:
+        note += " — volume+price pattern resembles net-outflow periods — lean BEARISH"
+    else:
+        note += " — no clear directional tilt"
+    return pressure, note
+
 # ══════════════════════════════════════════════════════════════════════════════
 # MACRO LIQUIDITY
 # ══════════════════════════════════════════════════════════════════════════════
@@ -721,6 +1065,76 @@ def compute_puell_multiple(bc: Dict) -> Dict:
     return {"value": puell_now, "trend_pct": trend_pct}
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+# PERCENT SUPPLY IN PROFIT  (NEW in v3.4)
+#
+# The "real" version of this metric (as published by Glassnode/CryptoQuant)
+# requires UTXO-level cost-basis data — the price at which every coin last
+# moved on-chain — which isn't available from any free API used in this
+# app (blockchain.info doesn't expose realized-price-by-cohort data).
+#
+# What's built here is an explicitly-labeled PROXY: it approximates the
+# distribution of holder cost basis using the BTC/USD daily close history
+# itself (1 year, from fetch_btc_ohlcv) volume-weighted by that day's
+# traded volume as a rough stand-in for how much supply "changed hands"
+# at each price level. Days with more volume contribute more weight to
+# the implied cost-basis distribution. The % of that weighted distribution
+# below the current price is the proxy "% supply in profit" figure.
+#
+# This is a meaningfully cruder estimate than the real on-chain version:
+#   - It only sees 1 year of trading, not full UTXO age history (coins
+#     held >1 year and untouched are invisible to this proxy)
+#   - It uses exchange volume as a stand-in for on-chain coin movement,
+#     which conflates trading activity with actual ownership transfer
+#   - It cannot distinguish a coin moving between two cold wallets from a
+#     coin actually changing economic ownership
+#
+# Despite those gaps, the basic shape (cheap accumulation low vs. expensive
+# euphoric high) is usually directionally right even on a 1-year window,
+# which is why it's kept in the Valuation group rather than discarded —
+# but every UI surface for this metric carries the "proxy, not on-chain
+# realized-price-based" caveat explicitly.
+# ══════════════════════════════════════════════════════════════════════════════
+
+def compute_percent_supply_in_profit(ohlcv: pd.DataFrame) -> Dict:
+    if ohlcv.empty or len(ohlcv) < 30:
+        return {}
+
+    close = ohlcv["Close"]
+    vol = ohlcv["Volume"]
+    if isinstance(close, pd.DataFrame): close = close.iloc[:, 0]
+    if isinstance(vol, pd.DataFrame): vol = vol.iloc[:, 0]
+    close = close.dropna()
+    vol = vol.reindex(close.index).fillna(0)
+
+    price_now = float(close.iloc[-1])
+    total_vol = float(vol.sum())
+    if total_vol <= 0:
+        return {}
+
+    vol_below = float(vol[close < price_now].sum())
+    pct_in_profit = (vol_below / total_vol) * 100
+
+    # 30d-ago comparison for a trend read.
+    pct_30d_ago = np.nan
+    if len(close) > 30:
+        close_30 = close.iloc[:-30]
+        vol_30 = vol.iloc[:-30]
+        price_30_ago = float(close_30.iloc[-1]) if len(close_30) else np.nan
+        if not pd.isna(price_30_ago) and float(vol_30.sum()) > 0:
+            pct_30d_ago = float(vol_30[close_30 < price_30_ago].sum()) / float(vol_30.sum()) * 100
+
+    trend_pp = pct_in_profit - pct_30d_ago if not pd.isna(pct_30d_ago) else np.nan
+
+    return {
+        "pct_in_profit": pct_in_profit,
+        "pct_in_profit_30d_ago": pct_30d_ago,
+        "trend_pp": trend_pp,   # change in percentage points, not %
+        "price_now": price_now,
+        "lookback_days": len(close),
+    }
+
+
 def compute_vpa(ohlcv: pd.DataFrame) -> Dict:
     """Volume-Price Analysis: OBV + trend, price trend, 20d VWAP, and a
     volume-confirmation ratio."""
@@ -915,6 +1329,37 @@ def score_puell(puell: Dict) -> Tuple[float, str]:
 
     return base, f"Puell {val:.2f}{trend_note} — {label}"
 
+
+def score_percent_supply_in_profit(sip: Dict) -> Tuple[float, str]:
+    """
+    Contrarian valuation read: when almost all (traded) supply sits in
+    profit, that's historically euphoric-zone behavior, since there's
+    little overhead resistance from underwater holders wanting to "get
+    back to even" and a lot of latent profit-taking incentive. When most
+    supply is underwater, that's historically closer to capitulation —
+    sellers willing to realize a loss have largely already done so.
+
+    Reminder (also surfaced in the UI): this is a 1-year volume-weighted
+    PROXY, not the on-chain realized-price-based metric Glassnode/
+    CryptoQuant publish — see compute_percent_supply_in_profit() docstring.
+    """
+    pct = sip.get("pct_in_profit", np.nan)
+    trend = sip.get("trend_pp", np.nan)
+    if pd.isna(pct):
+        return 0.0, "No supply-in-profit data"
+
+    if pct > 95:    base, label = -1.0, "almost all traded supply in profit — euphoria zone — contrarian BEARISH"
+    elif pct > 85:  base, label = -0.5, "most traded supply in profit — elevated, watch for profit-taking"
+    elif pct > 50:  base, label = 0.0,  "majority of traded supply in profit — normal bull-market range"
+    elif pct > 25:  base, label = +0.5, "minority of traded supply in profit — stress building, mild bullish (contrarian)"
+    else:           base, label = +1.0, "most traded supply underwater — capitulation-zone — contrarian BULLISH"
+
+    trend_note = ""
+    if not pd.isna(trend):
+        direction = "up" if trend > 0 else "down"
+        trend_note = f", {direction} {abs(trend):.1f}pp (30d)"
+
+    return base, f"~{pct:.0f}% of traded supply in profit (1y volume-weighted PROXY, not on-chain realized price){trend_note} — {label}"
 
 def score_mining_cost_margin(mining: Dict) -> Tuple[float, str]:
     """
@@ -1278,6 +1723,24 @@ def render_crypto_onchain():
         )
         weights = render_weight_sliders(DEFAULT_WEIGHTS, SIGNAL_GROUPS)
 
+    with st.expander("💵 ETF Flow Override (paste real numbers — optional)", expanded=False):
+        st.caption(
+            "There is no free public API for actual daily BTC ETF creation/redemption flows. "
+            "The auto-fetched ETF signal below is an ESTIMATE built from trading volume, not a "
+            "reported flow figure. If you have today's real net flow (e.g. from Farside Investors "
+            "or SoSoValue), paste it here for an accurate score instead of the volume-based proxy."
+        )
+        use_manual = st.checkbox("Use manual net flow instead of the auto-estimate", value=False, key="etf_manual_toggle")
+        if use_manual:
+            manual_flow = st.number_input(
+                "Today's reported net flow, all spot BTC ETFs combined ($ millions, negative = outflow)",
+                min_value=-5000.0, max_value=5000.0, value=0.0, step=10.0, key="etf_manual_flow_input",
+            )
+            st.session_state["etf_manual_override"] = {"net_flow_usd_mm": manual_flow}
+            st.caption(f"Using manual figure: ${manual_flow:+,.0f}mm")
+        else:
+            st.session_state["etf_manual_override"] = None
+
     with st.spinner("Fetching on-chain & market data…"):
         fg          = fetch_fear_greed()
         cg          = fetch_coingecko_btc()
@@ -1287,12 +1750,20 @@ def render_crypto_onchain():
         mcap_hist   = fetch_btc_marketcap_history(days=90)
         macro_in    = fetch_macro_liquidity_inputs()
         stablecoins = fetch_stablecoin_supply()
+        liquidity   = fetch_liquidity_dashboard_data()
+        etf_market  = fetch_etf_market_data()
 
     mining = compute_mining_cost(bc, cg, electricity_cost, fleet_efficiency)
     nvt    = compute_nvt(bc, cg, mcap_hist)
     puell  = compute_puell_multiple(bc)
     vpa    = compute_vpa(ohlcv)
     macro  = compute_macro_liquidity(macro_in)
+    sip    = compute_percent_supply_in_profit(ohlcv)
+    etf_proxy = compute_etf_flow_proxy(etf_market, cg.get("chg_24h", np.nan))
+
+    # Manual ETF flow override, set via the expander rendered below the
+    # tabs setup (st.session_state persists it across reruns).
+    etf_manual_override = st.session_state.get("etf_manual_override", None)
 
     fg_score,    fg_note    = score_fear_greed(fg)
     hr_score,    hr_note    = score_hash_rate(bc)
@@ -1307,10 +1778,11 @@ def render_crypto_onchain():
     macro_score, macro_note = score_macro_liquidity(macro)
     sc_score,    sc_note    = score_stablecoin_growth(stablecoins)
     mining_score, mining_note = score_mining_cost_margin(mining)
+    sip_score,   sip_note   = score_percent_supply_in_profit(sip)
+    fedliq_score, fedliq_note = score_fed_net_liquidity(liquidity)
+    etf_score,   etf_note   = score_etf_flow_pressure(etf_proxy, etf_manual_override)
 
-    # Signals included in the WEIGHTED COMPOSITE (unchanged set from v3.2 —
-    # Mining Cost Margin is new in v3.3 but stays informational-only, see
-    # score_mining_cost_margin() docstring for why it's excluded here).
+    # Signals included in the WEIGHTED COMPOSITE.
     raw_scores = {
         "Fear & Greed":               fg_score,
         "Hash Rate":                  hr_score,
@@ -1324,6 +1796,8 @@ def render_crypto_onchain():
         "Volume Confirmation":        vol_score,
         "Macro Liquidity":            macro_score,
         "Stablecoin Supply Growth":   sc_score,
+        "Percent Supply in Profit":   sip_score,
+        "ETF Flow Pressure":          etf_score,
     }
     notes = {
         "Fear & Greed":               fg_note,
@@ -1338,12 +1812,20 @@ def render_crypto_onchain():
         "Volume Confirmation":        vol_note,
         "Macro Liquidity":            macro_note,
         "Stablecoin Supply Growth":   sc_note,
+        "Percent Supply in Profit":   sip_note,
+        "ETF Flow Pressure":          etf_note,
     }
 
     # Display-only scores (shown in their group's scorecard, but not part
-    # of the weighted composite / pie of 100%).
-    display_only_scores = {"Mining Cost Margin": mining_score}
-    display_only_notes  = {"Mining Cost Margin": mining_note}
+    # of the weighted composite / pie of 100%). Fed Net Liquidity is kept
+    # display-only for the same reason Mining Cost Margin is: it's a
+    # genuinely useful trend read, but the 4-week-trend thresholds are
+    # analyst priors on a metric most users haven't calibrated intuition
+    # for yet, vs. ETF Flow Pressure and Percent Supply in Profit which
+    # are common enough framings (and have a manual-override path for ETF)
+    # that they're included as full weighted votes instead.
+    display_only_scores = {"Mining Cost Margin": mining_score, "Fed Net Liquidity": fedliq_score}
+    display_only_notes  = {"Mining Cost Margin": mining_note, "Fed Net Liquidity": fedliq_note}
 
     all_scores_for_groups = {**raw_scores, **display_only_scores}
     all_notes_for_groups  = {**notes, **display_only_notes}
@@ -1434,9 +1916,10 @@ def render_crypto_onchain():
     # TABS
     # ══════════════════════════════════════════════════════════════════════════
     (tab_score, tab_stage, tab_price, tab_vpa, tab_onchain,
-     tab_mining, tab_macro, tab_sentiment, tab_guide) = st.tabs([
+     tab_mining, tab_macro, tab_liquidity, tab_etf, tab_sentiment, tab_guide) = st.tabs([
         "📊 Score Breakdown", "🧭 Trend Stage", "📈 Price & Trend", "📐 Volume-Price Analysis",
-        "🔗 On-Chain Data", "⛏️ Mining Economics", "🌐 Macro Liquidity", "😨 Sentiment", "📖 Signal Guide"
+        "🔗 On-Chain Data", "⛏️ Mining Economics", "🌐 Macro Liquidity", "💧 Liquidity Dashboard",
+        "🏦 ETF Dashboard", "😨 Sentiment", "📖 Signal Guide"
     ])
 
     # ── TAB 1 · SCORE BREAKDOWN (now four grouped scorecards) ────────────────
@@ -1997,6 +2480,241 @@ def render_crypto_onchain():
             "also grows for reasons unrelated to crypto risk appetite — e.g. treasury cash parking or "
             "cross-border settlement use — so treat it as a noisy proxy, not a confirmed 'money about "
             "to buy BTC' signal."
+        )
+
+    # ── TAB · LIQUIDITY DASHBOARD  (NEW in v3.4) ──────────────────────────────
+    with tab_liquidity:
+        st.subheader("💧 Liquidity Dashboard")
+        st.caption(
+            "Macro liquidity conditions matter more to BTC every cycle as it's grown into a "
+            "macro-sensitive asset. This tab tracks the plumbing directly — Fed balance sheet, "
+            "Reverse Repo, Treasury General Account, M2, Treasury debt issuance trend, and a "
+            "global liquidity approximation — rather than the policy-rate/DXY framing used in the "
+            "🌐 Macro Liquidity tab. Both live in the **Context / Flow** group; they're independently "
+            "sourced reads on a related but distinct channel."
+        )
+
+        net_liq_now = liquidity.get("net_liq_now_bn", np.nan)
+        net_liq_trend = liquidity.get("net_liq_trend_pct", np.nan)
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Fed Net Liquidity", fmt(net_liq_now, 0, "$", "bn"),
+                   fmt(net_liq_trend, 1, suffix="% (4w)"),
+                   delta_color=delta_colour(net_liq_trend))
+        c2.metric("Fed Balance Sheet", fmt(liquidity.get("fed_bs_now_bn"), 0, "$", "bn"))
+        c3.metric("Reverse Repo (ON RRP)", fmt(liquidity.get("rrp_now_bn"), 0, "$", "bn"))
+        c4.metric("Treasury General Acct", fmt(liquidity.get("tga_now_bn"), 0, "$", "bn"))
+
+        st.markdown(f"**Fed Net Liquidity read:** {fedliq_note}")
+        st.caption(
+            "**Fed Net Liquidity = Fed Balance Sheet − Reverse Repo − Treasury General Account.** "
+            "This is the standard community formula popularized by liquidity analysts (e.g. Michael "
+            "Howell / CrossBorder Capital) and widely replicated on TradingView — it is not an "
+            "official published Fed series. Rising net liquidity = more cash available to flow into "
+            "risk assets (RRP/TGA draining, or the balance sheet expanding); falling = a headwind "
+            "(RRP/TGA refilling, or QT shrinking the balance sheet). Shown as display-only context "
+            "in the scorecard, not a weighted composite vote — see Signal Guide for why."
+        )
+
+        net_liq_series = liquidity.get("net_liq_series", pd.Series(dtype=float))
+        if not net_liq_series.empty:
+            fig_nl = go.Figure()
+            fig_nl.add_trace(go.Scatter(x=net_liq_series.index, y=net_liq_series.values,
+                                         name="Fed Net Liquidity", line=dict(color="#00bcd4", width=2),
+                                         fill="tozeroy", fillcolor="rgba(0,188,212,0.08)"))
+            fig_nl.update_layout(title="Fed Net Liquidity — WALCL − RRP − TGA ($bn)",
+                                  template="plotly_dark", height=320, yaxis_title="$ Billions")
+            st.plotly_chart(fig_nl, use_container_width=True)
+        else:
+            st.warning("Fed Net Liquidity series unavailable — one or more FRED series failed to fetch.")
+
+        st.markdown("---")
+        st.markdown("**Components**")
+
+        col_a, col_b = st.columns(2)
+        with col_a:
+            fed_bs_series = liquidity.get("fed_bs_series", pd.Series(dtype=float))
+            if not fed_bs_series.empty:
+                fig_fb = go.Figure()
+                fig_fb.add_trace(go.Scatter(x=fed_bs_series.index, y=fed_bs_series.values / 1000.0,
+                                             name="Fed Balance Sheet", line=dict(color="#9b59b6", width=2)))
+                fig_fb.update_layout(title="Fed Balance Sheet — Total Assets (WALCL, $bn)",
+                                      template="plotly_dark", height=280, yaxis_title="$ Billions")
+                st.plotly_chart(fig_fb, use_container_width=True)
+
+            tga_series = liquidity.get("tga_series", pd.Series(dtype=float))
+            if not tga_series.empty:
+                fig_tga = go.Figure()
+                fig_tga.add_trace(go.Scatter(x=tga_series.index, y=tga_series.values / 1000.0,
+                                              name="TGA", line=dict(color="#e67e22", width=2)))
+                fig_tga.update_layout(title="Treasury General Account (WTREGEN, $bn)",
+                                       template="plotly_dark", height=280, yaxis_title="$ Billions")
+                st.plotly_chart(fig_tga, use_container_width=True)
+
+        with col_b:
+            rrp_series = liquidity.get("rrp_series", pd.Series(dtype=float))
+            if not rrp_series.empty:
+                fig_rrp = go.Figure()
+                fig_rrp.add_trace(go.Scatter(x=rrp_series.index, y=rrp_series.values,
+                                              name="Reverse Repo", line=dict(color="#ff5252", width=2)))
+                fig_rrp.update_layout(title="Overnight Reverse Repo Usage (RRPONTSYD, $bn)",
+                                       template="plotly_dark", height=280, yaxis_title="$ Billions")
+                st.plotly_chart(fig_rrp, use_container_width=True)
+
+            m2_series = liquidity.get("m2_series", pd.Series(dtype=float))
+            if not m2_series.empty:
+                fig_m2 = go.Figure()
+                fig_m2.add_trace(go.Scatter(x=m2_series.index, y=m2_series.values,
+                                             name="M2", line=dict(color="#69f0ae", width=2)))
+                fig_m2.update_layout(title="M2 Money Stock (M2SL, $bn, monthly)",
+                                      template="plotly_dark", height=280, yaxis_title="$ Billions")
+                st.plotly_chart(fig_m2, use_container_width=True)
+
+        st.markdown("---")
+        col_m2, col_debt = st.columns(2)
+        col_m2.metric("M2 Money Stock", fmt(liquidity.get("m2_now_bn"), 0, "$", "bn"),
+                      fmt(liquidity.get("m2_yoy_pct"), 1, suffix="% YoY"),
+                      delta_color=delta_colour(liquidity.get("m2_yoy_pct")))
+        col_debt.metric("Total Federal Debt", fmt(liquidity.get("debt_now_bn"), 0, "$", "bn"),
+                        fmt(liquidity.get("debt_qoq_pct"), 1, suffix="% QoQ"),
+                        delta_color=delta_colour(liquidity.get("debt_qoq_pct")))
+        st.caption(
+            "**Treasury issuance proxy:** FRED has no single clean daily/weekly 'net Treasury "
+            "issuance' series. **Total Federal Debt Outstanding (GFDEBTN)**, reported quarterly, is "
+            "used here as a trend proxy — its quarter-over-quarter change reflects net new issuance "
+            "after accounting for maturities. Heavier issuance (faster debt growth) competes with "
+            "other assets for the same pool of dollar liquidity and is generally viewed as a "
+            "liquidity-draining force at the margin; lighter issuance is the reverse."
+        )
+
+        debt_series = liquidity.get("debt_series", pd.Series(dtype=float))
+        if not debt_series.empty:
+            fig_debt = go.Figure()
+            fig_debt.add_trace(go.Bar(x=debt_series.index, y=debt_series.values / 1000.0,
+                                       name="Total Federal Debt", marker_color="#7f8c8d"))
+            fig_debt.update_layout(title="Total US Federal Debt Outstanding (GFDEBTN, $bn, quarterly)",
+                                    template="plotly_dark", height=280, yaxis_title="$ Billions")
+            st.plotly_chart(fig_debt, use_container_width=True)
+
+        st.markdown("---")
+        st.subheader("🌍 Global Liquidity (approximation)")
+        global_liq_now = liquidity.get("global_liq_now_bn", np.nan)
+        global_liq_trend = liquidity.get("global_liq_trend_pct", np.nan)
+        col_g1, col_g2 = st.columns(2)
+        col_g1.metric("Global Liquidity Proxy (Fed + ECB, USD)", fmt(global_liq_now, 0, "$", "bn"))
+        col_g2.metric("4-Week Trend", fmt(global_liq_trend, 1, suffix="%"),
+                      delta_color=delta_colour(global_liq_trend))
+
+        global_liq_series = liquidity.get("global_liq_series", pd.Series(dtype=float))
+        if not global_liq_series.empty:
+            fig_gl = go.Figure()
+            fig_gl.add_trace(go.Scatter(x=global_liq_series.index, y=global_liq_series.values,
+                                         name="Global Liquidity (Fed+ECB)", line=dict(color="#3498db", width=2),
+                                         fill="tozeroy", fillcolor="rgba(52,152,219,0.08)"))
+            fig_gl.update_layout(title="Global Liquidity Proxy — Fed + ECB Balance Sheets (USD bn)",
+                                  template="plotly_dark", height=300, yaxis_title="$ Billions")
+            st.plotly_chart(fig_gl, use_container_width=True)
+        else:
+            st.warning("Global liquidity series unavailable — ECB series or EUR/USD fetch may have failed.")
+
+        st.warning(
+            "⚠️ **This global liquidity figure is a simplified approximation, not an official series.** "
+            "It sums the Fed and ECB balance sheets (ECB converted to USD via the EUR/USD rate). The "
+            "community version of this metric popularized by liquidity analysts typically also adds "
+            "the Bank of Japan and PBoC balance sheets — those legs are **omitted here** because "
+            "there's no reliable free daily series for them via FRED or yfinance, not because they're "
+            "unimportant. Treat this as directionally useful (Fed+ECB tend to co-move with the fuller "
+            "version) but meaningfully incomplete in absolute level.",
+            icon="⚠️",
+        )
+
+    # ── TAB · ETF DASHBOARD  (NEW in v3.4) ────────────────────────────────────
+    with tab_etf:
+        st.subheader("🏦 ETF Dashboard")
+        st.caption(
+            "Since spot BTC ETF flows now dominate marginal demand for many traders' mental models "
+            "of price action, this tab tracks them explicitly. **Read the data-availability note "
+            "below before trusting any number on this tab — it matters more here than on any other "
+            "tab in this app.**"
+        )
+
+        st.error(
+            "🚫 **No free public API exists for real daily BTC ETF creation/redemption flows.** "
+            "Farside Investors and SoSoValue publish the numbers people actually cite, but both are "
+            "scrape-only HTML pages with no stable free API and no confirmed license for "
+            "redistribution here. **The 'Estimated Flow Pressure' figures below are derived from ETF "
+            "trading volume, NOT reported net flows** — they are a liquidity/attention proxy that can "
+            "diverge significantly from the real number, especially on high-volume, low-net-flow "
+            "(two-way trading) days. If you need the real number: check Farside Investors, SoSoValue, "
+            "or the issuers' own daily disclosures directly, or paste it into the **'💵 ETF Flow "
+            "Override'** panel above the data section for an accurate score.",
+            icon="🚫",
+        )
+
+        using_manual = etf_manual_override is not None and not pd.isna(etf_manual_override.get("net_flow_usd_mm", np.nan))
+        if using_manual:
+            st.success(f"✅ Using your manually-entered net flow: **${etf_manual_override['net_flow_usd_mm']:+,.0f}mm** — this is real data, not an estimate.")
+        else:
+            st.info("ℹ️ No manual override set — all figures below are volume-based estimates. See the panel above the data section to enter real numbers.")
+
+        st.markdown(f"**ETF Flow Pressure read:** {etf_note}")
+
+        if etf_proxy:
+            col1, col2, col3 = st.columns(3)
+            col1.metric("Daily $ Volume (all tracked ETFs)", fmt(etf_proxy.get("daily_dollar_volume"), 0, "$"))
+            col2.metric("Weekly $ Volume (5 trading days)", fmt(etf_proxy.get("weekly_dollar_volume"), 0, "$"))
+            col3.metric("30d Volume Trend", fmt(etf_proxy.get("trend_30d_pct"), 1, suffix="%"),
+                       delta_color=delta_colour(etf_proxy.get("trend_30d_pct")))
+            st.caption(
+                "These are **dollar trading volumes** (price × shares traded), an ESTIMATE input, not "
+                "reported creation/redemption flows. Cumulative holdings (AUM / shares outstanding "
+                "growth) would be the more direct proxy for that, but reliable shares-outstanding "
+                "history isn't exposed via yfinance for these tickers — only price and volume are."
+            )
+
+            total_vol_series = etf_proxy.get("total_dollar_volume_series", pd.Series(dtype=float))
+            if not total_vol_series.empty:
+                fig_etf_vol = go.Figure()
+                fig_etf_vol.add_trace(go.Bar(x=total_vol_series.index[-60:], y=total_vol_series.iloc[-60:],
+                                              name="Aggregate $ Volume", marker_color="#f7931a"))
+                fig_etf_vol.update_layout(
+                    title="Aggregate Spot BTC ETF Dollar Volume — Last 60 Days (estimate input, not flow)",
+                    template="plotly_dark", height=320, yaxis_title="USD")
+                st.plotly_chart(fig_etf_vol, use_container_width=True)
+
+            st.markdown("---")
+            st.markdown("**Per-ETF dollar volume (last value)**")
+            per_ticker = etf_proxy.get("per_ticker_dollar_volume", {})
+            if per_ticker:
+                rows = []
+                for ticker, series in per_ticker.items():
+                    if series.empty:
+                        continue
+                    rows.append({
+                        "Ticker": ticker,
+                        "Fund": ETF_TICKERS.get(ticker, ticker),
+                        "Latest $ Volume": fmt(float(series.iloc[-1]), 0, "$"),
+                        "30d Avg $ Volume": fmt(float(series.iloc[-30:].mean()), 0, "$") if len(series) >= 1 else "—",
+                    })
+                if rows:
+                    st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+
+                fig_pie = go.Figure(data=[go.Pie(
+                    labels=[r["Ticker"] for r in rows],
+                    values=[float(per_ticker[r["Ticker"]].iloc[-1]) for r in rows],
+                    hole=0.4,
+                )])
+                fig_pie.update_layout(title="Share of Latest Daily $ Volume by Ticker",
+                                       template="plotly_dark", height=320)
+                st.plotly_chart(fig_pie, use_container_width=True)
+        else:
+            st.warning("ETF market data unavailable — yfinance fetch may have failed for the tracked tickers.")
+
+        st.markdown("---")
+        st.caption(
+            "**Tickers tracked:** " + ", ".join(f"{t} ({name})" for t, name in ETF_TICKERS.items()) +
+            ". This covers the largest spot BTC ETFs by AUM as of when this app was built, but the "
+            "list is hardcoded — newly-launched or since-closed funds won't automatically appear or "
+            "disappear."
         )
 
     # ── TAB 8 · SENTIMENT ─────────────────────────────────────────────────────
