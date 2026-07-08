@@ -1,17 +1,5 @@
 # excel_export_improved.py
 # Enhanced Excel Export Module with Multi-Ticker, Advanced Analytics, and Professional Formatting
-#
-# v2 improvements over the original:
-#   AESTHETICS  - hyperlinked Table of Contents / cover sheet, consistent Calibri styling,
-#                 thin borders around every table, icon-set arrows on return figures,
-#                 "back to contents" navigation link on every sheet, print-ready page setup
-#                 (fit-to-width, repeating header row, landscape) on every sheet.
-#   MORE INFO   - company profile snapshot (sector/industry/market cap/employees/website),
-#                 52-week range & beta, a "Growth of $100" rebased comparison chart,
-#                 moving averages (SMA20/50/200) and RSI(14) on the price sheet.
-#   MORE ABILITY- auto-generated plain-English "Key Takeaways" bullets per ticker,
-#                 correlation heatmap sheet for portfolio mode, RSI overbought/oversold
-#                 conditional formatting, rebased multi-ticker performance chart.
 
 import streamlit as st
 import pandas as pd
@@ -33,8 +21,7 @@ try:
     from openpyxl.chart.trendline import Trendline
     from openpyxl.utils import get_column_letter
     from openpyxl.worksheet.table import Table, TableStyleInfo
-    from openpyxl.formatting.rule import ColorScaleRule, CellIsRule, IconSetRule
-    from openpyxl.worksheet.hyperlink import Hyperlink
+    from openpyxl.formatting.rule import ColorScaleRule, CellIsRule
     OPENPYXL_AVAILABLE = True
 except ImportError:
     OPENPYXL_AVAILABLE = False
@@ -54,13 +41,10 @@ class ExcelExporter:
             'success': 'FF2ECC71',
             'light_gray': 'FFF2F2F2',
             'zebra': 'FFF7F9FC',
-            'dark_gray': 'FF7F7F7F',
-            'navy': 'FF1F3864',
-            'gold_text': 'FFB8860B',
+            'dark_gray': 'FF7F7F7F'
         }
         # Tab colors (hex, no leading 'FF' needed for sheet_properties.tabColor)
         self.tab_colors = {
-            'contents': '1F3864',
             'summary': '4472C4',
             'price': '2E75B6',
             'analysis': '70AD47',
@@ -69,11 +53,8 @@ class ExcelExporter:
             'dividends': '9DC3E6',
             'benchmark': 'C00000',
             'seasonality': '7030A0',
-            'correlation': '375623',
         }
-        self.base_font_name = 'Calibri'
         self._table_names_used = set()
-        self._sheet_registry: List[Dict] = []
 
     # ------------------------------------------------------------------
     # Generic styling helpers
@@ -89,13 +70,11 @@ class ExcelExporter:
     def _style_header_row(self, ws, row_idx, n_cols, color_key='secondary', start_col=1):
         """Bold white-on-color header, centered, for a single row."""
         fill = PatternFill(start_color=self.colors[color_key], end_color=self.colors[color_key], fill_type='solid')
-        thin = Side(style='thin', color='FFFFFFFF')
         for c in range(start_col, start_col + n_cols):
             cell = ws.cell(row=row_idx, column=c)
-            cell.font = Font(name=self.base_font_name, bold=True, color='FFFFFF')
+            cell.font = Font(bold=True, color='FFFFFF')
             cell.fill = fill
             cell.alignment = Alignment(horizontal='center', vertical='center')
-            cell.border = Border(bottom=Side(style='thin', color='FFFFFF'))
 
     def _apply_zebra(self, ws, first_row, last_row, first_col, last_col):
         """Alternate light-gray fill on data rows so wide tables are easier to scan."""
@@ -104,19 +83,6 @@ class ExcelExporter:
             if (r - first_row) % 2 == 1:
                 for c in range(first_col, last_col + 1):
                     ws.cell(row=r, column=c).fill = fill
-
-    def _add_thin_border_box(self, ws, first_row, last_row, first_col, last_col):
-        """Draw a light box border around a table so it reads as a discrete card, not
-        just text floating on the sheet."""
-        thin = Side(style='thin', color='FFD9D9D9')
-        for r in range(first_row, last_row + 1):
-            for c in range(first_col, last_col + 1):
-                cell = ws.cell(row=r, column=c)
-                top = thin if r == first_row else cell.border.top
-                bottom = thin if r == last_row else cell.border.bottom
-                left = thin if c == first_col else cell.border.left
-                right = thin if c == last_col else cell.border.right
-                cell.border = Border(top=top, bottom=bottom, left=left, right=right)
 
     def _unique_table_name(self, base):
         """Excel table names must be unique per workbook and contain no spaces/symbols."""
@@ -170,59 +136,9 @@ class ExcelExporter:
         )
         ws.conditional_formatting.add(cell_range, rule)
 
-    def _add_icon_set(self, ws, cell_range):
-        """3-arrow icon set (up/flat/down) — a quicker visual read than color alone,
-        especially useful for return columns scanned at a glance."""
-        try:
-            rule = IconSetRule(icon_style='3Arrows', type='percent', values=[0, 33, 67], showValue=True, reverse=False)
-            ws.conditional_formatting.add(cell_range, rule)
-        except Exception:
-            pass
-
     def _set_tab_color(self, ws, key):
         try:
             ws.sheet_properties.tabColor = self.tab_colors.get(key, '000000')
-        except Exception:
-            pass
-
-    def _apply_print_setup(self, ws, n_cols, orientation='landscape', repeat_row=3):
-        """Make every sheet sane to print/PDF: fit-to-width, repeated header row,
-        reasonable margins, and a footer with page numbers."""
-        try:
-            ws.page_setup.orientation = orientation
-            ws.page_setup.fitToWidth = 1
-            ws.page_setup.fitToHeight = 0
-            ws.sheet_properties.pageSetUpPr.fitToPage = True
-            ws.print_options.gridLines = False
-            ws.page_margins.left = 0.4
-            ws.page_margins.right = 0.4
-            ws.page_margins.top = 0.5
-            ws.page_margins.bottom = 0.5
-            ws.oddFooter.center.text = "Page &P of &N"
-            ws.oddFooter.right.text = "&D"
-            if repeat_row:
-                ws.print_title_rows = f"{repeat_row}:{repeat_row}"
-            ws.sheet_view.showGridLines = False
-        except Exception:
-            pass
-
-    def _register_sheet(self, sheet_name, title, tab_key, description=""):
-        """Track every sheet we build so the Contents page can list & hyperlink to it,
-        in the exact order sheets were created."""
-        self._sheet_registry.append({
-            'sheet_name': sheet_name, 'title': title,
-            'tab_key': tab_key, 'description': description
-        })
-
-    def _add_nav_link(self, ws, n_cols, row=1):
-        """Small '⌂ Contents' hyperlink tucked in the top-right corner of every sheet
-        so users can jump back to the index without hunting for the tab."""
-        try:
-            col = max(n_cols + 2, 2)
-            cell = ws.cell(row=row, column=col, value="⌂ Contents")
-            cell.hyperlink = "#'Contents'!A1"
-            cell.font = Font(name=self.base_font_name, size=9, color='FFFFFF', underline='single')
-            cell.alignment = Alignment(horizontal='center', vertical='center')
         except Exception:
             pass
 
@@ -237,8 +153,7 @@ class ExcelExporter:
                        metrics_data: Optional[Dict[str, pd.DataFrame]] = None,
                        dividends_data: Optional[Dict[str, Tuple[pd.Series, pd.Series]]] = None,
                        benchmark_data: Optional[Dict[str, Dict]] = None,
-                       seasonality_data: Optional[Dict[str, Dict[str, pd.DataFrame]]] = None,
-                       profile_data: Optional[Dict[str, Dict]] = None) -> BytesIO:
+                       seasonality_data: Optional[Dict[str, Dict[str, pd.DataFrame]]] = None) -> BytesIO:
         """
         Create formatted Excel workbook with multiple sheets.
 
@@ -251,15 +166,12 @@ class ExcelExporter:
             dividends_data: {ticker: (dividends_series, splits_series)}
             benchmark_data: {ticker: {'benchmark_ticker': str, 'rel_df': df, 'stats': dict}}
             seasonality_data: {ticker: {'monthly': df, 'weekday': df}}
-            profile_data: {ticker: {field: value}} company profile snapshot
 
         Returns:
             BytesIO buffer with Excel file
         """
         output = BytesIO()
         section_errors = []
-        self._sheet_registry = []
-        self._table_names_used = set()
 
         # Each sheet is built inside its own try/except so a failure in one sheet
         # (e.g. a chart error) never discards every other sheet.
@@ -267,7 +179,7 @@ class ExcelExporter:
             # 1. Summary Sheet
             if metadata:
                 try:
-                    self._create_summary_sheet(writer, metadata, ticker_data, profile_data)
+                    self._create_summary_sheet(writer, metadata, ticker_data)
                 except Exception as e:
                     section_errors.append(f"Summary sheet: {e}")
 
@@ -289,16 +201,9 @@ class ExcelExporter:
             # 4. Comparison Sheet (if multiple tickers)
             if len(ticker_data) > 1:
                 try:
-                    self._create_comparison_sheet(writer, ticker_data, metadata, include_charts)
+                    self._create_comparison_sheet(writer, ticker_data, metadata)
                 except Exception as e:
                     section_errors.append(f"Comparison sheet: {e}")
-
-            # 4b. Correlation heatmap (if multiple tickers)
-            if len(ticker_data) > 1:
-                try:
-                    self._create_correlation_sheet(writer, ticker_data)
-                except Exception as e:
-                    section_errors.append(f"Correlation sheet: {e}")
 
             # 5. Earnings vs Metrics Correlation Sheets
             if metrics_data:
@@ -335,23 +240,6 @@ class ExcelExporter:
                             self._create_seasonality_sheet(writer, ticker, sdata, include_charts)
                         except Exception as e:
                             section_errors.append(f"{ticker} seasonality sheet: {e}")
-
-            # 9. Table of Contents / cover — built last since it needs the full registry,
-            #    then moved to the front of the tab order.
-            try:
-                self._create_toc_sheet(writer, metadata, ticker_data)
-            except Exception as e:
-                section_errors.append(f"Contents sheet: {e}")
-
-            try:
-                wb = writer.book
-                if 'Contents' in wb.sheetnames:
-                    toc_ws = wb['Contents']
-                    wb._sheets.remove(toc_ws)
-                    wb._sheets.insert(0, toc_ws)
-                    wb.active = 0
-            except Exception:
-                pass
 
         if section_errors:
             for err in section_errors:
@@ -391,81 +279,9 @@ class ExcelExporter:
         return output
 
     # ------------------------------------------------------------------
-    # Table of Contents / cover sheet
-    # ------------------------------------------------------------------
-    def _create_toc_sheet(self, writer, metadata, ticker_data):
-        """A hyperlinked index/cover page — the first thing a user sees when they open
-        the file. Gives the report a professional 'front matter' feel and makes the
-        (potentially 15-20 sheet) workbook navigable instead of a wall of tabs."""
-        wb = writer.book
-        ws = wb.create_sheet('Contents')
-        self._set_tab_color(ws, 'contents')
-        ws.sheet_view.showGridLines = False
-
-        ws.merge_cells('A1:F3')
-        ws['A1'] = "📊 Historical Stock Data Report"
-        ws['A1'].font = Font(name=self.base_font_name, size=22, bold=True, color='FFFFFF')
-        ws['A1'].fill = PatternFill(start_color=self.colors['navy'], end_color=self.colors['navy'], fill_type='solid')
-        ws['A1'].alignment = Alignment(horizontal='center', vertical='center')
-
-        meta = metadata or {}
-        subtitle = (f"{', '.join(meta.get('tickers', ticker_data.keys()))}  •  "
-                    f"{meta.get('start_date', '')} → {meta.get('end_date', '')}  •  "
-                    f"{meta.get('frequency', 'Daily')} data")
-        ws.merge_cells('A4:F4')
-        ws['A4'] = subtitle
-        ws['A4'].font = Font(name=self.base_font_name, size=11, italic=True, color=self.colors['dark_gray'][2:])
-        ws['A4'].alignment = Alignment(horizontal='center', vertical='center')
-
-        ws.merge_cells('A5:F5')
-        ws['A5'] = f"Generated {meta.get('export_date', datetime.now().strftime('%Y-%m-%d %H:%M:%S'))}"
-        ws['A5'].font = Font(name=self.base_font_name, size=9, color='808080')
-        ws['A5'].alignment = Alignment(horizontal='center', vertical='center')
-
-        header_row = 7
-        headers = ['#', 'Sheet', 'Contents', '']
-        for i, h in enumerate(headers):
-            c = ws.cell(row=header_row, column=i + 1, value=h)
-        self._style_header_row(ws, header_row, 4, color_key='primary')
-
-        row = header_row + 1
-        for i, entry in enumerate(self._sheet_registry, 1):
-            ws.cell(row=row, column=1, value=i).alignment = Alignment(horizontal='center')
-            link_cell = ws.cell(row=row, column=2, value=entry['title'])
-            link_cell.hyperlink = f"#'{entry['sheet_name']}'!A1"
-            link_cell.font = Font(name=self.base_font_name, color='1155CC', underline='single', bold=True)
-            ws.cell(row=row, column=3, value=entry.get('description', ''))
-            swatch = ws.cell(row=row, column=4)
-            swatch.fill = PatternFill(start_color=self.tab_colors.get(entry['tab_key'], '000000'),
-                                       end_color=self.tab_colors.get(entry['tab_key'], '000000'), fill_type='solid')
-            row += 1
-
-        last_row = row - 1
-        if last_row >= header_row + 1:
-            self._apply_zebra(ws, header_row + 1, last_row, 1, 4)
-            self._add_thin_border_box(ws, header_row, last_row, 1, 4)
-
-        ws.column_dimensions['A'].width = 5
-        ws.column_dimensions['B'].width = 32
-        ws.column_dimensions['C'].width = 60
-        ws.column_dimensions['D'].width = 4
-        for extra in 'EF':
-            ws.column_dimensions[extra].width = 14
-
-        footer_row = last_row + 3
-        ws.merge_cells(f'A{footer_row}:F{footer_row}')
-        ws[f'A{footer_row}'] = ("Data sourced via Yahoo Finance (yfinance). For informational purposes only — "
-                                 "not investment advice.")
-        ws[f'A{footer_row}'].font = Font(name=self.base_font_name, size=8, italic=True, color='999999')
-        ws[f'A{footer_row}'].alignment = Alignment(horizontal='center')
-
-        ws.freeze_panes = 'A8'
-        self._apply_print_setup(ws, 4, orientation='portrait', repeat_row=None)
-
-    # ------------------------------------------------------------------
     # Individual sheets
     # ------------------------------------------------------------------
-    def _create_summary_sheet(self, writer, metadata, ticker_data, profile_data=None):
+    def _create_summary_sheet(self, writer, metadata, ticker_data):
         """Create formatted summary sheet"""
         summary_data = {
             'Parameter': [
@@ -497,27 +313,23 @@ class ExcelExporter:
 
         ws = writer.sheets['Summary']
         self._set_tab_color(ws, 'summary')
-        ws.sheet_view.showGridLines = False
 
         ws['A1'] = 'Historical Stock Data Export'
-        ws['A1'].font = Font(name=self.base_font_name, size=16, bold=True, color='FFFFFF')
+        ws['A1'].font = Font(size=16, bold=True, color='FFFFFF')
         ws['A1'].fill = PatternFill(start_color=self.colors['primary'], end_color=self.colors['primary'], fill_type='solid')
-        ws.merge_cells('A1:D1')
-        self._add_nav_link(ws, 3)
+        ws.merge_cells('A1:B1')
 
         ws.column_dimensions['A'].width = 30
         ws.column_dimensions['B'].width = 50
 
         self._style_header_row(ws, 3, 2)
         self._center_all_cells(ws)
-        self._add_thin_border_box(ws, 3, 3 + len(summary_data['Parameter']), 1, 2)
         ws.freeze_panes = 'A4'
 
-        cursor = len(summary_data['Parameter']) + 6
-
         if ticker_data:
-            ws[f'A{cursor}'] = '📈 Quick Performance Summary'
-            ws[f'A{cursor}'].font = Font(name=self.base_font_name, size=12, bold=True, color=self.colors['navy'][2:])
+            row_offset = len(summary_data['Parameter']) + 6
+            ws[f'A{row_offset}'] = 'Quick Performance Summary'
+            ws[f'A{row_offset}'].font = Font(size=12, bold=True)
 
             perf_data = []
             for ticker, df in ticker_data.items():
@@ -535,8 +347,8 @@ class ExcelExporter:
 
             if perf_data:
                 df_perf = pd.DataFrame(perf_data)
-                perf_start_row = cursor + 2
-                df_perf.to_excel(writer, sheet_name='Summary', index=False, startrow=cursor + 1)
+                perf_start_row = row_offset + 2
+                df_perf.to_excel(writer, sheet_name='Summary', index=False, startrow=row_offset + 1)
                 self._style_header_row(ws, perf_start_row, len(df_perf.columns))
                 first_data_row = perf_start_row + 1
                 last_data_row = perf_start_row + len(df_perf)
@@ -550,143 +362,29 @@ class ExcelExporter:
                         cell.value = cell.value / 100
                 self._apply_zebra(ws, first_data_row, last_data_row, 1, 4)
                 self._add_color_scale(ws, f'D{first_data_row}:D{last_data_row}')
-                self._add_icon_set(ws, f'D{first_data_row}:D{last_data_row}')
-                self._add_thin_border_box(ws, perf_start_row, last_data_row, 1, 4)
-                cursor = last_data_row + 3
-            else:
-                cursor += 2
 
-        # ---- Company profile snapshot (sector / industry / market cap / etc.) ----
-        if profile_data:
-            ws[f'A{cursor}'] = '🏢 Company Snapshot'
-            ws[f'A{cursor}'].font = Font(name=self.base_font_name, size=12, bold=True, color=self.colors['navy'][2:])
-            prof_header_row = cursor + 1
-            fields = ['Ticker', 'Company', 'Sector', 'Industry', 'Market Cap', 'Employees',
-                      '52W Low', '52W High', 'Beta', 'Div. Yield']
-            for i, f in enumerate(fields):
-                ws.cell(row=prof_header_row, column=i + 1, value=f)
-            self._style_header_row(ws, prof_header_row, len(fields))
-
-            r = prof_header_row + 1
-            for ticker, prof in profile_data.items():
-                if not prof:
-                    continue
-                ws.cell(row=r, column=1, value=ticker)
-                ws.cell(row=r, column=2, value=prof.get('Company Name') or 'N/A')
-                ws.cell(row=r, column=3, value=prof.get('Sector') or 'N/A')
-                ws.cell(row=r, column=4, value=prof.get('Industry') or 'N/A')
-                mc = prof.get('Market Cap')
-                mc_cell = ws.cell(row=r, column=5, value=mc if mc else None)
-                if mc:
-                    mc_cell.number_format = '$#,##0,,"M"' if mc < 1e9 else '$#,##0,,,"B"'
-                emp = prof.get('Employees')
-                ws.cell(row=r, column=6, value=int(emp) if emp else None).number_format = '#,##0'
-                low52 = prof.get('52W Low')
-                ws.cell(row=r, column=7, value=round(low52, 2) if low52 else None).number_format = '$#,##0.00'
-                high52 = prof.get('52W High')
-                ws.cell(row=r, column=8, value=round(high52, 2) if high52 else None).number_format = '$#,##0.00'
-                beta = prof.get('Beta')
-                ws.cell(row=r, column=9, value=round(beta, 2) if beta else None).number_format = '0.00'
-                dy = prof.get('Dividend Yield')
-                dy_cell = ws.cell(row=r, column=10, value=(dy / 100 if dy and dy > 1 else dy))
-                dy_cell.number_format = '0.00%'
-                r += 1
-            last_prof_row = r - 1
-            if last_prof_row >= prof_header_row + 1:
-                self._apply_zebra(ws, prof_header_row + 1, last_prof_row, 1, len(fields))
-                self._add_thin_border_box(ws, prof_header_row, last_prof_row, 1, len(fields))
-                self._autosize_columns(ws, len(fields), start_row=prof_header_row, end_row=last_prof_row, min_width=10, max_width=28)
-                cursor = last_prof_row + 3
-
-        # ---- Auto-generated plain-English takeaways ----
-        if ticker_data:
-            ws[f'A{cursor}'] = '💡 Key Takeaways'
-            ws[f'A{cursor}'].font = Font(name=self.base_font_name, size=12, bold=True, color=self.colors['navy'][2:])
-            bullets = self._generate_key_takeaways(ticker_data)
-            for i, bullet in enumerate(bullets):
-                ws.cell(row=cursor + 1 + i, column=1, value=f"•  {bullet}")
-                ws.merge_cells(start_row=cursor + 1 + i, start_column=1, end_row=cursor + 1 + i, end_column=6)
-                ws.cell(row=cursor + 1 + i, column=1).font = Font(name=self.base_font_name, size=10)
-                ws.cell(row=cursor + 1 + i, column=1).alignment = Alignment(horizontal='left')
-
-        self._apply_print_setup(ws, 4, orientation='portrait', repeat_row=None)
-
-    def _generate_key_takeaways(self, ticker_data: Dict[str, pd.DataFrame]) -> List[str]:
-        """Turn the numbers into a few plain-English sentences — best/worst performer,
-        volatility flag, and any ticker sitting near its period high/low. Purely
-        descriptive statements about the fetched data, not investment advice."""
-        bullets = []
-        perf = {}
-        for ticker, df in ticker_data.items():
-            if len(df) > 1 and 'Close' in df.columns:
-                ret = (df['Close'].iloc[-1] / df['Close'].iloc[0] - 1) * 100
-                vol = df['Close'].pct_change().std() * np.sqrt(252) * 100
-                perf[ticker] = (ret, vol)
-
-        if len(perf) > 1:
-            best = max(perf.items(), key=lambda x: x[1][0])
-            worst = min(perf.items(), key=lambda x: x[1][0])
-            bullets.append(f"{best[0]} was the top performer over the period ({best[1][0]:+.1f}%), "
-                            f"while {worst[0]} lagged the group ({worst[1][0]:+.1f}%).")
-        elif len(perf) == 1:
-            t, (ret, vol) = next(iter(perf.items()))
-            direction = "gained" if ret >= 0 else "declined"
-            bullets.append(f"{t} {direction} {abs(ret):.1f}% over the selected period with "
-                            f"annualized volatility of {vol:.1f}%.")
-
-        for ticker, (ret, vol) in perf.items():
-            if vol > 45:
-                bullets.append(f"{ticker} shows elevated volatility (~{vol:.0f}% annualized) — "
-                                f"expect wider day-to-day price swings than a typical large-cap stock.")
-
-        for ticker, df in ticker_data.items():
-            if 'Close' in df.columns and len(df) > 5:
-                current = df['Close'].iloc[-1]
-                high = df['Close'].max()
-                low = df['Close'].min()
-                if high > 0 and (current / high) >= 0.98:
-                    bullets.append(f"{ticker} is trading within 2% of its period high (${high:,.2f}).")
-                elif low > 0 and (current / low) <= 1.02:
-                    bullets.append(f"{ticker} is trading within 2% of its period low (${low:,.2f}).")
-
-        if not bullets:
-            bullets.append("Not enough price history in the selected window to summarize trends.")
-        return bullets[:8]
+        self._center_all_cells(ws)
 
     def _create_price_sheet(self, writer, ticker, df, include_charts=True):
-        """Create formatted price data sheet with daily-return column, moving averages,
-        RSI, native table, color scale, and an overlay chart."""
+        """Create formatted price data sheet with daily-return column, table, color scale, and chart"""
         df_out = df.copy()
+        # Add a Daily Return column so the sheet itself shows day-to-day performance
         price_col = 'Adj Close' if 'Adj Close' in df_out.columns else ('Close' if 'Close' in df_out.columns else None)
         if price_col:
             df_out['Daily Return'] = df_out[price_col].pct_change()
-            df_out['SMA 20'] = df_out[price_col].rolling(20).mean()
-            df_out['SMA 50'] = df_out[price_col].rolling(50).mean()
-            # RSI (14) — classic Wilder smoothing
-            delta = df_out[price_col].diff()
-            gain = delta.clip(lower=0)
-            loss = -delta.clip(upper=0)
-            avg_gain = gain.ewm(alpha=1/14, min_periods=14, adjust=False).mean()
-            avg_loss = loss.ewm(alpha=1/14, min_periods=14, adjust=False).mean()
-            rs = avg_gain / avg_loss.replace(0, np.nan)
-            df_out['RSI (14)'] = 100 - (100 / (1 + rs))
 
         df_out.to_excel(writer, sheet_name=f"{ticker}_Prices"[:31], startrow=2)
         sheet_name = f"{ticker}_Prices"[:31]
         ws = writer.sheets[sheet_name]
         self._set_tab_color(ws, 'price')
-        ws.sheet_view.showGridLines = False
-        self._register_sheet(sheet_name, f"{ticker} — Price Data", 'price',
-                              f"Daily OHLCV, moving averages, RSI, and return column ({len(df_out)} rows)")
 
         all_cols = ['Date'] + list(df_out.columns)
         n_cols = len(all_cols)
 
         ws['A1'] = f'{ticker} Historical Price Data'
-        ws['A1'].font = Font(name=self.base_font_name, size=14, bold=True, color='FFFFFF')
+        ws['A1'].font = Font(size=14, bold=True, color='FFFFFF')
         ws['A1'].fill = PatternFill(start_color=self.colors['primary'], end_color=self.colors['primary'], fill_type='solid')
-        ws.merge_cells(f'A1:{get_column_letter(max(n_cols - 2, 1))}1')
-        self._add_nav_link(ws, n_cols)
+        ws.merge_cells(f'A1:{get_column_letter(n_cols)}1')
 
         for idx, col in enumerate(all_cols):
             ws.cell(row=3, column=idx + 1, value=col)
@@ -696,7 +394,7 @@ class ExcelExporter:
 
         # Real numeric formats (not pre-formatted strings) so Excel can sort/filter/chart natively
         col_index = {name: i + 1 for i, name in enumerate(all_cols)}
-        for money_col in ['Open', 'High', 'Low', 'Close', 'Adj Close', 'SMA 20', 'SMA 50']:
+        for money_col in ['Open', 'High', 'Low', 'Close', 'Adj Close']:
             if money_col in col_index:
                 self._format_numeric_column(ws, col_index[money_col], first_data_row, last_data_row, '$#,##0.00')
         if 'Volume' in col_index:
@@ -705,12 +403,6 @@ class ExcelExporter:
             self._format_numeric_column(ws, col_index['Daily Return'], first_data_row, last_data_row, '+0.00%;-0.00%')
             ret_col_letter = get_column_letter(col_index['Daily Return'])
             self._add_color_scale(ws, f'{ret_col_letter}{first_data_row}:{ret_col_letter}{last_data_row}')
-        if 'RSI (14)' in col_index:
-            self._format_numeric_column(ws, col_index['RSI (14)'], first_data_row, last_data_row, '0.0')
-            rsi_letter = get_column_letter(col_index['RSI (14)'])
-            # Red = overbought (>70), green = oversold (<30) — flagged relative to neutral 50
-            self._add_color_scale(ws, f'{rsi_letter}{first_data_row}:{rsi_letter}{last_data_row}',
-                                   colors=('63BE7B', 'FFEB84', 'F8696B'))
 
         # Date column formatting/width
         ws.column_dimensions['A'].width = 14
@@ -720,7 +412,6 @@ class ExcelExporter:
 
         self._autosize_columns(ws, n_cols - 1, start_row=3, end_row=min(last_data_row, 103), start_col=2, min_width=10, max_width=16)
         self._apply_zebra(ws, first_data_row, last_data_row, 1, n_cols)
-        self._add_thin_border_box(ws, 3, last_data_row, 1, n_cols)
 
         # Native Excel Table for filter/sort dropdowns (only when row count fits comfortably)
         if len(df_out) <= 100000:
@@ -728,76 +419,45 @@ class ExcelExporter:
             self._add_excel_table(ws, table_ref, f"{ticker}_Prices")
 
         # Summary statistics below the table
-        stats_last_row = last_data_row
         if 'Close' in df_out.columns:
-            stats_row = last_data_row + 3
-            ws[f'A{stats_row}'] = 'Summary Statistics'
-            ws[f'A{stats_row}'].font = Font(name=self.base_font_name, bold=True, size=11)
-
-            current_rsi = df_out['RSI (14)'].iloc[-1] if 'RSI (14)' in df_out.columns else np.nan
-            rsi_note = ('Overbought (>70)' if pd.notna(current_rsi) and current_rsi > 70 else
-                        'Oversold (<30)' if pd.notna(current_rsi) and current_rsi < 30 else
-                        'Neutral' if pd.notna(current_rsi) else 'N/A')
+            last_row = last_data_row + 3
+            ws[f'A{last_row}'] = 'Summary Statistics'
+            ws[f'A{last_row}'].font = Font(bold=True, size=11)
 
             stats = {
                 'Current Price': f"${df_out['Close'].iloc[-1]:.2f}",
                 'Period High': f"${df_out['High'].max():.2f}" if 'High' in df_out.columns else 'N/A',
                 'Period Low': f"${df_out['Low'].min():.2f}" if 'Low' in df_out.columns else 'N/A',
                 'Average Volume': f"{int(df_out['Volume'].mean()):,}" if 'Volume' in df_out.columns else 'N/A',
-                'Total Return': f"{((df_out['Close'].iloc[-1] / df_out['Close'].iloc[0] - 1) * 100):+.2f}%" if len(df_out) > 1 else 'N/A',
-                'Current RSI (14)': f"{current_rsi:.1f} — {rsi_note}" if pd.notna(current_rsi) else 'N/A',
+                'Total Return': f"{((df_out['Close'].iloc[-1] / df_out['Close'].iloc[0] - 1) * 100):+.2f}%" if len(df_out) > 1 else 'N/A'
             }
 
             for idx, (key, value) in enumerate(stats.items()):
-                ws[f'A{stats_row + idx + 1}'] = key
-                ws[f'B{stats_row + idx + 1}'] = value
-                ws[f'A{stats_row + idx + 1}'].font = Font(name=self.base_font_name, bold=True)
-            stats_last_row = stats_row + len(stats)
-            self._add_thin_border_box(ws, stats_row, stats_last_row, 1, 2)
+                ws[f'A{last_row + idx + 1}'] = key
+                ws[f'B{last_row + idx + 1}'] = value
+                ws[f'A{last_row + idx + 1}'].font = Font(bold=True)
 
         if include_charts and len(df_out) > 1 and 'Close' in col_index:
             try:
                 chart = LineChart()
-                chart.title = f"{ticker} Price with Moving Averages"
+                chart.title = f"{ticker} Price Chart"
                 chart.style = 13
                 chart.y_axis.title = 'Price ($)'
                 chart.x_axis.title = 'Date'
                 chart.height = 10
-                chart.width = 22
+                chart.width = 20
 
                 close_col = col_index['Close']
-                max_chart_row = min(last_data_row, 503)
-                dates = Reference(ws, min_col=1, min_row=4, max_row=max_chart_row)
+                data = Reference(ws, min_col=close_col, min_row=3, max_row=min(last_data_row, 503))
+                dates = Reference(ws, min_col=1, min_row=4, max_row=min(last_data_row, 503))
 
-                data = Reference(ws, min_col=close_col, min_row=3, max_row=max_chart_row)
                 chart.add_data(data, titles_from_data=True)
-
-                for ma_col in ['SMA 20', 'SMA 50']:
-                    if ma_col in col_index:
-                        ma_ref = Reference(ws, min_col=col_index[ma_col], min_row=3, max_row=max_chart_row)
-                        chart.add_data(ma_ref, titles_from_data=True)
-
                 chart.set_categories(dates)
-                ws.add_chart(chart, f'{get_column_letter(n_cols + 2)}5')
-
-                if 'RSI (14)' in col_index:
-                    rsi_chart = LineChart()
-                    rsi_chart.title = f"{ticker} RSI (14)"
-                    rsi_chart.style = 13
-                    rsi_chart.y_axis.title = 'RSI'
-                    rsi_chart.y_axis.scaling.min = 0
-                    rsi_chart.y_axis.scaling.max = 100
-                    rsi_chart.height = 7
-                    rsi_chart.width = 22
-                    rsi_ref = Reference(ws, min_col=col_index['RSI (14)'], min_row=3, max_row=max_chart_row)
-                    rsi_chart.add_data(rsi_ref, titles_from_data=True)
-                    rsi_chart.set_categories(dates)
-                    ws.add_chart(rsi_chart, f'{get_column_letter(n_cols + 2)}26')
+                ws.add_chart(chart, 'H5')
             except Exception:
                 pass
 
         ws.freeze_panes = 'B4'
-        self._apply_print_setup(ws, n_cols)
 
     def _create_analysis_sheet(self, writer, sheet_name, df):
         """Create formatted analysis sheet (Metric/Value style tables)"""
@@ -806,17 +466,13 @@ class ExcelExporter:
 
         ws = writer.sheets[clean_name]
         self._set_tab_color(ws, 'analysis')
-        ws.sheet_view.showGridLines = False
-        self._register_sheet(clean_name, sheet_name.replace('_', ' ').title(), 'analysis',
-                              "Analytics and calculated metrics")
 
         n_cols = len(df.columns) + 1  # +1 for index column
 
         ws['A1'] = sheet_name.replace('_', ' ').title()
-        ws['A1'].font = Font(name=self.base_font_name, size=14, bold=True, color='FFFFFF')
+        ws['A1'].font = Font(size=14, bold=True, color='FFFFFF')
         ws['A1'].fill = PatternFill(start_color=self.colors['accent'], end_color=self.colors['accent'], fill_type='solid')
-        ws.merge_cells(f'A1:{get_column_letter(max(n_cols - 1, 1))}1')
-        self._add_nav_link(ws, n_cols)
+        ws.merge_cells(f'A1:{get_column_letter(n_cols)}1')
 
         for idx, col in enumerate(['Index'] + list(df.columns)):
             cell = ws.cell(row=3, column=idx + 1)
@@ -825,14 +481,11 @@ class ExcelExporter:
 
         self._autosize_columns(ws, n_cols, start_row=1, end_row=ws.max_row, min_width=10, max_width=25)
         self._apply_zebra(ws, 4, ws.max_row, 1, n_cols)
-        self._add_thin_border_box(ws, 3, ws.max_row, 1, n_cols)
         self._center_all_cells(ws)
         ws.freeze_panes = 'B4'
-        self._apply_print_setup(ws, n_cols)
 
-    def _create_comparison_sheet(self, writer, ticker_data, metadata, include_charts=True):
-        """Create comparison sheet for multiple tickers, plus a 'Growth of $100' rebased
-        performance chart so tickers with very different price levels can be compared visually."""
+    def _create_comparison_sheet(self, writer, ticker_data, metadata):
+        """Create comparison sheet for multiple tickers"""
         comparison_data = []
 
         for ticker, df in ticker_data.items():
@@ -866,16 +519,12 @@ class ExcelExporter:
 
         ws = writer.sheets['Comparison']
         self._set_tab_color(ws, 'comparison')
-        ws.sheet_view.showGridLines = False
-        self._register_sheet('Comparison', 'Multi-Ticker Comparison', 'comparison',
-                              "Side-by-side risk/return stats plus a rebased 'Growth of $100' chart")
 
         n_cols = len(df_comp.columns)
         ws['A1'] = 'Multi-Ticker Comparison Analysis'
-        ws['A1'].font = Font(name=self.base_font_name, size=14, bold=True, color='FFFFFF')
+        ws['A1'].font = Font(size=14, bold=True, color='FFFFFF')
         ws['A1'].fill = PatternFill(start_color=self.colors['primary'], end_color=self.colors['primary'], fill_type='solid')
-        ws.merge_cells(f'A1:{get_column_letter(max(n_cols - 2, 1))}1')
-        self._add_nav_link(ws, n_cols)
+        ws.merge_cells(f'A1:{get_column_letter(n_cols)}1')
 
         for idx, col in enumerate(df_comp.columns):
             ws.cell(row=3, column=idx + 1, value=col)
@@ -900,103 +549,17 @@ class ExcelExporter:
 
         self._apply_zebra(ws, first_row, last_row, 1, n_cols)
         self._autosize_columns(ws, n_cols, start_row=3, end_row=last_row, min_width=10, max_width=20)
-        self._add_thin_border_box(ws, 3, last_row, 1, n_cols)
 
-        # Color scale + icon set on the metrics that matter most for at-a-glance ranking
+        # Color scale on the metrics that matter most for at-a-glance ranking
         ret_letter = get_column_letter(col_index['Total Return (%)'])
         sharpe_letter = get_column_letter(col_index['Sharpe Ratio'])
         self._add_color_scale(ws, f'{ret_letter}{first_row}:{ret_letter}{last_row}')
-        self._add_icon_set(ws, f'{ret_letter}{first_row}:{ret_letter}{last_row}')
         self._add_color_scale(ws, f'{sharpe_letter}{first_row}:{sharpe_letter}{last_row}')
 
         table_ref = f"A3:{get_column_letter(n_cols)}{last_row}"
         self._add_excel_table(ws, table_ref, "Comparison")
 
-        # ---- Growth of $100 rebased chart ----
-        chart_data_start_row = last_row + 4
-        try:
-            rebased = pd.DataFrame({t: (df['Close'] / df['Close'].iloc[0]) * 100
-                                     for t, df in ticker_data.items() if 'Close' in df.columns and len(df) > 1})
-            rebased = rebased.dropna(how='all')
-            if not rebased.empty:
-                ws[f'A{chart_data_start_row - 1}'] = 'Growth of $100 (rebased, for charting below)'
-                ws[f'A{chart_data_start_row - 1}'].font = Font(name=self.base_font_name, bold=True, size=11)
-
-                rebased_reset = rebased.reset_index()
-                rebased_reset.columns = ['Date'] + list(rebased.columns)
-                for j, col in enumerate(rebased_reset.columns):
-                    ws.cell(row=chart_data_start_row, column=j + 1, value=col)
-                self._style_header_row(ws, chart_data_start_row, len(rebased_reset.columns))
-                for i, row_vals in enumerate(rebased_reset.itertuples(index=False), 1):
-                    r = chart_data_start_row + i
-                    ws.cell(row=r, column=1, value=row_vals[0].strftime('%Y-%m-%d') if hasattr(row_vals[0], 'strftime') else str(row_vals[0]))
-                    for j, val in enumerate(row_vals[1:], 2):
-                        cell = ws.cell(row=r, column=j, value=round(float(val), 2) if pd.notna(val) else None)
-                        cell.number_format = '#,##0.00'
-                data_last_row = chart_data_start_row + len(rebased_reset)
-
-                if include_charts:
-                    growth_chart = LineChart()
-                    growth_chart.title = "Growth of $100 — Rebased Performance"
-                    growth_chart.style = 12
-                    growth_chart.y_axis.title = 'Value of $100 invested'
-                    growth_chart.x_axis.title = 'Date'
-                    growth_chart.height = 11
-                    growth_chart.width = 24
-                    cats = Reference(ws, min_col=1, min_row=chart_data_start_row + 1, max_row=data_last_row)
-                    for j in range(2, len(rebased_reset.columns) + 1):
-                        data_ref = Reference(ws, min_col=j, min_row=chart_data_start_row, max_row=data_last_row)
-                        growth_chart.add_data(data_ref, titles_from_data=True)
-                    growth_chart.set_categories(cats)
-                    ws.add_chart(growth_chart, f'{get_column_letter(n_cols + 2)}5')
-        except Exception:
-            pass
-
         ws.freeze_panes = 'B4'
-        self._apply_print_setup(ws, n_cols)
-
-    def _create_correlation_sheet(self, writer, ticker_data):
-        """Correlation matrix of daily returns across tickers, with a color-scale heatmap —
-        useful for spotting diversification (or lack of it) at a glance."""
-        closes = pd.DataFrame({t: df['Close'] for t, df in ticker_data.items() if 'Close' in df.columns})
-        if closes.shape[1] < 2:
-            return
-        corr = closes.pct_change().corr().round(3)
-
-        sheet_name = 'Correlation'
-        corr.to_excel(writer, sheet_name=sheet_name, startrow=2)
-        ws = writer.sheets[sheet_name]
-        self._set_tab_color(ws, 'correlation')
-        ws.sheet_view.showGridLines = False
-        self._register_sheet(sheet_name, 'Return Correlation Matrix', 'correlation',
-                              "Pairwise correlation of daily returns across all tickers")
-
-        n_cols = len(corr.columns) + 1
-        ws['A1'] = 'Daily Return Correlation Matrix'
-        ws['A1'].font = Font(name=self.base_font_name, size=14, bold=True, color='FFFFFF')
-        ws['A1'].fill = PatternFill(start_color=self.colors['secondary'], end_color=self.colors['secondary'], fill_type='solid')
-        ws.merge_cells(f'A1:{get_column_letter(max(n_cols - 1, 1))}1')
-        self._add_nav_link(ws, n_cols)
-
-        self._style_header_row(ws, 3, n_cols)
-        first_row, last_row = 4, 3 + len(corr)
-        for c in range(2, n_cols + 1):
-            self._format_numeric_column(ws, c, first_row, last_row, '0.00')
-            col_letter = get_column_letter(c)
-            self._add_color_scale(ws, f'{col_letter}{first_row}:{col_letter}{last_row}',
-                                   colors=('F8696B', 'FFFFFF', '63BE7B'))
-        self._autosize_columns(ws, n_cols, start_row=3, end_row=last_row, min_width=10, max_width=14)
-        self._add_thin_border_box(ws, 3, last_row, 1, n_cols)
-        self._center_all_cells(ws)
-
-        note_row = last_row + 2
-        ws[f'A{note_row}'] = ("Values near +1 move together (little diversification benefit); "
-                               "values near 0 or negative move independently or inversely.")
-        ws[f'A{note_row}'].font = Font(name=self.base_font_name, size=9, italic=True, color='808080')
-        ws.merge_cells(f'A{note_row}:{get_column_letter(n_cols)}{note_row}')
-
-        ws.freeze_panes = 'B4'
-        self._apply_print_setup(ws, n_cols)
 
     def _create_metrics_correlation_sheet(self, writer, ticker, metrics_df):
         """
@@ -1010,24 +573,20 @@ class ExcelExporter:
 
         ws = writer.sheets[sheet_name]
         self._set_tab_color(ws, 'metrics')
-        ws.sheet_view.showGridLines = False
-        self._register_sheet(sheet_name, f"{ticker} — Earnings vs Metrics", 'metrics',
-                              "Quarterly earnings vs fundamentals, R² ranking, analyst estimates")
 
         n_rows = len(metrics_df)
         n_cols = len(metrics_df.columns)
 
         ws['A1'] = f'{ticker} — Earnings vs Fundamental Metrics'
-        ws['A1'].font = Font(name=self.base_font_name, size=14, bold=True, color='FFFFFF')
+        ws['A1'].font = Font(size=14, bold=True, color='FFFFFF')
         ws['A1'].fill = PatternFill(start_color=self.colors['accent'], end_color=self.colors['accent'], fill_type='solid')
-        ws.merge_cells(f'A1:{get_column_letter(max(n_cols, 1))}1')
-        self._add_nav_link(ws, n_cols + 1)
+        ws.merge_cells(f'A1:{get_column_letter(n_cols + 1)}1')
 
         self._style_header_row(ws, 3, n_cols + 1)
 
         earnings_row_num = 4
         for c in range(1, n_cols + 2):
-            ws.cell(row=earnings_row_num, column=c).font = Font(name=self.base_font_name, bold=True)
+            ws.cell(row=earnings_row_num, column=c).font = Font(bold=True)
             ws.cell(row=earnings_row_num, column=c).fill = PatternFill(
                 start_color=self.colors['light_gray'], end_color=self.colors['light_gray'], fill_type='solid')
 
@@ -1040,7 +599,6 @@ class ExcelExporter:
                     cell.alignment = Alignment(horizontal='right', vertical='center')
 
         self._apply_zebra(ws, earnings_row_num + 1, earnings_row_num + n_rows - 1, 1, n_cols + 1)
-        self._add_thin_border_box(ws, 3, earnings_row_num + n_rows - 1, 1, n_cols + 1)
 
         ws.column_dimensions['A'].width = 30
         for c in range(2, n_cols + 2):
@@ -1061,7 +619,7 @@ class ExcelExporter:
 
         summary_start_row = n_rows + 6
         ws[f'A{summary_start_row}'] = 'Correlation Strength with Earnings (R²)'
-        ws[f'A{summary_start_row}'].font = Font(name=self.base_font_name, bold=True, size=12)
+        ws[f'A{summary_start_row}'].font = Font(bold=True, size=12)
 
         ws[f'A{summary_start_row + 1}'] = 'Metric'
         ws[f'B{summary_start_row + 1}'] = 'R²'
@@ -1079,7 +637,6 @@ class ExcelExporter:
         if len(ranked) > 0:
             self._add_color_scale(ws, f'B{r2_first_row}:B{r2_last_row}')
             self._apply_zebra(ws, r2_first_row, r2_last_row, 1, 2)
-            self._add_thin_border_box(ws, summary_start_row + 1, r2_last_row, 1, 2)
             self._add_excel_table(ws, f'A{summary_start_row + 1}:B{r2_last_row}', f"{ticker}_R2")
 
         # ---- Analyst estimates / current snapshot ----
@@ -1087,7 +644,7 @@ class ExcelExporter:
         if snapshot:
             snap_row = r2_last_row + 3 if len(ranked) > 0 else summary_start_row + 3
             ws[f'A{snap_row}'] = 'Current Snapshot & Analyst Estimates'
-            ws[f'A{snap_row}'].font = Font(name=self.base_font_name, bold=True, size=12)
+            ws[f'A{snap_row}'].font = Font(bold=True, size=12)
             ws[f'A{snap_row + 1}'] = 'Metric'
             ws[f'B{snap_row + 1}'] = 'Value'
             self._style_header_row(ws, snap_row + 1, 2)
@@ -1096,7 +653,6 @@ class ExcelExporter:
                 ws[f'A{row}'] = key
                 ws[f'B{row}'] = val if val is not None else 'N/A'
             self._apply_zebra(ws, snap_row + 2, snap_row + 1 + len(snapshot), 1, 2)
-            self._add_thin_border_box(ws, snap_row + 1, snap_row + 1 + len(snapshot), 1, 2)
 
         # ---- Scatter chart + linear trendline per metric ----
         chart_col = get_column_letter(n_cols + 3)
@@ -1132,7 +688,6 @@ class ExcelExporter:
                 pass
 
         ws.freeze_panes = 'B4'
-        self._apply_print_setup(ws, n_cols + 1)
 
     def _create_dividends_sheet(self, writer, ticker, divs, splits):
         """Dividend payment history and stock-split history for a ticker."""
@@ -1150,15 +705,11 @@ class ExcelExporter:
         div_df.to_excel(writer, sheet_name=sheet_name, index=False, startrow=2)
         ws = writer.sheets[sheet_name]
         self._set_tab_color(ws, 'dividends')
-        ws.sheet_view.showGridLines = False
-        self._register_sheet(sheet_name, f"{ticker} — Dividends & Splits", 'dividends',
-                              "Full dividend payment and stock-split history")
 
         ws['A1'] = f'{ticker} — Dividends & Stock Splits'
-        ws['A1'].font = Font(name=self.base_font_name, size=14, bold=True, color='FFFFFF')
+        ws['A1'].font = Font(size=14, bold=True, color='FFFFFF')
         ws['A1'].fill = PatternFill(start_color=self.colors['primary'], end_color=self.colors['primary'], fill_type='solid')
         ws.merge_cells('A1:B1')
-        self._add_nav_link(ws, 4)
 
         self._style_header_row(ws, 3, 2)
 
@@ -1167,7 +718,6 @@ class ExcelExporter:
             first_row, last_row = 4, 3 + n_divs
             self._format_numeric_column(ws, 2, first_row, last_row, '$#,##0.0000')
             self._apply_zebra(ws, first_row, last_row, 1, 2)
-            self._add_thin_border_box(ws, 3, last_row, 1, 2)
             self._add_excel_table(ws, f'A3:B{last_row}', f"{ticker}_Dividends")
 
             total_paid = float(div_df['Dividend'].sum())
@@ -1177,8 +727,8 @@ class ExcelExporter:
             ws[f'B{summary_row}'] = round(total_paid, 4)
             ws[f'A{summary_row + 1}'] = 'Approx. Trailing 4-Payment Total'
             ws[f'B{summary_row + 1}'] = round(annualized_recent, 4)
-            ws[f'A{summary_row}'].font = Font(name=self.base_font_name, bold=True)
-            ws[f'A{summary_row + 1}'].font = Font(name=self.base_font_name, bold=True)
+            ws[f'A{summary_row}'].font = Font(bold=True)
+            ws[f'A{summary_row + 1}'].font = Font(bold=True)
         else:
             ws['A4'] = 'No dividend history found for this ticker.'
 
@@ -1193,7 +743,6 @@ class ExcelExporter:
                 ws.cell(row=r, column=split_start_col, value=row['Date'])
                 ws.cell(row=r, column=split_start_col + 1, value=float(row['Split Ratio']))
             self._apply_zebra(ws, 4, 3 + len(split_df), split_start_col, split_start_col + 1)
-            self._add_thin_border_box(ws, 3, 3 + len(split_df), split_start_col, split_start_col + 1)
         else:
             ws.cell(row=4, column=split_start_col, value='No stock splits in this period.')
 
@@ -1202,7 +751,6 @@ class ExcelExporter:
         ws.column_dimensions['D'].width = 14
         ws.column_dimensions['E'].width = 14
         ws.freeze_panes = 'A4'
-        self._apply_print_setup(ws, 5, orientation='portrait')
 
     def _create_benchmark_sheet(self, writer, ticker, bdata, include_charts=True):
         """
@@ -1218,16 +766,12 @@ class ExcelExporter:
         rel_df.to_excel(writer, sheet_name=sheet_name, startrow=2)
         ws = writer.sheets[sheet_name]
         self._set_tab_color(ws, 'benchmark')
-        ws.sheet_view.showGridLines = False
-        self._register_sheet(sheet_name, f"{ticker} vs {benchmark_ticker}", 'benchmark',
-                              "Relative performance, rolling beta/correlation, alpha & tracking error")
 
         n_cols = len(rel_df.columns) + 1
         ws['A1'] = f'{ticker} vs {benchmark_ticker} — Relative Performance'
-        ws['A1'].font = Font(name=self.base_font_name, size=14, bold=True, color='FFFFFF')
+        ws['A1'].font = Font(size=14, bold=True, color='FFFFFF')
         ws['A1'].fill = PatternFill(start_color=self.colors['danger'], end_color=self.colors['danger'], fill_type='solid')
-        ws.merge_cells(f'A1:{get_column_letter(max(n_cols - 1, 1))}1')
-        self._add_nav_link(ws, n_cols)
+        ws.merge_cells(f'A1:{get_column_letter(n_cols)}1')
 
         for idx, col in enumerate(['Date'] + list(rel_df.columns)):
             ws.cell(row=3, column=idx + 1, value=col)
@@ -1247,20 +791,18 @@ class ExcelExporter:
 
         self._autosize_columns(ws, n_cols - 1, start_row=3, end_row=last_row, start_col=2, min_width=12, max_width=20)
         self._apply_zebra(ws, first_row, last_row, 1, n_cols)
-        self._add_thin_border_box(ws, 3, last_row, 1, n_cols)
 
         # Summary stats block
         summary_row = last_row + 3
         ws[f'A{summary_row}'] = f'Summary vs {benchmark_ticker}'
-        ws[f'A{summary_row}'].font = Font(name=self.base_font_name, bold=True, size=12)
+        ws[f'A{summary_row}'].font = Font(bold=True, size=12)
         labels = ['Beta', 'Alpha (Annualized %)', 'Correlation', 'Tracking Error (Annualized %)', 'Information Ratio']
         for i, label in enumerate(labels):
             row = summary_row + 1 + i
             ws[f'A{row}'] = label
-            ws[f'A{row}'].font = Font(name=self.base_font_name, bold=True)
+            ws[f'A{row}'].font = Font(bold=True)
             val = stats.get(label)
             ws[f'B{row}'] = round(float(val), 4) if val is not None and pd.notna(val) else 'N/A'
-        self._add_thin_border_box(ws, summary_row, summary_row + len(labels), 1, 2)
 
         if include_charts and 'Cumulative Relative Return' in rel_df.columns:
             try:
@@ -1282,7 +824,6 @@ class ExcelExporter:
                 pass
 
         ws.freeze_panes = 'B4'
-        self._apply_print_setup(ws, n_cols)
 
     def _create_seasonality_sheet(self, writer, ticker, sdata, include_charts=True):
         """Average return by calendar month and by day-of-week, with bar charts."""
@@ -1301,15 +842,11 @@ class ExcelExporter:
             ws = writer.sheets[sheet_name]
 
         self._set_tab_color(ws, 'seasonality')
-        ws.sheet_view.showGridLines = False
-        self._register_sheet(sheet_name, f"{ticker} — Seasonality", 'seasonality',
-                              "Average return by calendar month and day of week")
 
         ws['A1'] = f'{ticker} — Seasonality Analysis'
-        ws['A1'].font = Font(name=self.base_font_name, size=14, bold=True, color='FFFFFF')
+        ws['A1'].font = Font(size=14, bold=True, color='FFFFFF')
         ws['A1'].fill = PatternFill(start_color=self.colors['secondary'], end_color=self.colors['secondary'], fill_type='solid')
         ws.merge_cells('A1:C1')
-        self._add_nav_link(ws, 4)
 
         if monthly is not None and not monthly.empty:
             n_cols_m = len(monthly.columns) + 1
@@ -1318,7 +855,6 @@ class ExcelExporter:
             for c in range(2, n_cols_m + 1):
                 self._format_numeric_column(ws, c, m_first, m_last, '+0.00%;-0.00%')
             self._apply_zebra(ws, m_first, m_last, 1, n_cols_m)
-            self._add_thin_border_box(ws, start_row + 1, m_last, 1, n_cols_m)
             self._autosize_columns(ws, n_cols_m, start_row=start_row + 1, end_row=m_last, min_width=10, max_width=20)
 
             if include_charts:
@@ -1343,7 +879,7 @@ class ExcelExporter:
 
         if weekday is not None and not weekday.empty:
             ws[f'A{next_block_row}'] = 'Average Return by Day of Week'
-            ws[f'A{next_block_row}'].font = Font(name=self.base_font_name, bold=True, size=12)
+            ws[f'A{next_block_row}'].font = Font(bold=True, size=12)
             wd_header_row = next_block_row + 1
             ws.cell(row=wd_header_row, column=1, value='Day')
             ws.cell(row=wd_header_row, column=2, value='Avg Return')
@@ -1356,7 +892,6 @@ class ExcelExporter:
                 cell.number_format = '+0.00%;-0.00%'
             wd_last = wd_first + len(weekday) - 1
             self._apply_zebra(ws, wd_first, wd_last, 1, 2)
-            self._add_thin_border_box(ws, wd_header_row, wd_last, 1, 2)
 
             if include_charts:
                 try:
@@ -1374,7 +909,6 @@ class ExcelExporter:
                     pass
 
         ws.freeze_panes = 'A4'
-        self._apply_print_setup(ws, 4, orientation='portrait')
 
     def _calculate_max_drawdown(self, prices):
         """Calculate maximum drawdown"""
@@ -1565,39 +1099,6 @@ def fetch_dividends_splits(ticker: str) -> Tuple[pd.Series, pd.Series]:
         return pd.Series(dtype=float), pd.Series(dtype=float)
 
 
-@st.cache_data(ttl=3600, show_spinner=False)
-def fetch_company_profile(ticker: str) -> Optional[Dict]:
-    """
-    Fetch a lightweight company-profile snapshot for the Summary sheet:
-    sector, industry, market cap, employee count, 52-week range, beta, and
-    dividend yield. Pure function (no st.* calls) so it is safe to cache.
-    Returns None for instruments without a standard company profile
-    (ETFs, indices, forex, futures, most crypto).
-    """
-    try:
-        info = yf.Ticker(ticker).info or {}
-        if not info or info.get('quoteType') not in (None, 'EQUITY'):
-            # Still allow through if it has at least sector/industry info
-            if not info.get('sector') and not info.get('longName'):
-                return None
-        return {
-            'Company Name': info.get('longName') or info.get('shortName'),
-            'Sector': info.get('sector'),
-            'Industry': info.get('industry'),
-            'Exchange': info.get('exchange'),
-            'Currency': info.get('currency'),
-            'Market Cap': info.get('marketCap'),
-            'Employees': info.get('fullTimeEmployees'),
-            'Website': info.get('website'),
-            '52W High': info.get('fiftyTwoWeekHigh'),
-            '52W Low': info.get('fiftyTwoWeekLow'),
-            'Beta': info.get('beta'),
-            'Dividend Yield': info.get('dividendYield'),
-        }
-    except Exception:
-        return None
-
-
 @st.cache_data(ttl=1800, show_spinner=False)
 def fetch_benchmark_prices(benchmark_ticker: str, start_date, end_date, interval: str) -> Optional[pd.DataFrame]:
     """Fetch benchmark OHLCV data (e.g. SPY) for relative-performance comparison."""
@@ -1756,10 +1257,6 @@ def calculate_advanced_analytics(df: pd.DataFrame, ticker: str) -> Dict[str, pd.
         high = df['High'].max() if 'High' in df.columns else df['Close'].max()
         low = df['Low'].min() if 'Low' in df.columns else df['Close'].min()
 
-        # VaR (95%, historical) — a common "how bad could a normal day get" risk metric
-        var_95 = np.percentile(returns.dropna(), 5) * 100 if len(returns.dropna()) > 0 else 0
-
-        returns_data['Metric'].append('Value at Risk (95%, daily)')
         returns_data['Value'] = [
             f"{total_return:.2f}%", f"{ann_return:.2f}%", f"{volatility:.2f}%",
             f"{sharpe:.2f}", f"{sortino:.2f}", f"{drawdown:.2f}%", f"{calmar:.2f}",
@@ -1767,8 +1264,7 @@ def calculate_advanced_analytics(df: pd.DataFrame, ticker: str) -> Dict[str, pd.
             f"{positive_days} ({win_rate:.1f}%)", f"{returns.mean() * 100:.4f}%",
             f"{avg_positive:.4f}%", f"{avg_negative:.4f}%", f"{win_rate:.2f}%", f"{profit_factor:.2f}",
             f"${current:.2f}", f"${high:.2f}", f"${low:.2f}",
-            f"{((current - high) / high * 100):.2f}%", f"{((current - low) / low * 100):.2f}%",
-            f"{var_95:.2f}%"
+            f"{((current - high) / high * 100):.2f}%", f"{((current - low) / low * 100):.2f}%"
         ]
 
         analytics['Returns_Analysis'] = pd.DataFrame(returns_data)
@@ -1936,9 +1432,7 @@ def _download_ticker(ticker, start_date, end_date, interval):
 def render_excel_export() -> None:
     """
     Enhanced Excel Export module with multi-ticker support, advanced analytics,
-    dividends/splits history, benchmark comparison, seasonality analysis, a
-    hyperlinked table of contents, company profile snapshot, and moving
-    averages/RSI on the price chart.
+    dividends/splits history, benchmark comparison, and seasonality analysis.
     """
     st.title("📥 Advanced Excel Export")
     st.markdown("Export historical stock data with professional formatting and comprehensive analytics")
@@ -2006,10 +1500,6 @@ def render_excel_export() -> None:
         include_seasonality = st.checkbox(
             "📆 Seasonality Analysis", value=True,
             help="Add a tab per ticker showing average return by calendar month and day of week."
-        )
-        include_profile = st.checkbox(
-            "🏢 Company Profile Snapshot", value=True,
-            help="Add sector, industry, market cap, employees, 52-week range, and beta to the Summary sheet."
         )
 
     st.divider()
@@ -2086,7 +1576,6 @@ def render_excel_export() -> None:
             dividends_data = {}
             benchmark_data = {}
             seasonality_data = {}
-            profile_data = {}
             failed_tickers = []
             failed_metrics_tickers = []
             total_records = 0
@@ -2116,7 +1605,7 @@ def render_excel_export() -> None:
                 if benchmark_df is None:
                     st.warning(f"⚠️ Could not fetch benchmark data for {benchmark_ticker} — skipping relative-performance tabs.")
 
-            # ── Per-ticker analytics / metrics / dividends / benchmark / seasonality / profile ──
+            # ── Per-ticker analytics / metrics / dividends / benchmark / seasonality ──
             for idx, ticker in enumerate(ticker_data.keys()):
                 df = ticker_data[ticker]
                 status_text.info(f"📊 Analyzing {ticker}... ({idx + 1}/{len(ticker_data)})")
@@ -2136,11 +1625,6 @@ def render_excel_export() -> None:
                 if include_dividends:
                     divs, splits = fetch_dividends_splits(ticker)
                     dividends_data[ticker] = (divs, splits)
-
-                if include_profile:
-                    prof = fetch_company_profile(ticker)
-                    if prof:
-                        profile_data[ticker] = prof
 
                 if compare_benchmark and benchmark_df is not None:
                     bres = calculate_benchmark_analytics(ticker, df, benchmark_ticker, benchmark_df)
@@ -2201,11 +1685,6 @@ def render_excel_export() -> None:
                            f"{len(ticker_data)} ticker(s) → sheets named **TICKER_vs_{benchmark_ticker}**.")
             elif benchmark_df is not None:
                 st.warning("📈 Benchmark data was fetched but no ticker had enough overlapping history to compare.")
-
-        if include_profile and profile_data:
-            st.divider()
-            st.success(f"🏢 Company profile snapshot added for {len(profile_data)} of {len(ticker_data)} ticker(s) "
-                       f"→ see the **Summary** sheet.")
 
         if export_mode == "Portfolio Analysis" and len(ticker_data) > 1:
             st.divider()
@@ -2321,7 +1800,6 @@ def render_excel_export() -> None:
                 dividends_data=dividends_data if include_dividends else None,
                 benchmark_data=benchmark_data if compare_benchmark else None,
                 seasonality_data=seasonality_data if include_seasonality else None,
-                profile_data=profile_data if include_profile else None,
             )
 
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
@@ -2341,9 +1819,8 @@ def render_excel_export() -> None:
         n_div_sheets = len(dividends_data) if include_dividends else 0
         n_bench_sheets = len(benchmark_data) if compare_benchmark else 0
         n_season_sheets = len(seasonality_data) if include_seasonality else 0
-        n_corr_sheets = 1 if len(ticker_data) > 1 else 0
-        total_sheets = (2 + len(ticker_data) + len(analysis_data) + (1 if len(ticker_data) > 1 else 0)
-                        + n_metrics_sheets + n_div_sheets + n_bench_sheets + n_season_sheets + n_corr_sheets)
+        total_sheets = (1 + len(ticker_data) + len(analysis_data) + (1 if len(ticker_data) > 1 else 0)
+                        + n_metrics_sheets + n_div_sheets + n_bench_sheets + n_season_sheets)
 
         st.success("✅ Excel file ready for download!")
 
@@ -2356,21 +1833,18 @@ def render_excel_export() -> None:
             st.metric("📊 Charts", "Yes" if include_charts and OPENPYXL_AVAILABLE else "No")
 
         with st.expander("📑 Detailed Sheet Breakdown"):
-            sheets_list = ["1. **Contents** - Hyperlinked index / cover page",
-                            "2. **Summary** - Export metadata, performance overview, company snapshot & key takeaways"]
+            sheets_list = ["1. **Summary** - Export metadata and quick performance overview"]
 
-            for i, ticker in enumerate(ticker_data.keys(), 3):
-                sheets_list.append(f"{i}. **{ticker}_Prices** - Historical price data with SMA/RSI, {len(ticker_data[ticker])} records")
+            for i, ticker in enumerate(ticker_data.keys(), 2):
+                sheets_list.append(f"{i}. **{ticker}_Prices** - Historical price data with {len(ticker_data[ticker])} records")
 
-            sheet_num = len(ticker_data) + 3
+            sheet_num = len(ticker_data) + 2
             for sheet_name in analysis_data.keys():
                 sheets_list.append(f"{sheet_num}. **{sheet_name}** - Analytics and calculations")
                 sheet_num += 1
 
             if len(ticker_data) > 1:
-                sheets_list.append(f"{sheet_num}. **Comparison** - Multi-ticker comparison + Growth of $100 chart")
-                sheet_num += 1
-                sheets_list.append(f"{sheet_num}. **Correlation** - Return correlation heatmap")
+                sheets_list.append(f"{sheet_num}. **Comparison** - Multi-ticker performance comparison")
                 sheet_num += 1
 
             if include_earnings_metrics:
