@@ -40,6 +40,14 @@ class ExcelExporter:
             'dark_gray': 'FF7F7F7F'
         }
     
+    def _center_all_cells(self, ws):
+        """Center-align (horizontal + vertical) every populated cell in the sheet.
+        Preserves each cell's existing font/fill/number_format — only alignment changes."""
+        for row in ws.iter_rows(min_row=1, max_row=ws.max_row, min_col=1, max_col=ws.max_column):
+            for cell in row:
+                if cell.value is not None:
+                    cell.alignment = Alignment(horizontal='center', vertical='center')
+    
     def create_workbook(self, 
                        ticker_data: Dict[str, pd.DataFrame], 
                        analysis_data: Optional[Dict[str, pd.DataFrame]] = None,
@@ -197,6 +205,9 @@ class ExcelExporter:
             cell.fill = PatternFill(start_color=self.colors['secondary'], end_color=self.colors['secondary'], fill_type='solid')
             cell.alignment = Alignment(horizontal='center', vertical='center')
         
+        # Center-align all data
+        self._center_all_cells(ws)
+        
         # Freeze panes
         ws.freeze_panes = 'A4'
         
@@ -223,6 +234,9 @@ class ExcelExporter:
             if perf_data:
                 df_perf = pd.DataFrame(perf_data)
                 df_perf.to_excel(writer, sheet_name='Summary', index=False, startrow=row_offset + 1)
+        
+        # Center-align all data (re-run to also cover the performance table added above)
+        self._center_all_cells(ws)
     
     def _create_price_sheet(self, writer, ticker, df, include_charts=True):
         """Create formatted price data sheet with optional chart"""
@@ -257,6 +271,10 @@ class ExcelExporter:
                     except:
                         pass
             ws.column_dimensions[get_column_letter(idx + 1)].width = min(max_length + 2, 15)
+        
+        # Date column (A) needs more room than the general 15-char cap above —
+        # widen it explicitly so full dates are readable
+        ws.column_dimensions['A'].width = 20
         
         # Add conditional formatting for returns column if exists
         if 'Adj Close' in df.columns:
@@ -304,10 +322,11 @@ class ExcelExporter:
             except Exception as e:
                 pass  # Silently skip chart if error
         
+        # Center-align all data (covers price table + summary statistics block above)
+        self._center_all_cells(ws)
+        
         # Freeze panes
         ws.freeze_panes = 'B4'
-    
-    def _create_analysis_sheet(self, writer, sheet_name, df):
         """Create formatted analysis sheet"""
         clean_name = sheet_name[:31]
         df.to_excel(writer, sheet_name=clean_name, startrow=2)
@@ -346,6 +365,9 @@ class ExcelExporter:
             
             # Set column width with limits
             ws.column_dimensions[column_letter].width = min(max_length + 2, 25)
+        
+        # Center-align all data
+        self._center_all_cells(ws)
         
         # Freeze panes
         ws.freeze_panes = 'B4'
@@ -427,6 +449,9 @@ class ExcelExporter:
                         pass
                 
                 ws.column_dimensions[column_letter].width = min(max_length + 2, 20)
+            
+            # Center-align all data
+            self._center_all_cells(ws)
             
             # Freeze panes
             ws.freeze_panes = 'B4'
@@ -542,6 +567,9 @@ class ExcelExporter:
                 chart_row_cursor += 17
             except Exception:
                 pass  # Skip chart silently if a metric can't be charted
+        
+        # Center-align all data
+        self._center_all_cells(ws)
         
         ws.freeze_panes = 'B4'
     
