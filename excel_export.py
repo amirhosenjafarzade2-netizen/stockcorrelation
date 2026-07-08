@@ -16,7 +16,8 @@ try:
     import openpyxl
     from openpyxl.styles import Font, PatternFill, Border, Side, Alignment
     from openpyxl.utils.dataframe import dataframe_to_rows
-    from openpyxl.chart import LineChart, BarChart, Reference
+    from openpyxl.chart import LineChart, BarChart, ScatterChart, Series, Reference
+    from openpyxl.chart.trendline import Trendline
     from openpyxl.utils import get_column_letter
     OPENPYXL_AVAILABLE = True
 except ImportError:
@@ -43,7 +44,8 @@ class ExcelExporter:
                        ticker_data: Dict[str, pd.DataFrame], 
                        analysis_data: Optional[Dict[str, pd.DataFrame]] = None,
                        metadata: Optional[Dict] = None,
-                       include_charts: bool = True) -> BytesIO:
+                       include_charts: bool = True,
+                       metrics_data: Optional[Dict[str, pd.DataFrame]] = None) -> BytesIO:
         """
         Create formatted Excel workbook with multiple sheets
         
@@ -52,6 +54,7 @@ class ExcelExporter:
             analysis_data: {sheet_name: analysis_df}
             metadata: Export metadata (tickers, dates, etc.)
             include_charts: Whether to include charts
+            metrics_data: {ticker: metrics_df} earnings vs fundamentals table per ticker
         
         Returns:
             BytesIO buffer with Excel file
@@ -76,6 +79,12 @@ class ExcelExporter:
                 # 4. Comparison Sheet (if multiple tickers)
                 if len(ticker_data) > 1:
                     self._create_comparison_sheet(writer, ticker_data, metadata)
+                
+                # 5. Earnings vs Metrics Correlation Sheets
+                if metrics_data:
+                    for ticker, mdf in metrics_data.items():
+                        if mdf is not None and not mdf.empty:
+                            self._create_metrics_correlation_sheet(writer, ticker, mdf)
             
             output.seek(0)
             return output
@@ -401,12 +410,273 @@ class ExcelExporter:
             # Freeze panes
             ws.freeze_panes = 'B4'
     
+    def _create_metrics_correlation_sheet(self, writer, ticker, metrics_df):
+        """
+        Create a sheet with earnings as the first row and fundamental metrics
+        (P/E, Forward P/E, PEG, EV/EBITDA, ROE, FCF, etc.) as subsequent rows,
+        one column per fiscal quarter. Adds a scatter chart with a linear
+        trendline (and R^2 / equation displayed) for each metric vs earnings,
+        plus a summary table ranking metrics by R^2 correlation strength.
+        """
+        sheet_name = f"{ticker}_Earnings_Metrics"[:31]
+        metrics_df.to_excel(writer, sheet_name=sheet_name, startrow=2)
+        
+        ws = writer.sheets[sheet_name]
+        
+        n_rows = len(metrics_df)          # number of metric rows (incl. earnings)
+        n_cols = len(metrics_df.columns)  # number of quarters
+        
+        # Title
+        ws['A1'] = f'{ticker} — Earnings vs Fundamental Metrics'
+        ws['A1'].font = Font(size=14, bold=True, color='FFFFFF')
+        ws['A1'].fill = PatternFill(start_color=self.colors['accent'], end_color=self.colors['accent'], fill_type='solid')
+        ws.merge_cells(f'A1:{get_column_letter(n_cols + 1)}1')
+        
+        # Header row (quarter labels)
+        for idx in range(n_cols + 1):
+            cell = ws.cell(row=3, column=idx + 1)
+            cell.font = Font(bold=True, color='FFFFFF')
+            cell.fill = PatternFill(start_color=self.colors['secondary'], end_color=self.colors['secondary'], fill_type='solid')
+            cell.alignment = Alignment(horizontal='center', vertical='center')
+        
+        # Highlight the Earnings row (first data row = row 4)
+        earnings_row_num = 4
+        for c in range(1, n_cols + 2):
+            ws.cell(row=earnings_row_num, column=c).font = Font(bold=True)
+            ws.cell(row=earnings_row_num, column=c).fill = PatternFill(
+                start_color=self.colors['light_gray'], end_color=self.colors['light_gray'], fill_type='solid')
+        
+        # Column widths
+        ws.column_dimensions['A'].width = 30
+        for c in range(2, n_cols + 2):
+            ws.column_dimensions[get_column_letter(c)].width = 14
+        
+        # ---- Compute R^2 of each metric vs earnings (row 0) ----
+        earnings_values = pd.to_numeric(metrics_df.iloc[0], errors='coerce').values.astype(float)
+        r_squared = {}
+        
+        for i in range(1, n_rows):
+            metric_name = metrics_df.index[i]
+            metric_values = pd.to_numeric(metrics_df.iloc[i], errors='coerce').values.astype(float)
+            mask = ~np.isnan(earnings_values) & ~np.isnan(metric_values)
+            if mask.sum() >= 3 and np.std(metric_values[mask]) > 0 and np.std(earnings_values[mask]) > 0:
+                r = np.corrcoef(earnings_values[mask], metric_values[mask])[0, 1]
+                r_squared[metric_name] = r ** 2
+            else:
+                r_squared[metric_name] = np.nan
+        
+        # ---- R^2 ranking summary table ----
+        summary_start_row = n_rows + 6
+        ws[f'A{summary_start_row}'] = 'Correlation Strength with Earnings (R²)'
+        ws[f'A{summary_start_row}'].font = Font(bold=True, size=12)
+        
+        ws[f'A{summary_start_row + 1}'] = 'Metric'
+        ws[f'B{summary_start_row + 1}'] = 'R²'
+        ws[f'A{summary_start_row + 1}'].font = Font(bold=True, color='FFFFFF')
+        ws[f'B{summary_start_row + 1}'].font = Font(bold=True, color='FFFFFF')
+        ws[f'A{summary_start_row + 1}'].fill = PatternFill(start_color=self.colors['secondary'], end_color=self.colors['secondary'], fill_type='solid')
+        ws[f'B{summary_start_row + 1}'].fill = PatternFill(start_color=self.colors['secondary'], end_color=self.colors['secondary'], fill_type='solid')
+        
+        ranked = sorted(r_squared.items(), key=lambda x: (x[1] if pd.notna(x[1]) else -1), reverse=True)
+        for i, (metric, r2) in enumerate(ranked):
+            row = summary_start_row + 2 + i
+            ws[f'A{row}'] = metric
+            ws[f'B{row}'] = round(r2, 4) if pd.notna(r2) else 'N/A'
+            if pd.notna(r2) and r2 >= 0.5:
+                ws[f'B{row}'].fill = PatternFill(start_color=self.colors['success'], end_color=self.colors['success'], fill_type='solid')
+        
+        # ---- Scatter chart + linear trendline (with R² and equation) per metric ----
+        chart_col = get_column_letter(n_cols + 3)
+        chart_row_cursor = 4
+        
+        for i in range(1, n_rows):
+            metric_name = metrics_df.index[i]
+            data_row = i + 4  # this metric's row in the sheet
+            
+            try:
+                chart = ScatterChart()
+                chart.title = f"{metric_name} vs Earnings"
+                chart.style = 13
+                chart.x_axis.title = 'Earnings (Net Income)'
+                chart.y_axis.title = str(metric_name)
+                chart.height = 8
+                chart.width = 15
+                
+                xvalues = Reference(ws, min_col=2, max_col=n_cols + 1,
+                                     min_row=earnings_row_num, max_row=earnings_row_num)
+                yvalues = Reference(ws, min_col=2, max_col=n_cols + 1,
+                                     min_row=data_row, max_row=data_row)
+                
+                series = Series(yvalues, xvalues, title=str(metric_name))
+                series.marker.symbol = 'circle'
+                series.graphicalProperties.line.noFill = True  # scatter dots only, no connecting line
+                
+                # Linear trendline showing equation and R^2 directly on the chart
+                series.trendline = Trendline(trendlineType='linear', dispRSqr=True, dispEq=True)
+                
+                chart.series.append(series)
+                
+                anchor = f'{chart_col}{chart_row_cursor}'
+                ws.add_chart(chart, anchor)
+                chart_row_cursor += 17
+            except Exception:
+                pass  # Skip chart silently if a metric can't be charted
+        
+        ws.freeze_panes = 'B4'
+    
     def _calculate_max_drawdown(self, prices):
         """Calculate maximum drawdown"""
         cumulative = (1 + prices.pct_change()).cumprod()
         running_max = cumulative.expanding().max()
         drawdown = ((cumulative - running_max) / running_max) * 100
         return drawdown.min()
+
+
+def fetch_fundamental_metrics(ticker: str, max_quarters: int = 8) -> Optional[pd.DataFrame]:
+    """
+    Build a quarterly earnings-vs-metrics table for a ticker.
+    
+    Row 0 is always 'Earnings (Net Income)'. Subsequent rows are fundamental
+    metrics computed per fiscal quarter wherever the underlying yfinance data
+    is available: quarterly-annualized P/E, EV/EBITDA, Net Margin, ROE,
+    Free Cash Flow, Revenue, Diluted EPS. Current-moment-only figures that
+    have no historical quarterly series (Forward P/E, PEG, current EV/EBITDA,
+    Price/Book) are attached as df.attrs['snapshot'] for reference, since
+    yfinance does not expose their historical values.
+    
+    Returns None if quarterly financial data isn't available for the ticker
+    (common for ETFs, indices, forex, futures, and some crypto pairs).
+    """
+    try:
+        t = yf.Ticker(ticker)
+        
+        income = getattr(t, 'quarterly_income_stmt', None)
+        if income is None or income.empty:
+            income = t.quarterly_financials
+        balance = t.quarterly_balance_sheet
+        cashflow = t.quarterly_cashflow
+        
+        try:
+            info = t.info or {}
+        except Exception:
+            info = {}
+        
+        if income is None or income.empty:
+            return None
+        
+        income = income.T.sort_index()
+        income = income.tail(max_quarters)
+        balance = balance.T.sort_index() if balance is not None and not balance.empty else pd.DataFrame()
+        cashflow = cashflow.T.sort_index() if cashflow is not None and not cashflow.empty else pd.DataFrame()
+        
+        quarters = income.index
+        
+        # Pull price history spanning the quarters, with a small buffer
+        start = (quarters.min() - pd.Timedelta(days=10)).date()
+        end = (quarters.max() + pd.Timedelta(days=10)).date()
+        try:
+            price_hist = t.history(start=start, end=end)
+        except Exception:
+            price_hist = pd.DataFrame()
+        
+        def price_near(dt):
+            if price_hist.empty:
+                return np.nan
+            try:
+                pos = price_hist.index.get_indexer([dt], method='nearest')[0]
+                return float(price_hist['Close'].iloc[pos])
+            except Exception:
+                return np.nan
+        
+        shares_out = info.get('sharesOutstanding', np.nan)
+        
+        earnings_row, eps_row, rev_row = {}, {}, {}
+        pe_row, margin_row, roe_row = {}, {}, {}
+        ev_ebitda_row, fcf_row = {}, {}
+        
+        for q in quarters:
+            row = income.loc[q]
+            net_income = row.get('Net Income', np.nan)
+            diluted_eps = row.get('Diluted EPS', np.nan)
+            total_rev = row.get('Total Revenue', np.nan)
+            ebitda = row.get('EBITDA', np.nan)
+            
+            price = price_near(q)
+            
+            earnings_row[q] = net_income
+            eps_row[q] = diluted_eps
+            rev_row[q] = total_rev
+            
+            # Rough quarterly-annualized P/E (price / (quarterly EPS * 4))
+            if pd.notna(diluted_eps) and diluted_eps != 0 and pd.notna(price):
+                pe_row[q] = price / (diluted_eps * 4)
+            else:
+                pe_row[q] = np.nan
+            
+            if pd.notna(net_income) and pd.notna(total_rev) and total_rev not in (0, np.nan):
+                margin_row[q] = (net_income / total_rev) * 100
+            else:
+                margin_row[q] = np.nan
+            
+            total_debt, cash = 0, 0
+            if q in balance.index:
+                brow = balance.loc[q]
+                equity = brow.get('Stockholders Equity', np.nan)
+                if pd.notna(equity) and equity != 0 and pd.notna(net_income):
+                    roe_row[q] = (net_income / equity) * 100
+                else:
+                    roe_row[q] = np.nan
+                total_debt = brow.get('Total Debt', 0) or 0
+                cash = brow.get('Cash And Cash Equivalents', 0) or 0
+            else:
+                roe_row[q] = np.nan
+            
+            if pd.notna(price) and pd.notna(shares_out) and pd.notna(ebitda) and ebitda not in (0, np.nan):
+                market_cap = price * shares_out
+                ev = market_cap + total_debt - cash
+                ev_ebitda_row[q] = ev / (ebitda * 4)
+            else:
+                ev_ebitda_row[q] = np.nan
+            
+            if q in cashflow.index:
+                fcf_row[q] = cashflow.loc[q].get('Free Cash Flow', np.nan)
+            else:
+                fcf_row[q] = np.nan
+        
+        col_labels = [q.strftime('%Y-%m-%d') for q in quarters]
+        
+        data = {
+            'Earnings (Net Income)': list(earnings_row.values()),
+            'Diluted EPS': list(eps_row.values()),
+            'Revenue': list(rev_row.values()),
+            'Net Margin (%)': list(margin_row.values()),
+            'P/E (qtr-annualized)': list(pe_row.values()),
+            'EV/EBITDA (qtr-annualized)': list(ev_ebitda_row.values()),
+            'ROE (%)': list(roe_row.values()),
+            'Free Cash Flow': list(fcf_row.values()),
+        }
+        
+        df = pd.DataFrame(data, index=col_labels).T
+        
+        # Snapshot-only metrics (no historical quarterly series available from yfinance)
+        def pct(x):
+            return round(x * 100, 2) if isinstance(x, (int, float)) else np.nan
+        
+        df.attrs['snapshot'] = {
+            'Trailing P/E': info.get('trailingPE'),
+            'Forward P/E': info.get('forwardPE'),
+            'PEG Ratio': info.get('pegRatio') or info.get('trailingPegRatio'),
+            'EV/EBITDA (current)': info.get('enterpriseToEbitda'),
+            'Price/Book': info.get('priceToBook'),
+            'ROE (current, %)': pct(info.get('returnOnEquity')),
+            'ROA (current, %)': pct(info.get('returnOnAssets')),
+        }
+        
+        return df
+        
+    except Exception as e:
+        st.warning(f"Could not fetch fundamental metrics for {ticker}: {e}")
+        return None
 
 
 def calculate_advanced_analytics(df: pd.DataFrame, ticker: str) -> Dict[str, pd.DataFrame]:
@@ -765,6 +1035,14 @@ def render_excel_export() -> None:
             value=False,
             help="Include drawdown analysis, volume patterns, and technical indicators (slower)"
         )
+        
+        include_earnings_metrics = st.checkbox(
+            "💰 Earnings vs Metrics Correlation",
+            value=False,
+            help="Add a tab per ticker with earnings + fundamentals (P/E, EV/EBITDA, ROE, FCF, etc.) "
+                 "and scatter charts with trendline + R² showing which metric correlates most with earnings. "
+                 "Not available for ETFs, indices, forex, or crypto (no quarterly financials)."
+        )
     
     # ── Date Range ──
     st.subheader("📅 Date Range")
@@ -850,7 +1128,9 @@ def render_excel_export() -> None:
             
             ticker_data = {}
             analysis_data = {}
+            metrics_data = {}
             failed_tickers = []
+            failed_metrics_tickers = []
             total_records = 0
             
             # Fetch data for each ticker
@@ -907,6 +1187,15 @@ def render_excel_export() -> None:
                         for key, value in ticker_analytics.items():
                             analysis_data[f"{ticker}_{key}"] = value
                     
+                    # Fetch earnings vs metrics correlation data
+                    if include_earnings_metrics:
+                        status_text.info(f"💰 Fetching fundamentals for {ticker}...")
+                        mdf = fetch_fundamental_metrics(ticker)
+                        if mdf is not None and not mdf.empty:
+                            metrics_data[ticker] = mdf
+                        else:
+                            failed_metrics_tickers.append(ticker)
+                    
                 except Exception as e:
                     failed_tickers.append((ticker, str(e)))
                     continue
@@ -945,6 +1234,12 @@ def render_excel_export() -> None:
             with st.expander(f"⚠️ {len(failed_tickers)} Failed Ticker(s) - Click to expand"):
                 for ticker, reason in failed_tickers:
                     st.write(f"• **{ticker}**: {reason}")
+        
+        if include_earnings_metrics and failed_metrics_tickers:
+            with st.expander(f"⚠️ {len(failed_metrics_tickers)} Ticker(s) without fundamentals data"):
+                st.write("No quarterly financials available (common for ETFs, indices, forex, crypto):")
+                for t in failed_metrics_tickers:
+                    st.write(f"• {t}")
         
         # ── Portfolio Analytics (for multiple tickers) ──
         if export_mode == "Portfolio Analysis" and len(ticker_data) > 1:
@@ -995,6 +1290,23 @@ def render_excel_export() -> None:
                 with col2:
                     worst_performer = portfolio_df.loc[portfolio_df['Total Return (%)'].idxmin()]
                     st.error(f"📉 **Worst Performer**: {worst_performer['Ticker']} ({worst_performer['Total Return (%)']:+.2f}%)")
+        
+        # ── Earnings vs Metrics Preview ──
+        if include_earnings_metrics and metrics_data:
+            st.divider()
+            st.markdown("### 💰 Earnings vs Metrics Preview")
+            
+            preview_metrics_ticker = st.selectbox(
+                "Select ticker to preview fundamentals:",
+                options=list(metrics_data.keys()),
+                key="metrics_preview_select"
+            )
+            if preview_metrics_ticker:
+                st.dataframe(metrics_data[preview_metrics_ticker], use_container_width=True)
+                snapshot = metrics_data[preview_metrics_ticker].attrs.get('snapshot', {})
+                if snapshot:
+                    st.caption("Current snapshot metrics (no historical series available from yfinance):")
+                    st.write(snapshot)
         
         # ── Data Preview ──
         st.divider()
@@ -1050,7 +1362,8 @@ def render_excel_export() -> None:
                 ticker_data=ticker_data,
                 analysis_data=analysis_data if include_analytics else None,
                 metadata=metadata,
-                include_charts=include_charts and OPENPYXL_AVAILABLE
+                include_charts=include_charts and OPENPYXL_AVAILABLE,
+                metrics_data=metrics_data if include_earnings_metrics else None
             )
         
         # Generate filename
@@ -1071,7 +1384,8 @@ def render_excel_export() -> None:
         )
         
         # File details
-        total_sheets = 1 + len(ticker_data) + len(analysis_data) + (1 if len(ticker_data) > 1 else 0)  # Summary + Prices + Analysis + Comparison
+        n_metrics_sheets = len(metrics_data) if include_earnings_metrics else 0
+        total_sheets = 1 + len(ticker_data) + len(analysis_data) + (1 if len(ticker_data) > 1 else 0) + n_metrics_sheets
         
         st.success(f"✅ Excel file ready for download!")
         
@@ -1098,6 +1412,12 @@ def render_excel_export() -> None:
             
             if len(ticker_data) > 1:
                 sheets_list.append(f"{sheet_num}. **Comparison** - Multi-ticker performance comparison")
+                sheet_num += 1
+            
+            if include_earnings_metrics:
+                for ticker in metrics_data.keys():
+                    sheets_list.append(f"{sheet_num}. **{ticker}_Earnings_Metrics** - Earnings vs fundamentals with R² correlation charts")
+                    sheet_num += 1
             
             for sheet_desc in sheets_list:
                 st.markdown(sheet_desc)
