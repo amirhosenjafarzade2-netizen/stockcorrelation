@@ -60,39 +60,60 @@ class ExcelExporter:
             BytesIO buffer with Excel file
         """
         output = BytesIO()
+        section_errors = []
         
-        try:
-            with pd.ExcelWriter(output, engine='openpyxl') as writer:
-                # 1. Summary Sheet
-                if metadata:
+        # NOTE: each sheet is now built inside its own try/except. A failure in
+        # one sheet (e.g. a chart error) no longer discards every other sheet.
+        # Previously this whole method was wrapped in a single try/except that
+        # silently fell back to a bare-bones workbook (no charts, no comparison
+        # sheet, and no earnings/metrics tab at all) the instant ANY sheet raised
+        # anything — that was why the earnings/metrics tab could disappear with
+        # no visible error.
+        with pd.ExcelWriter(output, engine='openpyxl') as writer:
+            # 1. Summary Sheet
+            if metadata:
+                try:
                     self._create_summary_sheet(writer, metadata, ticker_data)
-                
-                # 2. Price Data Sheets (one per ticker)
-                for ticker, df in ticker_data.items():
+                except Exception as e:
+                    section_errors.append(f"Summary sheet: {e}")
+            
+            # 2. Price Data Sheets (one per ticker)
+            for ticker, df in ticker_data.items():
+                try:
                     self._create_price_sheet(writer, ticker, df, include_charts)
-                
-                # 3. Analysis Sheets
-                if analysis_data:
-                    for sheet_name, df in analysis_data.items():
+                except Exception as e:
+                    section_errors.append(f"{ticker} price sheet: {e}")
+            
+            # 3. Analysis Sheets
+            if analysis_data:
+                for sheet_name, df in analysis_data.items():
+                    try:
                         self._create_analysis_sheet(writer, sheet_name, df)
-                
-                # 4. Comparison Sheet (if multiple tickers)
-                if len(ticker_data) > 1:
+                    except Exception as e:
+                        section_errors.append(f"{sheet_name} analysis sheet: {e}")
+            
+            # 4. Comparison Sheet (if multiple tickers)
+            if len(ticker_data) > 1:
+                try:
                     self._create_comparison_sheet(writer, ticker_data, metadata)
-                
-                # 5. Earnings vs Metrics Correlation Sheets
-                if metrics_data:
-                    for ticker, mdf in metrics_data.items():
-                        if mdf is not None and not mdf.empty:
+                except Exception as e:
+                    section_errors.append(f"Comparison sheet: {e}")
+            
+            # 5. Earnings vs Metrics Correlation Sheets
+            if metrics_data:
+                for ticker, mdf in metrics_data.items():
+                    if mdf is not None and not mdf.empty:
+                        try:
                             self._create_metrics_correlation_sheet(writer, ticker, mdf)
-            
-            output.seek(0)
-            return output
-            
-        except Exception as e:
-            st.error(f"Error creating Excel workbook: {str(e)}")
-            # Fallback to basic Excel export
-            return self._create_basic_workbook(ticker_data, analysis_data, metadata)
+                        except Exception as e:
+                            section_errors.append(f"{ticker} earnings/metrics sheet: {e}")
+        
+        if section_errors:
+            for err in section_errors:
+                st.warning(f"⚠️ Issue while building workbook — {err}")
+        
+        output.seek(0)
+        return output
     
     def _create_basic_workbook(self, ticker_data, analysis_data, metadata):
         """Fallback basic Excel creation without advanced formatting"""
@@ -532,6 +553,22 @@ class ExcelExporter:
         return drawdown.min()
 
 
+def _pick_field(row: pd.Series, candidates: List[str]):
+    """
+    Return the first present, non-null value among several possible yfinance
+    row-label spellings. yfinance's exact labels for the same line item vary
+    across versions and tickers (e.g. 'Net Income' vs 'Net Income Common
+    Stockholders'), so a single hardcoded key silently returns NaN for many
+    tickers even though the data actually exists under a different label.
+    """
+    for name in candidates:
+        if name in row.index:
+            val = row.get(name)
+            if pd.notna(val):
+                return val
+    return np.nan
+
+
 def fetch_fundamental_metrics(ticker: str, max_quarters: int = 8) -> Optional[pd.DataFrame]:
     """
     Build a quarterly earnings-vs-metrics table for a ticker.
@@ -562,6 +599,8 @@ def fetch_fundamental_metrics(ticker: str, max_quarters: int = 8) -> Optional[pd
             info = {}
         
         if income is None or income.empty:
+            st.warning(f"⚠️ {ticker}: no quarterly financials returned by yfinance — "
+                       f"skipping the earnings/metrics tab for this ticker.")
             return None
         
         income = income.T.sort_index()
@@ -596,10 +635,11 @@ def fetch_fundamental_metrics(ticker: str, max_quarters: int = 8) -> Optional[pd
         
         for q in quarters:
             row = income.loc[q]
-            net_income = row.get('Net Income', np.nan)
-            diluted_eps = row.get('Diluted EPS', np.nan)
-            total_rev = row.get('Total Revenue', np.nan)
-            ebitda = row.get('EBITDA', np.nan)
+            net_income = _pick_field(row, ['Net Income', 'Net Income Common Stockholders',
+                                            'Net Income Continuous Operations', 'Net Income Including Noncontrolling Interests'])
+            diluted_eps = _pick_field(row, ['Diluted EPS', 'Basic EPS'])
+            total_rev = _pick_field(row, ['Total Revenue', 'Operating Revenue'])
+            ebitda = _pick_field(row, ['EBITDA', 'Normalized EBITDA'])
             
             price = price_near(q)
             
@@ -621,13 +661,13 @@ def fetch_fundamental_metrics(ticker: str, max_quarters: int = 8) -> Optional[pd
             total_debt, cash = 0, 0
             if q in balance.index:
                 brow = balance.loc[q]
-                equity = brow.get('Stockholders Equity', np.nan)
+                equity = _pick_field(brow, ['Stockholders Equity', 'Total Equity Gross Minority Interest', 'Common Stock Equity'])
                 if pd.notna(equity) and equity != 0 and pd.notna(net_income):
                     roe_row[q] = (net_income / equity) * 100
                 else:
                     roe_row[q] = np.nan
-                total_debt = brow.get('Total Debt', 0) or 0
-                cash = brow.get('Cash And Cash Equivalents', 0) or 0
+                total_debt = _pick_field(brow, ['Total Debt', 'Net Debt']) or 0
+                cash = _pick_field(brow, ['Cash And Cash Equivalents', 'Cash Cash Equivalents And Short Term Investments']) or 0
             else:
                 roe_row[q] = np.nan
             
@@ -639,7 +679,15 @@ def fetch_fundamental_metrics(ticker: str, max_quarters: int = 8) -> Optional[pd
                 ev_ebitda_row[q] = np.nan
             
             if q in cashflow.index:
-                fcf_row[q] = cashflow.loc[q].get('Free Cash Flow', np.nan)
+                crow = cashflow.loc[q]
+                fcf = _pick_field(crow, ['Free Cash Flow'])
+                if pd.isna(fcf):
+                    # Fall back to Operating Cash Flow + CapEx (CapEx is reported negative)
+                    ocf = _pick_field(crow, ['Operating Cash Flow', 'Cash Flow From Continuing Operating Activities'])
+                    capex = _pick_field(crow, ['Capital Expenditure', 'Capital Expenditure Reported'])
+                    if pd.notna(ocf) and pd.notna(capex):
+                        fcf = ocf + capex
+                fcf_row[q] = fcf
             else:
                 fcf_row[q] = np.nan
         
