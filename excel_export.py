@@ -1086,12 +1086,13 @@ def render_excel_export() -> None:
         
         include_earnings_metrics = st.checkbox(
             "💰 Earnings vs Metrics Correlation",
-            value=False,
+            value=True,
             help="Add a tab per ticker with earnings + fundamentals (P/E, EV/EBITDA, ROE, FCF, etc.) "
                  "and scatter charts with trendline + R² showing which metric correlates most with earnings. "
                  "Not available for ETFs, indices, forex, or crypto (no quarterly financials)."
         )
     
+        st.caption("💡 The Earnings vs Metrics tab is ON by default — untick above if you don't want it.")
     # ── Date Range ──
     st.subheader("📅 Date Range")
     col1, col2, col3 = st.columns(3)
@@ -1283,11 +1284,23 @@ def render_excel_export() -> None:
                 for ticker, reason in failed_tickers:
                     st.write(f"• **{ticker}**: {reason}")
         
-        if include_earnings_metrics and failed_metrics_tickers:
-            with st.expander(f"⚠️ {len(failed_metrics_tickers)} Ticker(s) without fundamentals data"):
-                st.write("No quarterly financials available (common for ETFs, indices, forex, crypto):")
-                for t in failed_metrics_tickers:
-                    st.write(f"• {t}")
+        # ── Earnings/Metrics feature diagnostics — always shown when the toggle is on,
+        #    so a missing tab is never a silent mystery.
+        if include_earnings_metrics:
+            st.divider()
+            if metrics_data:
+                st.success(f"💰 Earnings/Metrics tab: built for {len(metrics_data)} of {len(ticker_data)} ticker(s) "
+                           f"→ look for sheets named **TICKER_Earnings_Metrics** in the downloaded file.")
+            else:
+                st.error("💰 Earnings/Metrics tab: **not created for any ticker.** "
+                         "yfinance returned no usable quarterly financials for every ticker you entered "
+                         "(this is normal for ETFs, indices, forex pairs, futures, and most crypto — "
+                         "it only works for individual stocks that report quarterly earnings).")
+            if failed_metrics_tickers:
+                with st.expander(f"⚠️ {len(failed_metrics_tickers)} Ticker(s) without fundamentals data"):
+                    st.write("No usable quarterly financials from yfinance for:")
+                    for t in failed_metrics_tickers:
+                        st.write(f"• {t}")
         
         # ── Portfolio Analytics (for multiple tickers) ──
         if export_mode == "Portfolio Analysis" and len(ticker_data) > 1:
